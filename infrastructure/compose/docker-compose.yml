@@ -11,9 +11,11 @@
 #   - every image is pinned by multi-arch index digest; no `latest`, no bare tags
 #   - containers run as a non-root user wherever the base image permits (see the
 #     per-service notes; postgres and redis are the two that cannot, and why)
-#   - no service reaches an external inference API; the model endpoints in .env.example
-#     are blank and the control API rejects a hosted-provider host at startup
-#     (contracts.checks.check_model_endpoints, owned by the backend developer)
+#   - C4: nginx is the ONLY container attached to a network with a gateway. Nothing else
+#     in this stack can reach anything off the host — not an inference API, not the cloud
+#     metadata endpoint, not the internet. This is enforced by the network, not by a
+#     validated base URL, because a validated base URL accepts http://169.254.169.254/.
+#     Asserted by infrastructure/scripts/egress-test.sh.
 
 name: brahmadatta
 
@@ -58,7 +60,11 @@ services:
       - ./nginx/certs:/etc/nginx/certs:ro
       - nginx-logs:/var/log/nginx
     networks:
-      - edge
+      # The ONLY service on `external`, and therefore the only container in the stack with
+      # a route off the host. See the comment on the networks: block (C4).
+      - external
+      - api      # nginx <-> control-api, and nothing else is on it
+      - edge     # nginx <-> the Astro dev server, and nothing else is on it
     depends_on:
       control-api:
         condition: service_started
@@ -100,7 +106,9 @@ services:
       # Keep the host's macOS/arm .venv out of the container; /opt/venv is the real one.
       - /app/.venv
     networks:
-      - edge
+      # `api`, NOT `edge`. control-api shares a network with nginx and with nothing else.
+      # See the networks: block — this is the fix for the Critical in the security review.
+      - api
       - backend
     depends_on:
       db:
@@ -118,7 +126,29 @@ services:
   #
   # UNVERIFIED as of D1: apps/command-center/ does not exist yet. dev-up.sh refuses to
   # start rather than letting Docker create the directory as root.
+  #
+  # C4 detail: dependency installation is split into its own short-lived service below,
+  # because `npm ci` needs the registry and the long-running dev server must not have a
+  # route off the host. The installer holds no repository content and exits before the
+  # dev server starts.
   # ---------------------------------------------------------------------------
+  command-center-deps:
+    image: node@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af
+    container_name: brahmadatta-command-center-deps
+    <<: *hardening
+    user: "1000:1000"
+    working_dir: /app
+    environment:
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    command: ["npm", "ci", "--no-audit", "--no-fund"]
+    volumes:
+      - ../../apps/command-center:/app
+      - command-center-node-modules:/app/node_modules
+    networks:
+      # Egress to the npm registry, and nothing else on this network.
+      - external
+    restart: "no"
+
   command-center:
     image: node@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af
     container_name: brahmadatta-command-center
@@ -132,13 +162,17 @@ services:
       # Public API origin as the BROWSER sees it — through nginx, not the service name.
       PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-https://localhost:8443}
       NPM_CONFIG_UPDATE_NOTIFIER: "false"
-    command: >
-      sh -c "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 4321"
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "4321"]
     volumes:
       - ../../apps/command-center:/app
       - command-center-node-modules:/app/node_modules
     networks:
+      # No `external`. If a dependency is missing, the fix is to re-run
+      # command-center-deps, not to give the dev server a route out.
       - edge
+    depends_on:
+      command-center-deps:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -238,14 +272,40 @@ services:
     restart: unless-stopped
 
 networks:
-  # Everything the ingress needs to reach.
-  edge:
+  # C4: nginx is THE ONLY container attached to a network with a gateway.
+  #
+  # The product's hardest invariant is that repository content never reaches an external
+  # inference API. Before this change that was enforced over *configuration* — a validated
+  # base URL checked at startup — which `http://169.254.169.254/` passes, and which is the
+  # cloud metadata endpoint on a rented VM. Configuration is not a boundary. The network is.
+  #
+  # So: every container that can hold a repository snapshot or assemble a prompt —
+  # control-api, worker, and later the orchestrator and the model host — is on
+  # `internal: true` networks only, and has no route off the host at any layer.
+  # `internal: true` blocks egress, not ingress, so nginx still reaches them fine.
+  #
+  # infrastructure/scripts/egress-test.sh is the assertion, and it fails the moment
+  # someone adds a second service to this network to make something work.
+  external:
     driver: bridge
 
-  # internal: true means no gateway is attached, so db and redis — which are on this
-  # network only — have no route off the host at all. control-api sits on both networks
-  # and therefore still has egress; the hard egress denial that matters is the target
-  # sandbox's, which is D2 work (issue #14), not this file's.
+  # nginx <-> control-api. No gateway, and no third member.
+  #
+  # This is a separate network from `edge` rather than one shared "ingress" network,
+  # because the two have different blast radii. If someone ever needs to give the Astro dev
+  # server a route out to make something work, that must not silently hand egress to the
+  # process holding repository snapshots and operator credentials. Separate networks make
+  # that a deliberate act instead of a side effect.
+  api:
+    driver: bridge
+    internal: true
+
+  # nginx <-> the Astro dev server. No gateway.
+  edge:
+    driver: bridge
+    internal: true
+
+  # Application <-> data. No gateway.
   backend:
     driver: bridge
     internal: true

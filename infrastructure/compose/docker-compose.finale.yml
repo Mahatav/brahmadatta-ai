@@ -19,6 +19,8 @@
 #   5. UVICORN_FORWARDED_ALLOW_IPS is the edge subnet, not "*"
 #   6. no port is published except through nginx, and nginx binds all interfaces
 #      (the finale demo is watched from another machine)
+#   7. no Astro dependency-installer service — the finale has no npm step at all, so this
+#      stack satisfies C4 with no exception whatsoever
 #
 # UNVERIFIED as of D1: this file has never been brought up. apps/command-center/ does not
 # exist, so `dist/` does not exist, so nginx has nothing to serve. `docker compose config`
@@ -69,7 +71,10 @@ services:
       - ./certbot-webroot:/var/www/certbot:ro
       - nginx-logs:/var/log/nginx
     networks:
-      - edge
+      # C4: the only service on `external`, and therefore the only container in this stack
+      # with a route off the host.
+      - external
+      - api
     depends_on:
       control-api:
         condition: service_started
@@ -106,12 +111,24 @@ services:
       # Trust proxy headers only from the compose edge subnet. "*" here would let anything
       # that can reach the container claim X-Forwarded-Proto: https.
       UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_FORWARDED_ALLOW_IPS:-172.31.0.0/24}
+      # Persistent database connections are THREAD-LOCAL under ASGI. A held SSE stream
+      # occupies a thread for the life of the connection, and with CONN_MAX_AGE > 0 that
+      # thread's Postgres connection is pinned idle alongside it. Five operator tabs on a
+      # long mission is five idle connections doing nothing but consuming a slot.
+      #
+      # The AUTHORITATIVE setting is `CONN_MAX_AGE: 0` in
+      # apps/control-api/config/settings/finale.py, asserted by
+      # tests/architecture/test_ingress_contract.py. This variable mirrors it so the value
+      # is visible where the deployment is described, and so a future settings module that
+      # does read it from the environment gets the right answer.
+      CONN_MAX_AGE: "0"
     volumes:
       - django-static:/app/staticfiles
       # Evidence artifacts survive a container replacement.
       - evidence:/var/lib/brahmadatta/evidence
     networks:
-      - edge
+      # `api`, NOT a shared ingress network. nginx is the only other member.
+      - api
       - backend
     depends_on:
       db:
@@ -193,12 +210,22 @@ services:
     restart: unless-stopped
 
 networks:
-  edge:
+  # C4: only nginx sits here, and only this network has a gateway. Everything that can hold
+  # a repository snapshot or assemble a prompt is on `edge`/`backend`, both internal, and
+  # has no route off the host at any layer. See the same block in docker-compose.yml.
+  external:
     driver: bridge
+
+  # nginx <-> control-api. No gateway, no third member. There is no `edge` network in the
+  # finale stack at all, because there is no Astro dev server to put on it.
+  api:
+    driver: bridge
+    internal: true
     ipam:
       config:
         # Fixed subnet so UVICORN_FORWARDED_ALLOW_IPS can name it instead of "*".
         - subnet: 172.31.0.0/24
+
   backend:
     driver: bridge
     internal: true
