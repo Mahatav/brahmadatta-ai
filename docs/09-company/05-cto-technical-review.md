@@ -9,6 +9,32 @@
 | Reviewing | D-013, D-014, D-015; the D1–D7 critical path; the #6 contract seam; the two hard invariants |
 | Supersedes | Nothing. `.project/decisions.md` is untouched — the orchestrator folds these records in. |
 
+---
+
+## ⚠ Errata — the `D-0xx` numbers in this document are proposals, not canonical
+
+This review **proposed** three new decision records and numbered them D-019, D-020 and D-021.
+By the time they were appended to [`.project/decisions.md`](../../.project/decisions.md), the
+`ui-ux-designer` seat had already taken D-019 through D-023, so the CTO's records landed further
+down. **Following a `D-0xx` reference from this document into the canonical log lands on an
+unrelated decision.**
+
+| Proposed here | In the canonical log | Note |
+|---|---|---|
+| D-019 — queue: no Redis, no Celery | **D-024** — Postgres `SELECT … FOR UPDATE SKIP LOCKED`, no broker | Ratified. |
+| D-020 — model gateway replay mode | **no canonical record** | It exists as issue **#82** and inside the batched contract change. This is the gap most likely to bite: `10-fallback-ladder.md` and #82 both lean on it. |
+| D-021 — two event channels | **withdrawn** | The CTO withdrew it on the second ruling round in favour of throttling at source. Do not implement it. |
+| D-028 (referenced) | **D-028** — no process holding repository content has a route to the internet | Coincidentally correct; the number matches. |
+
+Everything numbered **C1 … C9** in this document is a *condition*, not a decision record, and
+those numbers are stable. Two ruling rounds exist and both use `C1 … C9` — the second round is
+a review comment on PR #79, not in this file. QA hit this in round 1 and correctly tested the
+substance rather than the labels.
+
+Found by the `competition-strategist` seat while writing the fallback ladder. Recorded as an
+errata rather than by renumbering, which is the precedent this project has set three times —
+prior documents are left intact and corrections are appended.
+
 ## Standing and scope
 
 Phase 1 closed **CONDITIONAL GO** and the orchestrator went straight to implementation
