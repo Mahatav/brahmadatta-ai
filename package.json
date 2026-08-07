@@ -1,0 +1,22 @@
+{
+  "name": "brahmadatta-ai-tooling",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Repository-root JavaScript/TypeScript tooling. Application dependencies live in apps/command-center/package.json, which this file deliberately does not own.",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "lint": "eslint . --no-error-on-unmatched-pattern",
+    "lint:fix": "eslint . --fix --no-error-on-unmatched-pattern",
+    "typecheck": "node infrastructure/scripts/astro-check.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.8.0",
+    "eslint-plugin-astro": "3.1.0",
+    "globals": "17.9.0",
+    "typescript-eslint": "8.66.0"
+  }
+}

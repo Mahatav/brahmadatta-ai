@@ -13,7 +13,7 @@ no idea why.
 
 ## The clock
 
-| | Kelowna (PDT, UTC−7) | India (IST, UTC+5:30) |
+| | Mahatav — Kelowna (PDT, UTC−7) | Raunak — India (IST, UTC+5:30) |
 |---|---|---|
 | Shift start | 09:00 | 09:00 |
 | Shift end | 18:00 | 18:00 |
@@ -23,12 +23,15 @@ The shifts do not overlap. India's working day happens during Kelowna's night, a
 finishes about three and a half hours before Kelowna starts. That is the good case — it means
 handoffs are fresh, not stale.
 
+One shared timeline, read against whichever clock is yours. Each band is that person's
+09:00–18:00 on their own row.
+
 ```
-PDT   06 ─ 09 ─ 12 ─ 15 ─ 18 ─ 21 ─ 00 ─ 03 ─ 06
-      ░░░░│███ KELOWNA ███│░░░░│███ INDIA ███│░░
-IST   18 ─ 21 ─ 00 ─ 03 ─ 06 ─ 09 ─ 12 ─ 15 ─ 18
-              ▲                      ▲
-        handoff → India        handoff → Kelowna
+Kelowna (PDT)   06    09    12    15    18    21    00    03    06
+                      ├──── MAHATAV ────┤     ├──── RAUNAK ─────┤
+India   (IST)   18    21    00    03    06    09    12    15    18
+                                        ▲                       ▲
+                              handoff → Raunak    handoff → Mahatav
 ```
 
 **Daily sync, if you want a live one:** India 09:00–09:30 IST = Kelowna 20:30–21:00 PDT.
@@ -51,7 +54,7 @@ Next step: <the one thing you'd do first tomorrow>
 Running: <any long job left executing, and where its output lands>
 ```
 
-Then relabel: `handoff:to-india` or `handoff:to-kelowna`.
+Then relabel: `handoff:to-raunak` or `handoff:to-mahatav`.
 
 Starting your shift: read every issue carrying a handoff label pointed at you, before opening
 an editor.
@@ -66,8 +69,8 @@ agreement.
 
 | | Owns |
 |---|---|
-| **Kelowna** | Command Center UI, control API surface, evidence records and reports, competition materials |
-| **India** | Orchestrator state machine, sandbox, C/C++ toolchain adapter, fuzzing, model gateway |
+| **Mahatav** (Kelowna) | Command Center UI, control API surface, evidence records and reports, competition materials |
+| **Raunak** (India) | Orchestrator state machine, sandbox, C/C++ toolchain adapter, fuzzing, model gateway |
 
 This is a starting assumption, not a verdict — it was assigned from the architecture's
 dependency seam, not from either person's actual strengths. If it is wrong, swap the
@@ -84,8 +87,22 @@ regression sweep, a GPU spike.
 
 The pattern worth building the habit around: end your shift by *starting* one of those and
 writing down where the output lands. The other person reads the result at the top of theirs.
-Issues where this applies carry `handoff:to-india` / `handoff:to-kelowna` from the moment they
+Issues where this applies carry `handoff:to-raunak` / `handoff:to-mahatav` from the moment they
 are created, not as an afterthought.
+
+**The trap in this, which is not symmetric.** Nearly every long-running job in this project —
+fuzz campaigns, the model fetch, the ten-attempt patch generation run — sits in Raunak's lane.
+So Raunak starts one at 18:00 IST and Mahatav opens it three and a half hours later. If it
+*worked*, fine. If it *failed*, Mahatav can read the failure but cannot act on it, because it is
+not his lane — so the job does not restart until Raunak returns. **A failed overnight job costs
+24 hours, not 12.**
+
+The fix is cheap, and it is the whole reason this section exists: when you start a long job, the
+handoff comment must also say **what to check, and what to do if it failed** — enough that the
+other person can relaunch it blind. They do not need to understand the job. They need to be able
+to restart it and let it run through their shift.
+
+Same discipline in the other direction whenever a long job lands in Mahatav's lane.
 
 ## Rules that keep this from going wrong
 
@@ -102,3 +119,21 @@ are created, not as an afterthought.
    to extend.
 5. **Anything labelled `needs:ceo` stops being worked on.** Do not guess and proceed on a
    decision only Mahatav can make; it goes in the next escalation batch.
+6. **Never add a database migration without saying so in the daily handoff.** Two people adding
+   models on the same day fork the migration graph, and with no overlapping hours nobody finds
+   out for twelve. If you are about to generate one, say so; if you read that the other person
+   did, pull before you generate yours.
+
+## The files that cannot be touched in parallel
+
+`parallel-safe` on an issue is a claim, and the claim is only true if the two issues share no
+files. These are the known collision points — if your work touches one, it is not parallel-safe
+regardless of the label:
+
+`packages/schemas/**` · Django settings · API router registration · `**/migrations/**` ·
+`infrastructure/compose/**` and the nginx config · `packages/ui-components/tokens.css` ·
+`demo/repositories/**` · `.project/decisions.md`
+
+The migration one is the expensive one. The decisions log is the annoying one — it is
+append-only, so a collision is a trivial merge, but it happens constantly when several people
+or agents are recording decisions at once.

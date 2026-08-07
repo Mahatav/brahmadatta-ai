@@ -1,0 +1,13 @@
+# Ignore list for the command-center build context (apps/command-center/).
+node_modules/
+dist/
+.astro/
+.vite/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
