@@ -569,3 +569,346 @@ hairline chakra engraving with ASCII-density shading rather than a glowing progr
 non-figural rule from D-017 stands unchanged.
 
 **Final approval authority** — CEO. Decided.
+
+---
+
+*Numbering note: D-019 … D-023 are reserved for the `ui-ux-designer` seat, whose records are
+on `feat/design-system` and not yet merged. The CTO records continue from D-024 to avoid a
+collision. If both branches land, both blocks are kept in numeric order — neither replaces
+the other.*
+
+---
+
+## D-024 · Job queue is Postgres `SELECT … FOR UPDATE SKIP LOCKED`; no broker · 2026-08-07 · CTO
+
+**Decision** — The job queue is a `job` table claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
+Redis, RQ and Celery are not used. `orchestrator` and `worker` remain **separate processes**.
+This closes P2-12, which `docs/09-company/01-vision-and-p0-cut.md` §2 explicitly left open and
+marked "CTO owns this call". Proposed as DR-A in
+`docs/09-company/06-architecture-spec.md` §7 by the `software-architect` seat; ratified here.
+
+**Correction to prior work.** This **supersedes the in-process-queue half** of
+`docs/09-company/05-cto-technical-review.md` §1 C8, which said "single supervised orchestrator
+process with an in-process work queue". That call was made without §3.3 of the architecture
+spec in front of me and it was worse. The conclusion on Redis/Celery is unchanged; the
+mechanism for the durable half is not. Appended as a correction rather than an edit, per the
+log's own rule.
+
+**Options considered** — (a) Redis + RQ, per `17-technology-stack-document.md`; (b) Celery on
+Redis; (c) Postgres `SKIP LOCKED` with a persisted job table; (d) in-process queue, no
+persistence.
+
+**Pros and cons** — (a) and (b) are what the pack specifies and what a larger system wants:
+mature retry and visibility tooling. Here they cost a fifth process, a second place mission
+state can live, and a failure mode to debug on a night shift; Celery's worker-pool model is
+also a poor fit for jobs measured in tens of minutes. (c) is roughly eighty lines including
+the reaper, is correct with two workers, is durable across restart for free, and keeps the
+count of stateful dependencies at one. (d) — my earlier call — loses a 40-minute fuzz campaign
+on any restart, and `02-two-person-24h-cycle.md` deliberately starts long jobs at the end of a
+shift. Losing overnight work is the single most expensive failure available on a seven-day
+clock, and (d) makes it a routine consequence of a code reload.
+
+**Cost implications** — removes a process and its image from compose. Zero spend either way.
+
+**Security implications** — mildly positive: one fewer network service, one fewer credential,
+one fewer port on the internal network.
+
+**Scalability implications** — `SKIP LOCKED` is comfortable to a few hundred jobs per second,
+several orders of magnitude past one mission at a time. A post-competition product with
+concurrent missions revisits this; nothing in the design prevents it.
+
+**Recommendation** — adopt (c). No Redis client is installed in `apps/control-api/.venv`
+today, so this is the cheapest moment it will ever be to decide it.
+
+**Condition (C7 on PR #79).** With both the orchestrator and the worker writing events, the
+gap-free per-mission `sequence` must be allocated inside the same transaction that holds
+`SELECT … FOR UPDATE` on the mission row — the pattern §2.6 already prescribes for
+transitions. Two writers and an unlocked `max(sequence)+1` is a correctness bug, not a
+performance one. Acceptance criterion on #12 and #13.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-025 · Artifacts are content-addressed on a local encrypted volume, not object storage · 2026-08-07 · CTO
+
+**Decision** — Artifacts live at `ARTIFACT_ROOT/<sha256[0:2]>/<sha256>`, mode 0600, on the
+host's encrypted volume. No S3-compatible service. The exported bundle carries a
+`manifest.json` of every file's sha256. Proposed as DR-B; ratified with a wording condition.
+
+**Options considered** — (a) encrypted S3-compatible object storage per
+`17-technology-stack-document.md`; (b) local content-addressed store on an encrypted volume;
+(c) local store with UUID filenames.
+
+**Pros and cons** — (a) is right for a deployed product and wrong for a seven-day
+single-machine build: a service to run, credentials to manage and leak, and signed-URL
+plumbing for a UI with one user on the same host. (b) gives deduplication, integrity checking
+and tamper-evidence for free. (c) is simpler and surrenders the integrity property that makes
+the evidence bundle defensible at all.
+
+**Cost implications** — zero, and it removes a service.
+
+**Security implications** — content addressing makes post-hoc alteration of evidence
+*detectable*, which is the property a competition audit trail needs. The trade is that
+"encrypted at rest" becomes a property of the host volume rather than of an object store, so
+it must be **verified** on the #53 checklist rather than assumed.
+
+**Scalability implications** — none at this size. Swapping the backing store later touches one
+module, because everything above it references artifacts by hash.
+
+**Condition (C8 on PR #79) — the claim must not be inflated.** DR-B argues the manifest
+"recovers most of what P2-8 (signed bundles) would have bought". It recovers **integrity**,
+not **authenticity**: nothing prevents regenerating both an artifact and its manifest. The
+architecture spec §8.13 currently says "signed-by-hash", and a hash is not a signature.
+Judge-facing wording is **"hash-manifested, tamper-evident against the manifest supplied with
+the bundle"** — never "signed", never "tamper-proof". This is the same discipline as D-010.
+
+**Final approval authority** — CTO (technical); **`cybersecurity` holds a veto** on the
+encryption-at-rest claim, and it is a checked item on #53, not an assumption.
+
+---
+
+## D-026 · The `services/` decomposition collapses into modules inside the Django project · 2026-08-07 · CTO
+
+**Decision** — `model-gateway`, `evidence-builder` and `telemetry` become Python packages
+inside `apps/control-api/`, not separate services. Six worker binaries become one worker
+process with a `JobKind` dispatch table. Fifteen deployable units become four. `orchestrator`
+and `worker` stay separate processes. Proposed as DR-C; ratified.
+
+**Options considered** — (a) build the pack's decomposition as drawn; (b) collapse to modules,
+keeping orchestrator and worker as processes; (c) collapse everything including the worker
+into the ASGI process.
+
+**Pros and cons** — (a) is defensible for a team of ten and a multi-tenant product; at one
+concurrent mission it is thirteen extra processes to start, health-check, network and debug on
+a night shift. Decisively, it makes the model gateway a **second process that must both hold
+repository context and reach a model** — one more egress-capable node to secure, for no
+benefit. That is the argument that carries this, and it is a security argument, not a
+convenience one. (b) keeps every boundary that matters as a process boundary and demotes the
+rest to module boundaries a test can enforce. (c) puts a 40-minute fuzz campaign in the same
+process as the SSE fan-out and lets a `runserver` reload kill a running mission; rejected.
+
+**Cost implications** — materially lower: fewer images, less compose, one migration history.
+
+**Security implications** — positive. Fewer processes with network access, and one enforcement
+point for the inference-client rule instead of a service boundary that must be independently
+secured. The counter-argument — a service boundary isolates more strongly than a module
+boundary — is real, and is answered by the fact that the boundary actually carrying the risk,
+untrusted target code, **stays** a process and container boundary: the sandbox.
+
+**Scalability implications** — the decomposition can be restored later without changing a
+contract, because the module interfaces are the same functions a service would expose.
+
+**Condition (C9 on PR #79).** "Modules, not services" degrades into one mud ball in seven days
+unless the boundary is mechanical — and the reversibility claim above goes with it. An
+import-direction test ships alongside the single-inference-client test: `contracts/` imports
+nothing from `orchestrator/`, `gateway/` or `evidence/`; `gateway/` imports nothing from
+`orchestrator/`. One test, and it is what makes this decision reversible rather than merely
+asserted.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-027 · Two patch candidates by fan-out, with a frozen candidate set and a disclosed denominator · 2026-08-07 · CTO
+
+**Decision** — The `PATCH` stage produces a *set* of `PatchCandidate` rows and the `VERIFY`
+stage produces one `VerificationRecord` per policy-passing candidate. The state list stays
+linear; no `VERIFY → PATCH` loop is added. The mission's terminal state is derived from the
+candidate set by `derive_mission_outcome`. Ruling on architecture spec §8.1 / §2.3.
+
+**Why this needed deciding at all.** The D6 kill criterion and #45 require *one `Verified` and
+one `Rejected` verdict from a single operator action* — the entire differentiator per §1 of the
+P0 cut. `PATCH → VERIFY → EXPORTING` is a single pass over a single candidate, so the headline
+claim of the entry was **not expressible in the spine meant to carry it**, and #12 was one day
+from being built that way. Found by the `software-architect` seat; missed by the CTO review.
+
+**Options considered** — (a) add `VERIFY → PATCH` with a bounded iteration counter; (b) fan
+out inside the stage over a set of candidates.
+
+**Pros and cons** — (a) keeps one candidate in flight at a time but turns a linear timeline
+cyclic: the Command Center's stage timeline (P0-13) has to render "PATCH (2nd time)", the event
+`sequence` stops mapping onto monotone progress, and "which pass are we in" becomes a second
+piece of persisted state. (b) is entirely data — `Mission → * PatchCandidate → *
+VerificationRecord` — which `contracts/schemas/evidence.py` already expresses as lists on
+`EvidenceBundle`, and it gives the ten-attempt generation run somewhere to live for free.
+
+**The decisive argument, which is a security one.** A `VERIFY → PATCH` loop is one refactor
+from *generate-until-pass*: once a `REJECTED` verdict can cause new generation, the natural
+next commit keeps generating until something passes, producing a system that optimises toward
+a passing gate rather than a correct patch. That is exactly the failure mode invariant B
+exists to prevent, arriving through the state machine rather than through a confidence score.
+Fan-out over a **fixed** set closes that door structurally.
+
+**Cost implications** — none; (b) is less code than (a).
+
+**Security implications** — see above, and the two conditions below, which are what make the
+argument true rather than merely intended.
+
+**Scalability implications** — none.
+
+**Condition (C1 on PR #79) — the candidate set is frozen before `VERIFY` begins.** No
+`PatchCandidate` may be attached to a mission after the first `VerificationRecord` for that
+mission is written. Without this, fan-out degenerates into a loop by another name — "add one
+more candidate and re-verify" reaches generate-until-pass without ever adding a state, and no
+reviewer sees a transition-table change to object to. Enforced where the transition guard
+lives. Test: `test_cannot_add_candidate_after_verification_starts`. **[Δ #12]**
+
+**Condition (C2 on PR #79) — the mission verdict carries its denominator.** `any VERIFIED →
+VERIFIED` is right for the demo and is also, read literally, best-of-N; 1-of-10 and 1-of-1 are
+materially different claims. Every rendering of the mission verdict carries the candidate
+count, as §5.4 already does for gates:
+
+```
+VERDICT   VERIFIED — 3 of 5 gates ran · 1 of 2 candidates verified
+```
+
+`EvidenceBundle` records the candidate count and the verdict distribution, and names the
+recommended diff where more than one verifies (C3). This is D-009's disclosure principle
+applied one level up. **[Δ #42, #51]**
+
+**Correction to prior work.** This record also withdraws
+`docs/09-company/05-cto-technical-review.md` §1 C4 / proposed D-021, the two-channel event
+design (durable mission events plus a sampled non-durable telemetry channel). Architecture
+spec §3.2's **throttle-at-source** — one event per 5 s carrying the real latest counters,
+never interpolated — is better: ~480 rows for a 40-minute campaign is negligible, and keeping
+one durable channel preserves full replay on reconnect, which is precisely what the morning
+shift needs after an overnight campaign and precisely what a non-durable channel would have
+discarded. Single channel, throttled at the source.
+
+**Final approval authority** — CTO (technical). Adding, removing or renaming a `MissionState`
+remains a CTO call, since the timeline, the posture map and the evidence bundle all read from
+that list.
+
+---
+
+## D-028 · No process that holds repository content has a route to the internet · 2026-08-07 · CTO
+
+**Decision** — In compose, **nginx is the only container attached to the external network**.
+`control-api`, `worker`, `model-host` and `postgres` sit on a single `internal: true` network.
+Additionally, `gateway/` — the only module permitted to construct an inference client — must
+not be importable from the ASGI process. Ruling on architecture spec §8.2 / §4.1 L1, which is
+ratified and extended.
+
+**What the architecture spec got right, and what my own review got wrong.** The pack places
+the egress control on the *sandbox*. The sandbox is the wrong process: it runs untrusted
+target code and holds a checkout, but it has no inference client and never will. The process
+holding repository content *and* an HTTP client pointed at a model is the **worker**.
+`docs/09-company/05-cto-technical-review.md` §6.1 said "control-api" where it should have said
+"the process holding the gateway". Correction taken.
+
+**Options considered** — (a) L1 as drawn in the spec: worker and model-host internal-only,
+control-api on both the internal and edge networks; (b) nginx alone on the edge network,
+every product process internal-only; (c) code-level enforcement only.
+
+**Pros and cons** — (a) is a large improvement on the pack and still leaves one process —
+control-api, which receives the repository upload — holding repository content *and* a route
+out. The code layer covers that; the kernel does not, and "structurally enforced" was the
+claim being made. (b) costs the same amount of compose config and removes the exception
+entirely: being on an `internal: true` network does not prevent *receiving* connections, so
+nginx still reaches control-api and inbound traffic is unaffected. (c) is what we had, and it
+is what the CTO review already found insufficient.
+
+**Cost implications** — none. Same number of lines of compose.
+
+**Security implications** — this is the decision that turns invariant A from *enforced by
+startup validation* into *enforced by the kernel*. After it, the honest claim to a judge
+becomes unconditional rather than hedged. Two riders:
+- Any `git clone` from a remote runs in a **one-shot ingest container on the edge network that
+  does not contain `gateway/`**, whose only output is a snapshot archive. Not the control-api.
+- The sandbox must not reach the model host either (spec §4.1 L6 step 3). A sandbox that can
+  talk to the model is a channel from untrusted target code straight into the gateway. This is
+  the step people forget.
+
+**Scalability implications** — none.
+
+**Condition (C5 on PR #79).** Extend the L3 AST test: assert that no module reachable from
+`config.urls` or the ninja router imports `gateway.*`. Together with the topology above this
+makes the invariant total — the only module that can reach a model cannot load in a process
+that has ever been on an edge network, under any future topology anyone builds. Roughly five
+lines added to a test the spec already specifies. **[Δ #11, #15, #35]**
+
+**Final approval authority** — CTO (technical); **`cybersecurity` holds a veto** on §4 of the
+architecture spec in full, per `CLAUDE.md`.
+
+---
+
+## D-029 · `assert_terminal_verdict` consumes `VerificationRecord`s, not `Verdict`s · 2026-08-07 · CTO
+
+**Decision** — `contracts/state_machine.py` gains `assert_terminal_verdict`, called from
+`assert_transition`, and its signature takes `Sequence[VerificationRecord]` — **not**
+`Sequence[Verdict]` as proposed in architecture spec §4.2.6. Ruling on §8.3.
+
+**The hole being closed.** `assert_transition(EXPORTING, VERIFIED, …)` currently succeeds
+against an empty database. Executed against the working tree at `ad2ef2b`:
+
+```
+EXPORTING -> VERIFIED with NO verification record and NO gate matrix: ALLOWED
+```
+
+A mission could reach terminal `MissionState.VERIFIED` — the state driving
+`MissionPosture.VERIFIED`, which is what the Brahmadatta Core displays and what a judge reads
+off the screen — with no verification having run at all. Every protection in
+`contracts/verdict.py` guarded a record the state machine then never consulted. Found
+independently by the CTO review (§6.2) and the architecture spec (§8.3); sized at ~15 lines.
+
+**Options considered** — (a) the spec's signature, `verdicts: Sequence[Verdict]`;
+(b) `verifications: Sequence[VerificationRecord]`.
+
+**Pros and cons** — (a) closes the transition hole but leaves the chain breakable at its last
+link: a caller can pass `[Verdict.VERIFIED]`, and every upstream protection is bypassed by
+constructing an enum value. (b) costs the same number of lines and makes the chain unbroken
+end to end — gates → validated record → mission outcome → terminal state — because a
+`VerificationRecord` **cannot be constructed** with a verdict that disagrees with its gates.
+That validator already exists and is the strongest code in the repository; the fix should
+depend on it rather than route around it.
+
+**Cost implications** — none. Same code, different parameter type.
+
+**Security implications** — this is the second half of invariant B. With it, the invariant is
+structural on both axes: the verdict record, and the mission state. Empty-list →
+`HUMAN_REVIEW` is retained deliberately, so that forgetting the argument can never produce
+`VERIFIED` — the correct direction to fail.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b). Test: `test_cannot_enter_verified_without_a_verified_record`. Lands
+with #12, not after. Tracked as #77.
+
+**Final approval authority** — CTO (technical); **`cybersecurity` review recorded on the PR**,
+per `CLAUDE.md`, since this touches a verification gate.
+
+---
+
+## D-030 · `SANDBOX_UNAVAILABLE` and `JOB_TIMED_OUT` land in `ErrorCode` before #6 freezes · 2026-08-07 · CTO
+
+**Decision** — Both members are added to `contracts.enums.ErrorCode` in the same change that
+freezes the contract (#6). Nothing else is added while the door is open.
+
+**Options considered** — (a) add both now, inside the freeze; (b) add them after the freeze
+when the failure paths are built; (c) reuse `INTERNAL_ERROR`.
+
+**Pros and cons** — (a) is a two-line change today. (b) is not: `ErrorCode` is a `StrEnum` in
+a contract consumed by generated TypeScript, so adding a member post-freeze regenerates the
+client union and forces a frontend rebuild across a 12.5-hour handoff — the exact class of
+event #6 exists to prevent. (c) is the option that actually costs something: architecture spec
+§6.1 (the sandbox will not start) and §6.3 (a fuzz campaign hangs) are documented failure
+modes with **no way to report themselves**, so both would surface in the Command Center as
+`INTERNAL_ERROR` — indistinguishable at 3am from a genuine bug in our own code. That is a
+debugging cost paid on the worst night of the build.
+
+**Cost implications** — two lines now; a cross-timezone rebuild later.
+
+**Security implications** — none directly. Marginally positive for incident handling: a
+distinguishable sandbox failure is one the operator can respond to correctly rather than
+guess at.
+
+**Scalability implications** — none.
+
+**Recommendation** — (a), today, and **no further additions**: §6.2 is covered by
+`BASELINE_BUILD_FAILED`, §6.4 by `MODEL_CAPACITY_UNAVAILABLE`, §6.6 is transport-level. A
+freeze that keeps being reopened is not a freeze. Bundle this with the D-020 `ModelProvenance`
+replay fields (`replayed_from_transcript`, `captured_at`, `transcript_sha256`) as **one**
+contract edit, not two.
+
+**Final approval authority** — CTO (technical).
