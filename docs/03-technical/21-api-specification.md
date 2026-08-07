@@ -1,5 +1,13 @@
 # API Specification
 
+> **Frozen at D1 (2026-08-07) — issues #6 and #9.** The implemented surface is the
+> django-ninja schemas in `apps/control-api/contracts/`, published as
+> [`packages/schemas/openapi.json`](../../packages/schemas/openapi.json). Where this
+> document and that dump disagree, **the dump wins** — it is generated from the code.
+> The sections below are the original specification, left intact, with the D1 delta
+> recorded in [§ D1 frozen contract](#d1-frozen-contract-2026-08-07) at the end.
+> Superseded lines are marked, not deleted.
+
 ## Mission API
 
 - `POST /api/v1/missions` — create a mission draft.
@@ -15,7 +23,7 @@
 
 - `GET /api/v1/missions/{id}/findings`
 - `GET /api/v1/missions/{id}/findings/{finding_id}`
-- `GET /api/v1/missions/{id}/git-bisect`
+- ~~`GET /api/v1/missions/{id}/git-bisect`~~ — **superseded/cut at D1.** Automated bisect is P1-1, in the `CUT` milestone (D-014).
 - `GET /api/v1/missions/{id}/fuzzing`
 - `GET /api/v1/missions/{id}/patches`
 - `GET /api/v1/missions/{id}/patches/{patch_id}/verification`
@@ -26,8 +34,8 @@
 
 - `GET /api/v1/system/health`
 - `GET /api/v1/system/workers`
-- `GET /api/v1/system/gpu-leases`
-- `POST /api/v1/system/gpu-leases/{id}/teardown` — operator-confirmed emergency teardown.
+- ~~`GET /api/v1/system/gpu-leases`~~ — **superseded at D1.** Rented GPU is cut in full (D-015). Replaced by `GET /api/v1/system/sandboxes`.
+- ~~`POST /api/v1/system/gpu-leases/{id}/teardown`~~ — **superseded at D1.** Teardown remains P0-14; replaced by `POST /api/v1/system/sandboxes/{sandbox_id}/teardown`.
 
 ## Event schema
 
@@ -45,6 +53,11 @@
 }
 ```
 
+The example above is **superseded at D1** by the `MissionEvent` schema in the OpenAPI
+dump: it keeps every field shown here, adds `id`, `type`, `payload` and `trace_id`
+(required by issue #6), and replaces free-string `phase`/`status`/`severity` with
+enums. See § D1 frozen contract.
+
 ## Error codes
 
 `INVALID_AUTHORIZATION`, `UNSUPPORTED_REPOSITORY`, `PREFLIGHT_FAILED`, `BASELINE_BUILD_FAILED`, `BASELINE_FLAKY`, `SANDBOX_POLICY_VIOLATION`, `NO_REPRODUCIBLE_FINDING`, `PATCH_POLICY_REJECTED`, `MODEL_CAPACITY_UNAVAILABLE`, `GPU_LIMIT_EXCEEDED`, `VERIFICATION_FAILED`, `SAFE_CANCELLATION_IN_PROGRESS`.
@@ -55,6 +68,142 @@
 - Every response includes a trace ID.
 - Raw secrets and unrestricted source archives are never returned to the browser.
 - The UI uses sanitized evidence endpoints and signed short-lived artifact links.
+
+---
+
+## D1 frozen contract (2026-08-07)
+
+Implemented in `apps/control-api/`, published as `packages/schemas/openapi.json`
+(22 operations). Everything except `GET /api/v1/system/health` returns
+`501 NOT_IMPLEMENTED` with the standard error envelope; the schemas are final.
+
+### Endpoints added to this specification
+
+| Endpoint | Why |
+|---|---|
+| `POST /api/v1/missions/{id}/authorize` | P0-1. The specification folded authorization into preflight, but the safety boundary needs a durable **record** — `contracts.state_machine` refuses every stage without an active one. Returns `AuthorizationRecord`. |
+| `GET /api/v1/missions` | The Command Center needs a mission list; `Page[MissionSummary]`. |
+| `GET /api/v1/missions/{id}/events/replay` | Gap recovery. `/events` is the SSE stream; this is the typed JSON replay a reconnecting client uses, since `sequence` is gap-free per mission. |
+| `GET /api/v1/missions/{id}/baseline` | P0-5 and the D3 gate are stated in baseline counts; the UI needs them addressable without pulling the whole evidence bundle. |
+| `GET /api/v1/system/sandboxes` | Replaces `GET /system/gpu-leases` (D-015). P0-14 teardown still applies to whatever compute a run started. |
+| `POST /api/v1/system/sandboxes/{sandbox_id}/teardown` | Replaces the GPU-lease teardown, same reason. |
+
+### Endpoints cut
+
+`GET /missions/{id}/git-bisect` (P1-1), `GET /system/gpu-leases` and
+`POST /system/gpu-leases/{id}/teardown` (D-015). A test asserts these paths are absent
+from the OpenAPI document so they cannot reappear without a scope decision.
+
+### Mission states
+
+`CREATED → AUTHORIZED → SNAPSHOTTED → VALIDATING → BASELINE → TRIAGE → STRESS_TEST →
+CORRELATE → PATCH → VERIFY → EXPORTING → VERIFIED / REJECTED / HUMAN_REVIEW`, plus
+`PAUSED`, `CANCELLING`, `FAILED`, `CANCELLED`.
+
+Three states extend the list in `16-system-architecture-document.md`: `AUTHORIZED`
+(the authorization gate needs a state), `EXPORTING` (a mission is not `VERIFIED` until
+the evidence bundle that justifies it exists — P0-12), and `PAUSED`/`CANCELLING`
+(operator controls this document already specified but that document's state list
+omitted). `MissionPosture` is the separate display enum the Core renders — protected,
+investigating, vulnerability confirmed, patching, verified, rejected, human review,
+failed — derived server-side from the state, never set by the client. It adds a ninth,
+`CANCELLED`: folding a deliberate cancellation into `FAILED` would show a red alert
+ring on the most visible element in the product for an operator action that worked.
+
+### Event envelope
+
+`MissionEvent`: `id`, `mission_id`, `sequence`, `timestamp`, `type`, `stage`, `state`,
+`status`, `severity`, `message`, `payload`, `evidence_refs`, `metrics`, `trace_id`.
+`payload` is a union discriminated on `kind` with fourteen variants, so the frontend
+gets an exhaustively-checked `switch` and a new variant breaks its build.
+
+SSE framing: `id: <sequence>`, `event: <type>`, `data: <MissionEvent JSON>`. The
+endpoint sets `X-Accel-Buffering: no`; nginx also needs `proxy_buffering off`
+(issue #10) or the stream arrives in one lump at the end.
+
+### Multiple candidates per mission
+
+A mission carries **N** patch candidates and **N** verification runs, each with its own
+gate matrix, verdict and provenance. The demo runs two through the identical pipeline
+and shows them side by side — one `Verified`, one `Rejected` — which is the D6 gate and
+the competition differentiator.
+
+* `MissionVerdictSummary` carries the mission verdict *and* the per-candidate
+  breakdown, and a validator refuses any summary whose counts or mission verdict do not
+  follow from its candidates. A rejection cannot be quietly dropped.
+* `derive_mission_verdict` states the reduction explicitly: no runs →
+  `HUMAN_REVIEW_REQUIRED`; any `HUMAN_REVIEW_REQUIRED` → `HUMAN_REVIEW_REQUIRED`; at
+  least one `VERIFIED` → `VERIFIED`; otherwise `REJECTED`. A `VERIFIED` mission never
+  means "every candidate passed".
+* `EvidenceBundle` carries every candidate and every verification record in full.
+* `assert_transition` takes the **set** of verification records and derives the terminal
+  state from all of them, not from whichever finished last.
+
+The orchestrator still has to fan out over candidates *inside* the PATCH and VERIFY
+stages rather than loop `VERIFY → PATCH` — that half is issues #12 and #80.
+
+### The D3 gate signal
+
+The D3 kill criterion is written as the literal string `BASELINE_PASSED`. It is an
+**outcome, not a mission state**: the mission is in `BASELINE` while the stage runs.
+The observable signal is `EventType.BASELINE_PASSED` / `BASELINE_FAILED` on the event
+stream, plus the derived boolean `BaselineReport.passed` (configure and build succeeded,
+at least one test ran, none failed). Whoever checks the gate on 2026-08-09 should look
+for the event type, not for a state.
+
+### Model replay provenance
+
+`ModelProvenance` carries `replayed_from_transcript`, `captured_at` and
+`transcript_sha256`, set together or not at all. A response served from a captured
+transcript is legitimate; presenting it as a live generation is not, and the UI must be
+able to say "replayed". Same rule as D-008 on patch provenance.
+
+### Properties the schemas enforce structurally
+
+* **No verdict from confidence.** `derive_verdict(gates: GateMatrix) -> Verdict` has
+  no parameter a confidence value could occupy; `GateResult`/`GateMatrix` forbid extra
+  fields; `VerificationRecord` re-derives the verdict and refuses to serialize when the
+  stored verdict does not follow from the gates. `confidence` exists exactly once in
+  the whole document, on `ModelProvenance`, marked display-only.
+* **No stage without authorization.** Every stage but `AUTHORIZE` requires an active,
+  unrevoked, unexpired record bound to the snapshot being worked on. Cancellation and
+  failure are deliberately exempt — losing authority is a reason to stop, not a reason
+  to be unable to.
+* **No sandbox egress.** `SandboxPolicy.network` is the literal `"deny"`; the API has
+  no vocabulary for anything else.
+* **No hosted inference endpoint.** Validated at startup by a Django system check; a
+  hosted provider URL fails `manage.py check` and therefore fails boot.
+* **No verdict state without verification.** `VERIFIED`, `REJECTED` and `HUMAN_REVIEW`
+  reached from `EXPORTING` require the mission's verification records, and the target
+  state must equal `derive_mission_verdict` over them. `HUMAN_REVIEW` reached earlier —
+  a policy pause before anything ran — is deliberately not gated.
+
+### Error envelope
+
+Every non-2xx response:
+
+```json
+{
+  "error": {"code": "INVALID_AUTHORIZATION", "message": "...", "details": {}},
+  "trace_id": "..."
+}
+```
+
+`code` is from the frozen vocabulary above, extended with `VERIFICATION_REQUIRED` (a
+verdict state was requested with nothing to justify it — distinct from
+`VERIFICATION_FAILED`, where the gates ran and said no), `SANDBOX_UNAVAILABLE` and
+`JOB_TIMED_OUT` (architecture spec §6.1, §6.3), and the transport-level codes the API
+cannot avoid emitting: `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`,
+`VALIDATION_ERROR`, `INVALID_STATE_TRANSITION`, `CONFLICT`, `NOT_IMPLEMENTED`,
+`INTERNAL_ERROR`. The trace id is also returned as the `X-Trace-Id` header on every
+response, including successes.
+
+### Authentication
+
+`Authorization: Bearer <token>`, one token per role (operator, reviewer,
+administrator), supplied by the environment. No configured token means no principal can
+authenticate — the API fails closed. `GET /api/v1/system/health` is the only
+unauthenticated operation, and a test asserts it is the only one.
 
 ---
 

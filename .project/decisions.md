@@ -569,3 +569,113 @@ hairline chakra engraving with ASCII-density shading rather than a glowing progr
 non-figural rule from D-017 stands unchanged.
 
 **Final approval authority** — CEO. Decided.
+
+---
+
+## D-024 · Contract rules enforced by types, not by review · 2026-08-07 · `backend-developer` seat
+
+**Decision** — The three hard product rules that guard the entry (no verdict from model
+confidence, no stage without authorization, no hosted inference endpoint) are expressed in the
+schemas and in Django system checks, not as conventions plus code review. Concretely:
+`derive_verdict(gates: GateMatrix) -> Verdict` has no parameter a confidence value could occupy;
+gate schemas set `extra="forbid"`; `VerificationRecord` re-derives its verdict in a validator and
+refuses to serialize when the stored verdict does not follow from its gates;
+`assert_stage_can_run` takes a required, non-defaulted authorization argument; and a hosted
+inference URL fails `manage.py check` and therefore fails boot.
+
+**Options considered** — (a) document the rules and rely on review; (b) enforce at the service
+layer when the orchestrator lands; (c) enforce in the contract schemas now.
+
+**Pros and cons** — (a) is what the doc pack already does, and it is why the CTO's review found
+`EXPORTING -> VERIFIED` reachable with no verification record at all: eleven documents repeat the
+rule and nothing enforced it. (b) defers the guarantee to code written on days two to six under
+time pressure, by the person least likely to be re-reading the safety documents. (c) costs a few
+hours on D1 and makes the violation unrepresentable — a `VERIFIED` record over a failed
+regression gate cannot be constructed, let alone returned. The cost of (c) is rigidity: a
+legitimate future need to record something the schema forbids requires a contract change and a
+regenerated OpenAPI dump. At fourteen days that rigidity is the feature.
+
+**Cost implications** — none.
+
+**Security implications** — strongly positive. The authorization gate, the sandbox egress policy
+(`Literal["deny"]`) and the model-routing boundary are all now failures at construction or
+startup rather than at demo time. The residual risk is that the *orchestrator* may not call these
+functions; that is recorded as a blocking acceptance criterion on #12.
+
+**Scalability implications** — none at one operator.
+
+**Recommendation** — as implemented.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-025 · Mission verdict derived from the set of candidate verdicts · 2026-08-07 · `backend-developer` seat
+
+**Decision** — A mission carries N patch candidates and N verification runs, each with its own
+gate matrix and verdict. The mission's terminal state is derived from the whole set by
+`derive_mission_verdict`, and `MissionVerdictSummary` carries the per-candidate breakdown
+alongside it with a validator that refuses any summary whose counts or mission verdict do not
+follow from its candidates.
+
+**Options considered** — (a) one candidate per mission, second candidate as a second mission;
+(b) N candidates with the mission verdict taken from the last verification to finish; (c) N
+candidates with the mission verdict derived from the set, breakdown mandatory.
+
+**Pros and cons** — (a) is what a single-pass `PATCH → VERIFY → EXPORTING` implies, and it makes
+the D6 criterion — one `Verified` and one `Rejected` from a *single* operator action —
+structurally unreachable, losing the differentiator. (b) is the cheapest change and is a bug
+waiting for the demo: whichever run finished last would decide what the judge sees. (c) makes the
+side-by-side view the default shape of the data and makes "one Verified among several" impossible
+to state without also stating the rejections.
+
+The reduction rule is opinionated and is written down rather than assumed: any
+`HUMAN_REVIEW_REQUIRED` outranks everything; otherwise one `VERIFIED` is enough, because the
+mission's question is "does a repair that holds exist", not "did every candidate pass".
+
+**Cost implications** — none. Caught before the freeze; the rework was under an hour.
+
+**Security implications** — none directly. Mildly positive for honesty: a `VERIFIED` mission
+verdict can never hide a rejected candidate.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. The matching fan-out inside the PATCH and VERIFY stages is
+the orchestrator's half and belongs to #12 and #80.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-026 · Interim bearer-token auth; sessions and MFA deferred · 2026-08-07 · `backend-developer` seat
+
+**Decision** — Operator authentication for the seven-day build is one bearer token per role
+(operator, reviewer, administrator), supplied by the environment, compared in constant time, with
+no configured token meaning that role cannot authenticate at all. Session auth, MFA for
+administrators, and per-project membership checks from
+`docs/03-technical/22-authentication-and-authorization-plan.md` are **not** built.
+
+**Options considered** — (a) build the full plan; (b) leave every endpoint open and add auth
+later; (c) bearer tokens now, fail closed, with the gap recorded.
+
+**Pros and cons** — (a) is a day of work for a single named operator on one machine, and the
+competition is not scored on our login page. (b) is how an "add auth later" ticket reaches day
+fourteen unstarted, and it would leave the authorization-gate tests passing against an API anyone
+on the network can drive. (c) gives real 401/403 behaviour that the frontend builds against from
+D1 and that the security review on D8–11 can harden, without spending D1 on it.
+
+**Cost implications** — none.
+
+**Security implications** — The gap is real and is named here rather than discovered later: no
+MFA, no session revocation, no per-project membership check, and a token that leaks is valid until
+the environment changes. Mitigating factors: the API is bound to localhost behind nginx, there is
+one operator, and the API fails closed with no tokens configured. `cybersecurity` owns the call on
+whether this is sufficient for the finale.
+
+**Scalability implications** — none.
+
+**Recommendation** — accept for the build, revisit at the D8–11 security checklist (#53).
+
+**Final approval authority** — `cybersecurity` seat, with the CTO on the schedule trade.
+
+---
