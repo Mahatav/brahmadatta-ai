@@ -1754,3 +1754,271 @@ the orchestrator's half and belongs to #12 and #80.
 
 ---
 
+
+---
+
+## D-045 · The verdict guard loads its own evidence; a caller-supplied set cannot be trusted · 2026-08-07 · CTO
+
+**Ruling on BUG-003 (C6) and BUG-004 (a)(b)(c). FIX, before #12 merges.**
+
+**Reproduced by execution** against `origin/main` @ `8955f60`, independently of QA:
+
+```
+BUG-003 duck-typing: any object with .verdict satisfies the guard?
+  ALLOWED  <-- reproduces: guard duck-types, no gate matrix required
+C6d: records from ANOTHER mission -> VERIFIED?
+  RESULT: ALLOWED  <-- mission_id is NOT checked
+```
+
+The good news first, also by execution: the original #77 hole is **closed**.
+`EXPORTING → VERIFIED` with no records is refused with `VerificationRequiredError`, and one
+`VERIFIED` plus one `REJECTED` record correctly yields `VERIFIED` — the D6 demo works. What
+remains is narrower and is my own condition's fault, not the implementer's.
+
+**My C6 was written as though a type annotation were a mechanism. It is not.** I wrote *"take
+`Sequence[VerificationRecord]` and read `record.verdict`"*, the implementer did exactly that,
+and Python enforced nothing. A class with a single `verdict` attribute and no gate matrix
+anywhere satisfies the guard. This project has now learned the same lesson three times — an
+annotation is documentation, a validator is enforcement — and it should stop being a surprise.
+
+**Decision** — three changes, in two different places, because they cannot all live in one.
+
+*In `contracts/state_machine.py` (cheap, do now):*
+1. `isinstance(record, VerificationRecord)` on every element, raising `VerificationRequiredError`
+   on a lookalike. Test: `test_guard_rejects_a_lookalike_without_a_gate_matrix`.
+2. Every record's `mission_id` must equal the mission being transitioned. The guard currently
+   has no mission id at all, so one is added as a required parameter. `AuthorizationRecord`
+   already carries exactly this concept in `covers_snapshot`; this is the same idea applied to
+   evidence. Test: `test_another_missions_verification_does_not_justify_this_verdict`.
+3. De-duplicate by `record.id` before deriving, so the same record supplied twice cannot
+   outvote a record supplied once.
+
+*In the orchestrator (#12) — and this is the part that matters:*
+
+**The completeness of the record set cannot be checked by a function that is handed the set.**
+BUG-004(c) — dropping a `REJECTED` record reaches `VERIFIED` — is undetectable from inside a
+pure function given only what it was given. No amount of validation in `contracts/` closes it,
+and a guard that looks total while missing this is worse than one that is honestly partial.
+
+Therefore: `assert_verdict_is_evidenced` is called **only** from a code path that loaded the
+records itself, by mission id, **inside the same transaction that holds `SELECT … FOR UPDATE`
+on the mission row** — the pattern D-024's condition C7 already requires for event-sequence
+allocation. `contracts/` keeps the pure derivation; the completeness guarantee lives at the
+database boundary because that is the only place it can live.
+
+**Options considered** — (a) validate harder inside `contracts/`; (b) pass a repository/loader
+into the guard; (c) keep the pure guard and require the caller to be a transaction-scoped
+loader.
+
+**Pros and cons** — (a) fixes (a) and (b) and cannot fix (c); shipping it alone would leave a
+guard advertising a property it does not have. (b) is the textbook answer and drags a
+persistence dependency into a contract package that is deliberately free of one — and
+`contracts/` is consumed by the OpenAPI export, so it must stay importable without a database.
+(c) keeps the layering, puts the guarantee where the data is, and costs one comment and one
+review checklist item. At one mission on one machine, (c) is sufficient and (b) is not worth
+the coupling.
+
+**Cost implications** — roughly fifteen lines in `contracts/` and one structural rule in #12.
+
+**Security implications** — this is the second half of invariant B. Without it the guard checks
+that the evidence it was shown is real, but not that it was shown all of it — which is the
+difference between "no verdict without evidence" and "no verdict against the evidence".
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical); **`cybersecurity` review recorded on the PR**,
+since this is a verification gate.
+
+---
+
+## D-046 · The candidate set is frozen in the database, and the rule is stated in the contract · 2026-08-07 · CTO
+
+**Ruling on BUG-004(d) / C1. FIX, before #12 merges.** Confirmed unmet: no freeze exists
+anywhere in `contracts/`, and `test_cannot_add_candidate_after_verification_starts` does not
+exist.
+
+This is the condition I said I cared most about and the reasoning has not changed: without it,
+*"add one more candidate and re-verify"* reaches generate-until-pass **without any
+transition-table change for a reviewer to object to**. It is the one failure mode in this
+system that leaves no diff to catch it.
+
+**Decision** — the freeze is enforced where it can be, and stated where it will be read.
+
+- *Database (#12, the enforcement):* `Mission.verification_started_at`, set when the first
+  `VerificationRecord` is written. The candidate-insert path raises if it is set. This is the
+  real mechanism, because "has verification started" is state, and state lives in the store.
+- *Contract (`contracts/`, the statement):* `assert_candidate_set_open(verifications)` raising
+  when any verification exists. It is not sufficient on its own — same reasoning as D-045 —
+  but it puts the rule in the file a developer reads before writing the insert, and it gives
+  the named test somewhere to live.
+- Test `test_cannot_add_candidate_after_verification_starts` ships with #12. Not optional, and
+  not a follow-up issue.
+
+**Options considered** — (a) contract-level only; (b) database-level only; (c) both.
+
+**Pros and cons** — (a) is unenforceable, per D-045. (b) is sufficient and invisible: the next
+person to read `contracts/state_machine.py` sees a fan-out with no stated bound and reasonably
+concludes there isn't one. (c) costs one extra function.
+
+**Cost implications** — one column, one guard, one test.
+
+**Security implications** — this is what makes D-027's fan-out ruling true rather than
+intended. Without it the fan-out is a loop with the loop edge left implicit.
+
+**Scalability implications** — none.
+
+**Deferral considered and rejected.** A deferral with an owner and a date would be a legitimate
+answer at this schedule, and for BUG-018 it nearly was. Not for this one: the cost of doing it
+during #12 is a column and twenty lines, and the cost of doing it after D6 is unpicking a
+verification path that has already produced the demo. The asymmetry is too large.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-047 · A paused mission resumes only into the state it paused from · 2026-08-07 · CTO
+
+**Ruling on BUG-005. FIX, before #12 merges.** Reproduced:
+
+```
+BUG-005: BASELINE -> PAUSED legal?  True
+BUG-005: PAUSED -> EXPORTING legal? True
+BUG-005: PAUSED -> EXPORTING            ALLOWED  (never entered PATCH or VERIFY)
+BUG-005: EXPORTING -> VERIFIED          ALLOWED  <-- reproduces
+```
+
+**Decision** — `_RESUMABLE` stops being a fixed set. `paused_from` is persisted on the mission
+and `TRANSITIONS[PAUSED]` resolves to exactly that one state, plus the aborts. This was already
+specified — architecture spec §9 lists `paused_from` in the backend developer's work — and
+simply was not built.
+
+**A second consequence nobody has named.** With a fixed `_RESUMABLE`, pause is not only a
+forward skip, it is a **backward** one: a mission paused in `VERIFY` may resume into `BASELINE`,
+re-run the baseline, and write a second `BaselineReport` into the evidence bundle for the same
+snapshot. `BaselineReport` is the denominator for "regression preserved" (P0-5), so a bundle
+containing two of them for one mission is not merely untidy — it makes the central verification
+claim ambiguous to anyone auditing it. Binding resume to `paused_from` closes both directions
+at once.
+
+**Options considered** — (a) `paused_from`; (b) narrow `_RESUMABLE` to the states that cannot
+skip work; (c) defer, on the grounds that pause is an operator action nobody will misuse.
+
+**Pros and cons** — (a) is exact and is already designed. (b) requires reasoning about which
+skips are safe, every time a state is added, forever. (c) is tempting because the operator is
+one trusted person — and it is wrong for the reason the whole state machine exists: the guard
+is not there because we expect misuse, it is there so the property is true without depending on
+who is at the keyboard at 3am on D6. `MissionState.PAUSED` is explicitly retained in the
+architecture spec for exactly that scenario.
+
+**Cost implications** — one field, one lookup. Smaller than (b).
+
+**Security implications** — closes the last route to a terminal verdict that skipped the work,
+and prevents a duplicate baseline from muddying the evidence bundle.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-048 · `recommended_patch_id` is added and derived, in one batched contract change · 2026-08-07 · CTO
+
+**Ruling on BUG-018 / C3. FIX, batched.** Confirmed unmet — `EvidenceBundle` carries
+`patches` and `verifications` and nothing that says which diff we are claiming.
+
+**Decision** — add `recommended_patch_id: UUID | None`, and make it **derived and validated**,
+not free-form: a `model_validator` requiring that, when set, it names a patch in `patches`
+whose verification verdict is `VERIFIED`; and that when exactly one candidate verified, it is
+that one. Same reasoning the architecture spec applied to `gates_not_run` in its §8.6 — a
+hand-set field sitting next to the data that already contains the truth is a field that can
+lie, and it is exactly the kind that gets filled in at 2am on D7.
+
+**Options considered** — (a) add it now, batched; (b) add it now, on its own; (c) defer to
+D8–11 and let the report renderer pick.
+
+**Pros and cons** — (a) and (b) are the same code. The difference is that this touches the
+frozen contract, so it regenerates the OpenAPI dump and the TypeScript types and forces a
+frontend rebuild across the 12.5-hour handoff. **Two other contract edits are already queued
+behind that same cost** — D-020's `ModelProvenance` replay fields and D-030's two `ErrorCode`
+members. Three separate regenerations is three handoff interruptions for one change's worth of
+value. (c) is the deferral, and it fails on a detail: with two candidates verified the renderer
+has no basis to choose, so deferring the field defers the decision to whoever writes the
+report, at the worst possible moment.
+
+**Cost implications** — one field and a validator. **The batching is the decision:** D-020,
+D-030 and this land as **one** contract change, one regeneration, one handoff note.
+
+**Security implications** — minor and real. An evidence bundle that shows two verified patches
+without naming the one we stand behind invites a judge to pick the wrong one and ask why we
+shipped it.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-049 · Provenance defaults point at the humbler claim; and we stop writing aspiration as achievement · 2026-08-07 · CTO
+
+Recorded on the back of BUG-007/008 and #103, which were sent for the record. Both deserve a
+standing rule rather than a one-off fix, because this is the **fourth** instance of the same
+pattern.
+
+**Part 1 — defaults.** `ModelProvenance`'s replay fields default to "live" and
+`GateResult.evidence_source` defaults to `TOOL_EXECUTION`. **A default is a claim the system
+makes on your behalf when you say nothing**, and every provenance default here currently
+points at the *stronger* claim — model-generated rather than replayed, tool-executed rather
+than asserted. That is the wrong direction, and it is the direction that produces an overclaim
+by omission on the one night nobody is checking.
+
+**Rule:** every provenance, evidence-source and measurement field defaults to the weaker
+claim, or has no default and must be stated. This is D-008 (provenance labelling), D-009 (gate
+disclosure) and D-010 (unmeasured targets) generalised: the system never overstates what it
+did, including by staying silent. **[Δ #6, batched per D-048]**
+
+**Part 2 — the wording, and the pattern.** QA reports that the #87 PR body calls the provenance
+rules *"structurally impossible"* to violate, and then reproduced violations. **Fix both**, and
+fix the sentence today, because that wording reaches a slide.
+
+More importantly, that is now four:
+
+| Where | Claimed | Actually |
+|---|---|---|
+| CTO review, invariant A | "the system cannot reach the internet" | startup validation only — corrected in D-028 |
+| Architecture spec §8.13 | "signed-by-hash" | hash-manifested; a hash is not a signature — D-025 |
+| Design system | `[ SESSION SECURE ]` over `http://localhost` | retired — D-039 |
+| #87 PR body | "structurally impossible" | reproduced by QA in two places |
+
+Four different seats, including mine, all writing the aspiration in the tense of the
+achievement. This is not four coincidences, it is a habit, and it is the single most dangerous
+one available to a team whose entire pitch is *"we do not overstate what the tools proved"*.
+
+**Standing rule, applying to every seat and every artifact that leaves the repository:** a
+property is described as enforced only when a **named test** demonstrates it. Until then the
+wording is "intended", "validated at startup", "by convention" — whichever is true. Reviewers
+should treat "impossible", "cannot", "guaranteed" and "proven" as requiring a test reference
+in the same sentence.
+
+**Part 3 — #103, the interpreter-dependent OpenAPI dump.** QA's call is right and the reason
+it gives is the right reason: a version pin holds only until someone runs it locally on a newer
+interpreter, which is literally how this was found. Fix it in the exporter — normalise the
+generated document — not in `requirements.txt`.
+
+The cost is larger than it looks and it is worth naming. The committed dump is the contract
+seam (#6), and its CI diff is the mechanism that makes a contract change break the build
+instead of the demo. **A check that fails for reasons unrelated to the contract is worse than
+no check**, because the first time it cries wolf someone adds a bypass, and after that a real
+drift sails through. Acceptance criterion: the dump is byte-identical across 3.12 and 3.13, and
+CI proves it on both.
+
+**Part 4 — the SSE probe.** QA is right that a 16-stream probe against a stub closing after
+0.5 s is not a pass, and saying so rather than claiming the coverage is the correct behaviour.
+The test that would settle it does not need #12: hold N connections open, where N is **twice**
+the ASGI thread-pool size, and time an ordinary API request issued alongside them. Pass is the
+ordinary request completing under one second. `infrastructure/scripts/testing/sse-stub.py`
+already exists; making it *hold* rather than close is a small change and it answers the
+question days earlier than waiting for real events. **[Δ #13]**
+
+**Final approval authority** — CTO (technical) for Parts 1, 3 and 4; Part 2's standing rule
+applies to every seat, and `cybersecurity` and `qa-engineer` should both treat a breach of it
+as a finding.
