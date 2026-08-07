@@ -483,3 +483,89 @@ from the file tree — mitigated by the folder-structure document and by `CLAUDE
 **Recommendation** — as implemented. Trivially reversible.
 
 **Final approval authority** — CEO requested the cleanup.
+
+---
+
+## D-017 · Visual direction: flat engraving, epic iconography, no deities · 2026-08-06 · CEO
+
+**Decision** — The Command Center takes its visual language from
+[hermes-agent.nousresearch.com](https://hermes-agent.nousresearch.com/), reworked so the
+iconography is drawn entirely from the Ramayana and Mahabharata.
+
+What is taken from the reference: a **single flat saturated color field** (theirs is `#0000F2`)
+with no gradients, no glass, no bevels and no glow; **hairline white line-engraving** as the only
+illustrative element; a **light Didone serif at display size** against **monospace for every
+utility label**; and radiating ray geometry as the organizing motif.
+
+What replaces its subject matter: the reference centers a rendered Greek deity. Ours must not
+center a Hindu one. `docs/00-overview/00-product-identity.md` requires Brahmadatta be presented
+as a technology brand, "not as a deity, religious authority, or claim of literal invincibility",
+and that rule outranks the reference. The engraving vocabulary is therefore **objects and
+geometry from the epics, never figures**: kavacha plating, the chakra and the chariot wheel,
+the bow and arrow, the conch, yantra and mandala grid construction, and the radiating rays the
+reference already uses.
+
+**Options considered** — (a) copy the reference closely including a figural centerpiece;
+(b) take the visual language and swap the iconography to non-figural epic geometry;
+(c) ignore the reference and follow `docs/02-design/00-ui-design-direction.md`'s
+glass-and-glow description literally.
+
+**Pros and cons** — (a) is the most literal reading of the instruction but breaks our own product
+identity rule and risks reading as appropriation rather than homage. (c) produces the generic
+dark-dashboard-with-cyan-glow that every competitor will also produce; the pack's own words
+("thin luminous borders, nested glass panels, restrained glow") describe a look that was
+distinctive five years ago. (b) keeps what actually makes the reference striking — the flatness,
+the linework, the type contrast — while giving the Brahmadatta Core a genuine reason to be a
+radial chakra rather than a generic progress ring. Chose (b).
+
+**Cost implications** — favorable. Flat color with hairline strokes is cheaper to build and far
+cheaper to render at high event rates than layered glass and glow, which matters for a dashboard
+under a live fuzzing feed.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation** — as decided. Two hard constraints carry into every UI issue: **no depicted
+deities or religious figures**, and **original linework only** — epic motifs are drawn for this
+project, not lifted from existing artwork, per the pack's ban on third-party branded assets.
+
+**Final approval authority** — CEO. Decided.
+
+---
+
+## D-018 · Second visual reference folded in · 2026-08-07 · CEO
+
+**Decision** — The Command Center's visual language combines two references, not one.
+[hermes-agent.nousresearch.com](https://hermes-agent.nousresearch.com/) (D-017) supplies the flat
+saturated field, the hairline engraving and the light Didone display type.
+[clean-customer-760137.framer.app](https://clean-customer-760137.framer.app/) supplies the
+construction system: hairline rules with **corner crop-marks instead of boxed borders**,
+**bracketed monospace labels** (`[About]`, `[Pricing]`), ASCII-art as an illustration medium, and
+confirmed typefaces **Instrument Serif** for display and **Fragment Mono** for utility.
+
+**Options considered** — pick one reference, or synthesize both.
+
+**Pros and cons** — Reference A alone gives a striking landing page but says little about how to
+construct a dense grid of panels; it is a poster, and the Command Center is an instrument.
+Reference B alone is beautifully constructed but light-ground and quiet, which loses the
+"formidable" half of the brand personality. Together they resolve each other: A's saturated field
+becomes the ground, B's rules-and-ticks become how panels are defined, and B's ASCII texture is
+the natural way to render A's engraving inside a browser at speed. The one real cost is that the
+combination contradicts `docs/02-design/00-ui-design-direction.md`, which specifies nested glass
+panels and restrained glow — that document is superseded on visual language, not on information
+architecture.
+
+**Cost implications** — favorable. Flat color, hairline rules and monospace texture render far
+more cheaply under a live event feed than layered glass and glow.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation** — as decided. Panels defined by thin rules and corner ticks; every label
+bracketed monospace; the few large numbers in light Instrument Serif; the Brahmadatta Core as
+hairline chakra engraving with ASCII-density shading rather than a glowing progress ring. The
+non-figural rule from D-017 stands unchanged.
+
+**Final approval authority** — CEO. Decided.
