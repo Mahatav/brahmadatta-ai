@@ -1,19 +1,34 @@
 # Brahmadatta AI — continuous integration.
 #
-# Runs on every pull request into main, and on pushes to main after merge.
+# TWO JOBS, deliberately. The CTO cut D1's CI scope to `pytest` and an OpenAPI dump
+# freshness check, on the grounds that a lint matrix, a type-check matrix and a coverage
+# gate are cost with no gate behind them in a seven-day build. The configuration for all
+# of those still exists and is still run locally — see
+# docs/04-development/31-development-setup-guide.md §Checks — it is just not spending
+# runner minutes on every pull request this week.
 #
-# Design notes:
+# What is NOT in CI, and how it is covered instead:
 #
-#   - Actions are pinned to a commit SHA, not a tag. A tag is mutable; `@v5` can be
-#     repointed at new code without any change on our side. Same rule as the image digest
-#     pins in infrastructure/compose/. The version the SHA corresponds to is in the
-#     trailing comment.
-#   - permissions is read-only at workflow level. No job here needs to write to the repo.
-#   - Jobs SKIP cleanly when the directory they check does not exist yet, and say so in
-#     the log. On D1 the frontend does not exist; a job that hard-failed on that would
-#     make every unrelated pull request red.
-#   - No secret is used by any job. Nothing here talks to a paid service, a model
-#     provider, or any external inference API.
+#   ruff / mypy / eslint / astro check   ruff.toml, mypy.ini, eslint.config.js — run
+#                                        locally; both were green at D1
+#   docker compose config, nginx -t      infrastructure/scripts/nginx-validate.sh
+#   SSE survives the proxy               infrastructure/scripts/smoke-sse.sh
+#   only nginx has egress (C4)           infrastructure/scripts/egress-test.sh
+#   shellcheck, actionlint               run locally
+#
+# Those four scripts are the ones worth promoting back into CI first, in that order, when
+# the budget for it exists. `smoke-sse.sh` and `egress-test.sh` guard invariants that fail
+# silently, which is the argument for them going first.
+#
+# Design notes that survive the cut:
+#   - Actions are pinned to a commit SHA, not a tag. A tag is mutable and can be repointed
+#     at new code without any change on our side. Same rule as the image digest pins in
+#     infrastructure/compose/.
+#   - permissions is read-only. No job writes to the repository.
+#   - No secret is used by any job. Nothing here talks to a paid service, a model provider,
+#     or any external inference API.
+#   - Steps that depend on a directory which does not exist yet skip cleanly and say so, so
+#     an unrelated pull request does not go red while the tree is still filling in.
 
 name: CI
 
@@ -32,16 +47,22 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "22"
 
 jobs:
   # ---------------------------------------------------------------------------
-  secrets-guard:
-    name: secrets · nothing sensitive is tracked
+  pytest:
+    name: pytest
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Folded in as a step rather than a third job: it takes two seconds, needs no setup,
+      # and "no credential is ever committed" is not the kind of rule to leave to review
+      # attention across a twelve-hour handoff.
       - name: No environment file, key, or certificate is tracked
         run: |
           set -euo pipefail
@@ -53,75 +74,30 @@ jobs:
             echo "$bad"
             exit 1
           fi
-          echo "ok: no tracked .env, private key, or certificate"
-
-      - name: No private key material inside tracked files
-        run: |
-          set -euo pipefail
-          # -I skips binary files. The pattern is split so this workflow does not match
-          # itself when the scan runs over .github/.
           if git grep -I -n -E -- "-----BEGIN [A-Z ]*PRI""VATE KEY-----" -- . ; then
             echo "::error::private key material found in a tracked file"
             exit 1
           fi
-          echo "ok: no private key blocks in tracked files"
+          echo "ok: no tracked .env, private key, or certificate"
 
-  # ---------------------------------------------------------------------------
-  python:
-    name: python · ruff + mypy
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install pinned tooling
+      - name: Install test tooling
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          ruff --version
-          mypy --version
 
-      - name: ruff format --check
-        run: ruff format --check .
+      # Architecture invariants that hold regardless of what the application looks like:
+      # the ASGI process must not import the gateway (C5), and the Django half of the
+      # ingress contract must actually be set. Both skip while apps/control-api is absent.
+      - name: Architecture tests
+        run: pytest tests/ -q
 
-      - name: ruff check
-        run: ruff check --output-format=github .
-
-      - name: mypy
-        run: |
-          set -euo pipefail
-          targets=""
-          for d in apps services workers adapters packages infrastructure/scripts; do
-            [ -d "$d" ] && targets="$targets $d"
-          done
-          if [ -z "$targets" ]; then
-            echo "no python source directories present yet — nothing to type check"
-            exit 0
-          fi
-          # shellcheck disable=SC2086
-          mypy --config-file mypy.ini $targets
-
-  # ---------------------------------------------------------------------------
-  python-tests:
-    name: python · pytest
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Run the control API test suite
+      - name: Control API tests
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
           DJANGO_DEBUG: "false"
           # sqlite so CI needs no database service. The compose stack and the finale both
-          # use PostgreSQL; anything that depends on Postgres-specific behaviour needs an
+          # use PostgreSQL; anything depending on Postgres-specific behaviour needs an
           # integration job with a service container, which is D2 work.
           DATABASE_URL: "sqlite:///ci.sqlite3"
         run: |
@@ -130,98 +106,38 @@ jobs:
             echo "apps/control-api does not exist yet — skipping"
             exit 0
           fi
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
           pip install -r apps/control-api/requirements.txt
           cd apps/control-api
-          if ! ls -d -- tests ./*/tests ./test_*.py >/dev/null 2>&1; then
-            echo "no tests found in apps/control-api — skipping"
-            exit 0
-          fi
           pytest -q
 
   # ---------------------------------------------------------------------------
-  frontend:
-    name: frontend · eslint + astro check
+  # Without this, issue #6's acceptance criterion — "a contract change breaks the frontend
+  # build" — is simply false: a hand-committed OpenAPI dump drifts silently the first time
+  # someone edits a schema and forgets to re-export, and everything downstream is then
+  # generated from a description of an API that no longer exists.
+  openapi-contract:
+    name: openapi dump is current
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install root tooling
-        run: npm ci --no-audit --no-fund
-
-      - name: eslint
-        run: npm run lint
-
-      # Skips with a loud message until apps/command-center exists; see
-      # infrastructure/scripts/astro-check.mjs.
-      - name: astro check
-        run: npm run typecheck
-
-  # ---------------------------------------------------------------------------
-  infrastructure:
-    name: infra · compose, nginx, SSE
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Tool versions
-        run: |
-          docker version --format '{{.Server.Version}}'
-          docker compose version
-
-      - name: shellcheck the infrastructure scripts
+      - name: Install the control API
         run: |
           set -euo pipefail
-          shellcheck --version
-          shellcheck infrastructure/scripts/*.sh
+          if [ ! -d apps/control-api ]; then
+            echo "apps/control-api does not exist yet — nothing to install"
+            exit 0
+          fi
+          python -m pip install --upgrade pip
+          pip install -r apps/control-api/requirements.txt
 
-      - name: docker compose config validates (development)
-        run: docker compose -f infrastructure/compose/docker-compose.yml config --quiet
-
-      - name: docker compose config validates (finale)
+      - name: Regenerate and diff
         env:
-          # The finale file uses ${VAR:?message} so a missing value fails loudly at deploy
-          # time. CI supplies throwaway values purely to exercise the parse. None of these
-          # is a credential and none of them reaches a running service.
-          DATABASE_URL: postgresql://ci:ci@db:5432/ci
-          REDIS_URL: redis://redis:6379/0
-          DJANGO_ALLOWED_HOSTS: ci.invalid
-          DJANGO_CSRF_TRUSTED_ORIGINS: https://ci.invalid
-          POSTGRES_PASSWORD: ci-parse-only
-          REDIS_PASSWORD: ci-parse-only
-        run: docker compose -f infrastructure/compose/docker-compose.finale.yml config --quiet
-
-      - name: nginx -t on both profiles
-        run: infrastructure/scripts/nginx-validate.sh
-
-      # The regression test for the trap in D-013: nginx buffers proxied responses by
-      # default, which silently breaks the mission event stream. Case 2 of this script
-      # deliberately turns buffering back on and requires the stream to fail, so a green
-      # result cannot be vacuous.
-      - name: SSE survives the proxy
-        run: infrastructure/scripts/smoke-sse.sh
-
-  # ---------------------------------------------------------------------------
-  workflows:
-    name: infra · workflow lint
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: actionlint
-        run: |
-          set -euo pipefail
-          # Pinned by version; the checksum is verified before anything is executed.
-          VERSION=1.7.7
-          SHA256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
-          curl -fsSL -o actionlint.tgz \
-            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
-          echo "${SHA256}  actionlint.tgz" | sha256sum -c -
-          tar -xzf actionlint.tgz actionlint
-          ./actionlint -color
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DATABASE_URL: "sqlite:///ci.sqlite3"
+        run: infrastructure/scripts/openapi-contract-check.sh

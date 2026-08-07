@@ -29,6 +29,12 @@ extend-exclude = [
     "venv",
     "**/migrations/**",   # Django writes these; they are not ours to style
     "demo/repositories",  # vulnerable-by-design C target fixtures
+    # Ruff formats Python code blocks inside Markdown. docs/ is prose owned by several
+    # roles and its snippets are illustrations, not code — reformatting someone else's
+    # architecture spec because a fenced block is 4 characters over is not the linter's
+    # job. Excluded deliberately, not by oversight.
+    "docs",
+    "*.md",
 ]
 
 [lint]

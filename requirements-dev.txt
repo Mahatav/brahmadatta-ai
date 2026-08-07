@@ -19,3 +19,10 @@ pytest-asyncio==1.4.0
 
 # For exercising the API and the SSE stream from tests.
 httpx==0.28.1
+
+# tests/architecture/test_container_isolation.py parses the compose files structurally
+# rather than by regex, so "is the Docker socket mounted" is answered by the same document
+# Docker reads.
+PyYAML==6.0.3
+# mypy stubs for the above.
+types-PyYAML==6.0.12.20260724
