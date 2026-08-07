@@ -1,0 +1,41 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local artifacts
+/artifacts/
+/evidence-out/
+*.log
+
+# Fuzzing / analysis output — never commit crashes or corpora
+/fuzz-out/
+/corpus/
+crashes/
+*.sarif
+
+# Claude local state
+.claude/settings.local.json
+.project/state.local.json
