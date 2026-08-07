@@ -6,7 +6,7 @@
 | Board | https://github.com/users/Mahatav/projects/3 |
 | Deadline | **2026-08-20** · build target **2026-08-13** |
 | Current phase | 1 — discovery & product definition (CEO seat done; PM seat pending) |
-| Last updated | 2026-08-06 |
+| Last updated | 2026-08-07 |
 
 ## Phase log
 
@@ -47,9 +47,9 @@
 | # | Phase | Status |
 |---|---|---|
 | 1 | Discovery & product definition | partial — CEO seat done, PM seat skipped |
-| 2 | Technical strategy & architecture | **satisfied by the doc pack** + D-013; no separate pass |
-| 3 | UX design | blocked on #8 (visual references) — no UI is built until it lands |
-| 4 | Task breakdown | **done** — the board is the breakdown |
+| 2 | Technical strategy & architecture | architect spec and CTO review both in flight (retrofitted after the CEO called out the skipped gates) |
+| 3 | UX design | **done** — `04-design-system.md` + `tokens.css`, PR #70, pending PM review |
+| 4 | Task breakdown | **audited** — `07-task-breakdown-audit.md`; four coverage gaps closed as #71, #72, #73 and the #49 resequence |
 | 5 | Implementation | ready to start at D1 |
 | 6 | Security review | D8–11 (#53) |
 | 7 | QA | D8–11 (#57) |
@@ -59,9 +59,9 @@
 
 ## Open, owned by the CEO
 
-1. **#8 — visual references for the Command Center.** Hard blocker on all UI work, which starts D2.
-2. **#2 — confirm the AI Kavach submission deadline.** The 14-day figure came from the CEO; the plan now assumes 2026-08-20. If that is wrong, every milestone shifts.
-3. **#3 — competition rules on team composition and agent-authored code.** Potentially disqualifying if assumed wrong.
-4. **#63 — whether `git bisect` stays cut.** It carries the git-aware root-cause novelty claim.
+1. **#2 — confirm the AI Kavach submission deadline.** The 14-day figure came from the CEO; the plan now assumes 2026-08-20. If that is wrong, every milestone shifts.
+2. **#3 — competition rules on team composition and agent-authored code.** Potentially disqualifying if assumed wrong.
+3. **#63 — whether `git bisect` stays cut.** It carries the git-aware root-cause novelty claim.
+4. **Whether Astro survives if D1 slips** — the engineering-manager's cut list puts falling back to Django templates second. That touches D-013, which is the CEO's.
 
-Closed by D-015: GPU provider and budget (was CEO decision 5.1) is moot.
+Closed: #8 (visual references) answered by D-017 and D-018. GPU provider and budget made moot by D-015.

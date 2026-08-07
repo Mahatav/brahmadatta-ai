@@ -1,0 +1,11 @@
+ACME http-01 challenge webroot for the finale profile.
+
+Kept in git as an empty directory so the bind mount in docker-compose.finale.yml has
+something to attach to. Docker creates a missing bind-mount source as a ROOT-OWNED
+directory, which is a nuisance to clean up on the finale box.
+
+certbot writes .well-known/acme-challenge/<token> here; nginx serves it from the plaintext
+listener. Nothing in this directory is ever committed.
+
+Only used if the finale host has a public DNS name. See
+docs/06-operations/71-ingress-and-proxy-contract.md §6.
