@@ -1,8 +1,13 @@
 # 36-Hour Finale Runbook
 
+**Every stage below has a fallback, a trigger that fires the switch, and a sentence that goes
+with each mode. They live in [`../09-company/10-fallback-ladder.md`](../09-company/10-fallback-ladder.md)
+(#84). Read it before the clock starts, not when a stage stalls.**
+
 ## Before the clock starts
 
 - Verify the frozen release, container images, tool cache, model artifacts, demo repositories, and fallback recording.
+- Work the fallback-ladder pre-flight (§7): isolation egress smoke check, fuzz build, one #82 transcript resolved by hash, SSE through the finale stack, and the #49 capture played offline. Isolation mode is set here and does not change after hour 3.
 - Confirm the command-center presentation mode.
 - Confirm that GPU teardown can be triggered from both UI and command line.
 
@@ -54,6 +59,7 @@
 - Stop major features after hour 24.
 - Never claim physical air-gapping from rented cloud infrastructure.
 - Never accept a patch without all required gates.
+- Never narrate a fallback mode with the primary mode's claim. The wording for each mode is fixed in the fallback ladder §1; do not improvise one on stage.
 - Never scan an unauthorized or public target.
 - Prefer a stable, fully evidenced demonstration over adding another feature.
 
