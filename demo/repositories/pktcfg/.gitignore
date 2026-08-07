@@ -1,3 +1,27 @@
 build*/
+
+# libFuzzer writes its artifacts as crash-<sha1>, leak-<sha1>, timeout-<sha1>, oom-<sha1>
+# and slow-unit-<sha1> into the artifact_prefix directory, which defaults to wherever the
+# fuzzer was run. Nothing a campaign produces from this target may be committed — those
+# bytes are derived from target content, and this repository will not always be private.
 crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
+
+# The one exception, by exact path. `crash-literal-tab.bin` is the authored reproducer for
+# the seeded defect: we wrote it, it was reviewed, and P0-8 requires the reproducer to
+# replay from a clean checkout — so a clone that silently lacks it produces a mission that
+# cannot demonstrate anything.
+#
+# It needs naming explicitly because it collides with the `crash-*` rule above, which is
+# exactly the generated-artifact pattern. Nothing distinguishes an authored fixture from a
+# generated one but this line.
+#
+# `git check-ignore` without `--no-index` will NOT show this file as ignored once it is
+# tracked, which is how the collision survived review in the first place. The assertion
+# that matters is in tests/architecture/test_fuzz_artifacts_are_ignored.py, which asks
+# whether a *fresh clone* would ignore it.
 !crash/
+!crash/crash-literal-tab.bin
