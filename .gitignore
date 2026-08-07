@@ -30,11 +30,42 @@ build/
 /evidence-out/
 *.log
 
-# Fuzzing / analysis output — never commit crashes or corpora
-/fuzz-out/
-/corpus/
+# Fuzzing / analysis output — never commit anything a campaign PRODUCES
+#
+# The rules above this line were anchored to the repository root (`/fuzz-out/`,
+# `/corpus/`), which meant a fuzz run inside demo/repositories/<target>/ wrote committable
+# crash inputs and corpus entries. Those artifacts are derived from a target's content, and
+# the day this repository goes public they become the thing that leaks it. Broadened to
+# match at any depth.
+#
+# libFuzzer names its artifacts crash-<sha1>, leak-<sha1>, timeout-<sha1>, oom-<sha1> and
+# slow-unit-<sha1> in the artifact_prefix directory, hence the prefix patterns.
+fuzz-out/
+**/fuzz-out/
+**/fuzz-artifacts/
 crashes/
+**/crashes/
+**/.cifuzz-corpus/
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
 *.sarif
+*.profraw
+*.profdata
+*.sancov
+/corpus/
+
+# ...but the AUTHORED demo fixtures are tracked deliberately. The pktcfg seed corpus and
+# its one crash input are product artifacts we wrote and reviewed, not campaign output, and
+# the demo depends on them being in the repository. Re-included by exact path so the
+# broadening above cannot swallow them, and asserted by
+# tests/architecture/test_fuzz_artifacts_are_ignored.py.
+!demo/repositories/*/corpus/
+!demo/repositories/*/corpus/**
+!demo/repositories/*/crash/
+!demo/repositories/*/crash/**
 
 # Claude local state
 .claude/settings.local.json
