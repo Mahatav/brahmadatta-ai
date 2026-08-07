@@ -100,12 +100,13 @@ jobs:
       # Architecture invariants that hold regardless of what the application looks like:
       # the ASGI process must not import the gateway (C5), the Django half of the ingress
       # contract is set, and no container but nginx sits on a routable network.
+      # No DJANGO_SETTINGS_MODULE here on purpose. Setting it makes pytest-django try to
+      # bootstrap a Django project from the repository root, where there is no manage.py,
+      # and the whole step dies on an ImportError before a single test runs. The tests that
+      # need Django put apps/control-api on sys.path themselves.
+      # `-rs` prints the reason for any skip, so a test that quietly stops asserting is
+      # visible in the log rather than passing as a dot.
       - name: Architecture tests
-        env:
-          DJANGO_SETTINGS_MODULE: config.settings.test
-          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
-          DJANGO_DEBUG: "false"
-          DATABASE_URL: "sqlite:///ci-arch.sqlite3"
         run: pytest tests/ -q -rs
 
       - name: Control API tests
