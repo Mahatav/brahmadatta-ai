@@ -125,6 +125,16 @@ Everyone below starts **on the bench.** The orchestrator hires per phase.
 Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 
 - 2026-08-06 · FOUNDED · company chartered from the MVP documentation pack; full roster on the bench
+- 2026-08-06 · HIRED · `ceo` · phase 1 · discovery needed a forced P0 ranking the pack does not contain
+- 2026-08-06 · FIRED · `ceo` · phase 1 · delivered `01-vision-and-p0-cut.md` and D-006…D-012; gate passed
+- 2026-08-06 · SKIPPED · `product-manager` · phase 1 · its four open questions went onto the board as #61–#64 instead; the 7-day budget could not absorb a full PM pass
+- 2026-08-07 · HIRED · `backend-developer` · D1 · Django scaffold (#9) and the frozen contract (#6)
+- 2026-08-07 · HIRED · `devops-engineer` · D1 · nginx (#10), compose and CI (#11)
+- 2026-08-07 · HIRED · `general-purpose` as `compiler-toolchain-engineer` · D1 · demo C target (#4). **The project-local seats in `.claude/agents/` are not registered as agent types in this session** — the registry loads from the session's working directory, which is the parent folder. Workaround: spawn `general-purpose` and have it read the role file as its first instruction. Same for `security-research-engineer`, `ml-infra-engineer`, `competition-strategist`.
+- 2026-08-07 · HIRED · `ui-ux-designer` · D1/D2 · P0 screen set and tokens (#7), unblocked once the CEO supplied visual references
+
+**Humans on the repo:** Mahatav (CEO, Kelowna) and Raunak (`raunaksachinkhanna`, India) — both
+push access. Agent work goes through the same PR and review chain as theirs.
 
 ---
 
