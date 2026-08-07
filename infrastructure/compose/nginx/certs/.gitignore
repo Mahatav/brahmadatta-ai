@@ -1,0 +1,6 @@
+# Development TLS material is generated, never committed.
+# The repository .gitignore already refuses *.pem and *.key everywhere; this file makes the
+# rule local and obvious, and keeps the directory itself in git so the bind mount has
+# something to attach to.
+*
+!.gitignore

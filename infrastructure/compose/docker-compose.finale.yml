@@ -1,0 +1,238 @@
+# Brahmadatta AI — FINALE stack.
+#
+#   infrastructure/scripts/finale-up.sh
+#   docker compose -f infrastructure/compose/docker-compose.finale.yml --env-file .env up -d
+#
+# STANDALONE, not an overlay on docker-compose.yml, and that is deliberate. Compose merges
+# a `volumes:` list by mount target, so an overlay can replace a mount but cannot DELETE
+# one. The dev stack bind-mounts the live source at /app; the finale stack must not have
+# that mount at all. An overlay physically cannot express "no source bind mount", and a
+# finale profile that silently keeps a writable source mount is exactly the kind of
+# difference that is discovered during the demo. Duplication here is cheaper than that.
+# Recorded as D-019 in .project/decisions.md.
+#
+# Every difference from docker-compose.yml, in full:
+#   1. nginx mounts conf.d.finale/ and profile/admin-deny.conf  -> /admin returns 404
+#   2. control-api uses the `runtime` image target; the source is baked in, not mounted
+#   3. no Astro dev server; nginx serves the built static output
+#   4. redis requires a password
+#   5. UVICORN_FORWARDED_ALLOW_IPS is the edge subnet, not "*"
+#   6. no port is published except through nginx, and nginx binds all interfaces
+#      (the finale demo is watched from another machine)
+#   7. no Astro dependency-installer service — the finale has no npm step at all, so this
+#      stack satisfies C4 with no exception whatsoever
+#
+# UNVERIFIED as of D1: this file has never been brought up. apps/command-center/ does not
+# exist, so `dist/` does not exist, so nginx has nothing to serve. `docker compose config`
+# validates it and `nginx -t` validates its configuration; nothing else has been run.
+
+name: brahmadatta-finale
+
+x-env: &env-file
+  env_file:
+    - path: ../../.env
+      required: false
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  nginx:
+    image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+    container_name: brahmadatta-finale-nginx
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    cap_drop: ["ALL"]
+    ports:
+      # Published on all interfaces: the finale is watched from a second machine.
+      # 8080/8443 because the container is uid 101. Put a host-level 80->8080 and
+      # 443->8443 forward in front if judges must type a bare hostname; see
+      # docs/06-operations/71-ingress-and-proxy-contract.md.
+      - "8080:8080"
+      - "8443:8443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/includes:/etc/nginx/includes:ro
+      # THE PROFILE SWITCH — this is the whole finale admin control at the proxy.
+      # admin-deny.conf returns 404 for /admin and /django-admin.
+      - ./nginx/profile/admin-deny.conf:/etc/nginx/profile/admin.conf:ro
+      - ./nginx/conf.d.finale:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      # The Astro build output. Produced by `npm run build` in apps/command-center before
+      # this stack starts; finale-up.sh refuses to start without it.
+      - ../../apps/command-center/dist:/usr/share/nginx/html:ro
+      # Django's collected static, written by the control-api container.
+      - django-static:/srv/django-static:ro
+      - ./certbot-webroot:/var/www/certbot:ro
+      - nginx-logs:/var/log/nginx
+    networks:
+      # C4: the only service on `external`, and therefore the only container in this stack
+      # with a route off the host.
+      - external
+      - api
+    depends_on:
+      control-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  control-api:
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: runtime          # source baked in; nothing mounted
+    container_name: brahmadatta-finale-control-api
+    <<: [*env-file, *hardening]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.finale
+      DJANGO_DEBUG: "false"
+      # config.settings.finale forces the admin off regardless; this is the second lock.
+      # The proxy 404 is the third. All three are required — blocking a route at the proxy
+      # does nothing to anyone who can reach the container directly.
+      CONTROL_API_ADMIN_ENABLED: "false"
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set to the finale hostname}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:?set to the finale origin}
+      # Trust proxy headers only from the compose edge subnet. "*" here would let anything
+      # that can reach the container claim X-Forwarded-Proto: https.
+      UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_FORWARDED_ALLOW_IPS:-172.31.0.0/24}
+      # Persistent database connections are THREAD-LOCAL under ASGI. A held SSE stream
+      # occupies a thread for the life of the connection, and with CONN_MAX_AGE > 0 that
+      # thread's Postgres connection is pinned idle alongside it. Five operator tabs on a
+      # long mission is five idle connections doing nothing but consuming a slot.
+      #
+      # The AUTHORITATIVE setting is `CONN_MAX_AGE: 0` in
+      # apps/control-api/config/settings/finale.py, asserted by
+      # tests/architecture/test_ingress_contract.py. This variable mirrors it so the value
+      # is visible where the deployment is described, and so a future settings module that
+      # does read it from the environment gets the right answer.
+      CONN_MAX_AGE: "0"
+    volumes:
+      - django-static:/app/staticfiles
+      # Evidence artifacts survive a container replacement.
+      - evidence:/var/lib/brahmadatta/evidence
+    networks:
+      # `api`, NOT a shared ingress network. nginx is the only other member.
+      - api
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94  # 17.6-alpine
+    container_name: brahmadatta-finale-db
+    <<: *hardening
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-brahmadatta}
+      POSTGRES_USER: ${POSTGRES_USER:-brahmadatta}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set for the finale stack}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brahmadatta} -d ${POSTGRES_DB:-brahmadatta}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103  # 8.2-alpine
+    container_name: brahmadatta-finale-redis
+    <<: *hardening
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set for the finale stack}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --save 60 1 --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: runtime
+    container_name: brahmadatta-finale-worker
+    <<: [*env-file, *hardening]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.finale
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
+    command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
+    volumes:
+      - evidence:/var/lib/brahmadatta/evidence
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  # C4: only nginx sits here, and only this network has a gateway. Everything that can hold
+  # a repository snapshot or assemble a prompt is on `edge`/`backend`, both internal, and
+  # has no route off the host at any layer. See the same block in docker-compose.yml.
+  external:
+    driver: bridge
+
+  # nginx <-> control-api. No gateway, no third member. There is no `edge` network in the
+  # finale stack at all, because there is no Astro dev server to put on it.
+  api:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        # Fixed subnet so UVICORN_FORWARDED_ALLOW_IPS can name it instead of "*".
+        - subnet: 172.31.0.0/24
+
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  nginx-logs:
+  django-static:
+  evidence:

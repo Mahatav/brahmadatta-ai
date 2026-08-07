@@ -912,3 +912,299 @@ replay fields (`replayed_from_transcript`, `captured_at`, `transcript_sha256`) a
 contract edit, not two.
 
 **Final approval authority** — CTO (technical).
+
+---
+
+> **Numbering note (2026-08-07, devops seat).** D-019 to D-030 were claimed by the CTO
+> decision records (PR #85) while this branch was in flight, so the infrastructure decisions
+> below are numbered from D-031 rather than from where this branch started. Note that D-028
+> (CTO) and D-035 (devops) are the same conclusion reached from two directions — no process
+> holding repository content has a route to the internet — with D-035 recording how it is
+> enforced and how it was verified. The log is append-only: if git reports a conflict at the
+> end of this file, the resolution is always "keep both, in order".
+
+---
+
+## D-031 · The queue worker is opt-in until a queue framework is chosen · 2026-08-07 · devops
+
+**Decision** — `docker-compose.yml` defines a `worker` service behind the compose profile
+`worker`, so `docker compose up` does not start it. Its command is
+`${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}`. It becomes a default
+service in the same commit that adds the queue dependency to
+`apps/control-api/requirements.txt`.
+
+**Options considered** — (a) start a worker by default with an RQ command; (b) profile-gate
+it as implemented; (c) leave the worker out of compose entirely until the framework is
+chosen.
+
+**Pros and cons** — `CLAUDE.md` says "Redis (RQ/Celery) or DB-backed" and, as of D1,
+`apps/control-api/requirements.txt` contains neither rq nor celery. (a) therefore produces a
+container that crash-loops on `ModuleNotFoundError` from the first `docker compose up`, and a
+crash-looping container in a five-service stack buries every other service's logs — on day
+one, for two people who cannot look over each other's shoulder. (c) is honest but leaves the
+next person to invent the service definition under time pressure. (b) costs one extra flag
+(`--profile worker`, or `DEV_UP_WORKER=1`) and means the definition, the network placement,
+the dependency ordering and the environment are already settled and reviewed when the
+framework lands.
+
+**Cost implications** — none.
+
+**Security implications** — mildly positive. The worker sits only on the `internal: true`
+backend network, so it has no route off the host; that placement is now decided and reviewed
+rather than improvised later.
+
+**Scalability implications** — none at one concurrent operator.
+
+**Recommendation** — as implemented. The backend developer owns the framework choice; this
+file adapts to it in one line.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-032 · The finale compose file is standalone, not an overlay · 2026-08-07 · devops
+
+**Decision** — `infrastructure/compose/docker-compose.finale.yml` is a complete compose file,
+used on its own, not with `-f docker-compose.yml -f docker-compose.finale.yml`.
+
+**Options considered** — (a) an overlay applied on top of the development file; (b) a
+standalone finale file; (c) one file with compose profiles selecting dev vs finale services.
+
+**Pros and cons** — (a) is the idiomatic pattern and keeps shared definitions in one place,
+and it cannot express the single most important difference. Compose merges a `volumes:` list
+by mount target: an overlay can REPLACE a mount but cannot DELETE one. The dev stack
+bind-mounts live source at `/app`; the finale stack must have no such mount at all, because
+the whole point of the `runtime` image target is that the source is immutable and baked in.
+An overlay silently keeps that writable source mount, and a difference like that is
+discovered during the demo, not before it. (c) hits the same wall from a different direction
+and additionally makes one file carry two security postures, which is exactly where someone
+eventually reads the wrong branch. (b) duplicates roughly forty lines and states every
+difference explicitly in a comment block at the top of the file.
+
+**Cost implications** — none.
+
+**Security implications** — this is the reason for the decision. The differences that must be
+unambiguous are all security-relevant: admin blocked at the proxy, no writable source mount,
+`read_only: true` containers, a redis password, and `UVICORN_FORWARDED_ALLOW_IPS` scoped to
+the edge subnet instead of `*`. Two files with an enumerated diff is auditable; a merge
+result is not.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented, with the discipline that any change to a shared service
+in one file is checked against the other. The drift risk is real and is the price of the
+explicitness.
+
+**Final approval authority** — CTO (technical); `cybersecurity` should confirm the finale
+posture before the finale runbook is signed off.
+
+---
+
+## D-033 · The ingress owns the security response headers; the upstream's copies are stripped · 2026-08-07 · devops
+
+**Decision** — `infrastructure/compose/nginx/includes/proxy-headers.conf` sets
+`proxy_hide_header` for every header nginx itself emits: `X-Frame-Options`,
+`X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, the three
+`Cross-Origin-*` headers, `Content-Security-Policy`(`-Report-Only`),
+`Strict-Transport-Security`, `X-Robots-Tag` and `Server`. `X-Trace-Id` is explicitly NOT
+stripped.
+
+**Options considered** — (a) let both nginx and Django set headers; (b) strip the upstream's
+copies and let the ingress be authoritative; (c) remove the headers from nginx on proxied
+routes and let Django own them.
+
+**Pros and cons** — (a) is what the two D1 branches produced independently, and it is broken:
+measured on 2026-08-07 through the running stack, a response carried both
+`Referrer-Policy: same-origin` (Django's `SecurityMiddleware`) and
+`Referrer-Policy: no-referrer` (nginx), plus duplicate `X-Frame-Options`,
+`X-Content-Type-Options` and `Cross-Origin-Opener-Policy`. Which value a browser honours on a
+duplicated header is not something a security control should leave to chance. (c) is
+coherent, but leaves the static Astro build and every nginx-generated response (301, 404,
+502) with no headers at all — and issue #10's stated premise is that the ingress is "the
+single place the safety-relevant headers, timeouts, and buffering rules are enforced". (b)
+matches that premise and covers every response, proxied or not.
+
+**Cost implications** — none.
+
+**Security implications** — the point of the decision: one authoritative policy, applied to
+every response including error responses, with `always` set so 4xx/5xx are covered too. Two
+consequences the backend developer must know, and which are in the D1 handoff: Django's
+`SECURE_*` header settings have no effect on anything served through nginx (they still matter
+for a bare `runserver`, so leaving them set is correct), and a per-view
+`Content-Security-Policy` can no longer be set from Django — it has to be added at the
+ingress instead.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. `cybersecurity` should verify the resulting header set
+against `docs/03-technical/23-security-plan.md` rather than taking this note's word for it;
+that plan states controls, not header names, and the mapping is written out in
+`docs/06-operations/71-ingress-and-proxy-contract.md`.
+
+**Final approval authority** — CTO (technical), with a `cybersecurity` review on the header
+set before the finale.
+
+---
+
+## D-034 · Development TLS is self-signed and HSTS is finale-only · 2026-08-07 · devops
+
+**Decision** — The dev profile terminates TLS with a self-signed certificate generated by
+`infrastructure/scripts/gen-dev-certs.sh` into a doubly-gitignored directory, and does not
+send `Strict-Transport-Security`. The finale profile sends it with
+`max-age=31536000; includeSubDomains` and no `preload`.
+
+**Options considered** — (a) no TLS in development, TLS only in the finale; (b) self-signed
+TLS in development with HSTS; (c) self-signed TLS in development without HSTS; (d) mkcert or
+a local CA so browsers trust the dev certificate.
+
+**Pros and cons** — (a) means the first time anyone exercises the TLS path is the finale, and
+`X-Forwarded-Proto`, the plaintext redirect and the secure-cookie path all go untested until
+then. (b) is the trap: HSTS is keyed on hostname, ignores the port, and is not scoped to a
+certificate — sending it once from `localhost` pins every `http://localhost:<anything>` in
+that developer's browser to HTTPS for a year, across unrelated projects, with no UI to undo it
+short of `chrome://net-internals#hsts`. Losing a shift to that in a seven-day build buys
+nothing, because HSTS protects against a downgrade attack on loopback that cannot happen.
+(d) is genuinely nicer and adds a per-machine setup step and a locally-trusted CA to two
+developers' laptops; not worth it for a browser warning accepted once.
+
+**Cost implications** — none. `docs/06-operations/71-ingress-and-proxy-contract.md` records
+the finale TLS path: certbot webroot if the finale host has a public DNS name, otherwise the
+same self-signed material with the fingerprint recorded in the runbook. A trust warning
+during a demo is bad; a failed ACME challenge on a closed competition LAN five minutes before
+the demo is worse.
+
+**Security implications** — positive relative to (a): the TLS path, the redirect and the
+forwarded-proto handling are exercised from day one. HSTS is present exactly where it does
+something.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. Revisit if the finale host turns out to have a public
+DNS name, in which case certbot is already wired.
+
+**Final approval authority** — CTO (technical). `cybersecurity` holds the veto on the finale
+TLS decision.
+
+---
+
+## D-035 · Egress is denied by network topology, not by a validated base URL · 2026-08-07 · devops, under a `cybersecurity` Critical
+
+**Decision** — `nginx` is the only container attached to a network with a gateway. Every
+other service sits on `internal: true` networks and has no route off the host at any layer.
+`control-api` gets its own network with nginx (`api`) and does not share one with the Astro
+dev server. Asserted by `infrastructure/scripts/egress-test.sh` (topology + live probe) and
+by `infrastructure/scripts/finale-egress-evidence.sh`, which runs inside the running
+finale-profile container.
+
+**Options considered** — (a) keep enforcing the no-external-inference-API rule at startup,
+by validating the model base URL; (b) add an egress proxy with an allow-list; (c) deny
+egress at the network for everything except the ingress.
+
+**Pros and cons** — (a) was the status quo and the security review demonstrated it is not a
+control: the reviewer opened a socket to `api.openai.com` from inside the running container
+and OpenAI answered. A validator that requires a private range also accepts
+`http://169.254.169.254/`, which on a rented VM is the cloud metadata endpoint that hands
+out instance credentials — so the check does not even hold on its own terms. And the
+container that holds the repository snapshot and assembles the prompt had no egress
+restriction at all; the sandbox had one, and the sandbox holds no inference client, so the
+restriction was on the wrong process. (b) is the right long-term shape and costs a service,
+a configuration surface and a failure mode, on day one of seven, to buy an allow-list that
+is currently empty. (c) is a `networks:` block, is enforced by the kernel rather than by
+Python, cannot be bypassed by a misconfigured environment variable, and costs one extra
+short-lived container in development so `npm ci` can still reach the registry.
+
+`internal: true` blocks egress and not ingress, so serving is entirely unaffected — nginx
+reaches control-api exactly as before. That is what makes this cheap now and an
+architectural retrofit later.
+
+**Cost implications** — none. No new service, no new image.
+
+**Security implications** — the reason for the decision. It moves the product's
+load-bearing claim from an assertion to something demonstrable: the evidence is a socket
+attempt failing inside the container that would be running in front of judges. The
+`api`/`edge` split is blast-radius control — if someone later needs to give the Astro dev
+server a route out, that must not silently hand egress to the process holding repository
+snapshots and operator credentials.
+
+**Scalability implications** — none. If a legitimate outbound dependency ever appears, the
+answer is option (b) with an allow-list, not re-attaching a service to `external`.
+
+**Recommendation** — as implemented. The one exception, `command-center-deps`, is
+development-only, exits before the dev server starts, holds no repository content and runs
+no inference client; the finale stack has no npm step and therefore no exception at all.
+
+**Final approval authority** — `cybersecurity` (this closes a Critical); CTO for the
+topology. The reviewer re-runs `finale-egress-evidence.sh` personally before #78 closes.
+
+---
+
+## D-036 · The container runtime socket is never mounted, and a test says so · 2026-08-07 · devops
+
+**Decision** — No container in any profile mounts `/var/run/docker.sock` or a Podman
+equivalent, nothing runs `privileged`, nothing joins a host namespace, and no service adds
+`SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `SYS_RAWIO` or `NET_ADMIN`.
+`tests/architecture/test_container_isolation.py` asserts all of it structurally against
+both compose files, plus a text scan of every tracked file.
+
+**Options considered** — (a) leave it as a convention and a line in the security plan;
+(b) assert it in a test.
+
+**Pros and cons** — The plan called for rootless Podman for the target sandbox. Podman is
+not installed on the build host, so the security review accepted `--network none` plus a
+non-root user as a substitute. What that substitution loses is rootless's guarantee that a
+container escape lands you as an unprivileged user rather than as root on the host, and
+never mounting the runtime socket is what most nearly recovers it — a container with that
+socket can start a sibling with `--privileged -v /:/host` and read or write anything. It is
+also the single most common thing a developer adds at 2am to make a build step work, which
+is exactly the case a convention does not survive. (b) costs one test file.
+
+**Cost implications** — none.
+
+**Security implications** — this is the condition under which the Podman substitution was
+accepted. Treat any pull request that trips this test as a security change requiring a
+`cybersecurity` review, not as a test to relax.
+
+**Scalability implications** — none. If a service genuinely needs to start containers, it
+needs a broker with an allow-list, not the socket.
+
+**Final approval authority** — `cybersecurity`.
+
+---
+
+## D-037 · Generated fuzzer output is not committable; authored demo fixtures are · 2026-08-07 · devops
+
+**Decision** — `.gitignore` ignores fuzz-campaign output at any depth — `fuzz-out/`,
+`crashes/`, libFuzzer's `crash-*` / `leak-*` / `timeout-*` / `oom-*` / `slow-unit-*`
+artifacts, `*.profraw`, `*.profdata`, `*.sancov`, `*.sarif` — and explicitly re-includes
+`demo/repositories/*/corpus/**` and `demo/repositories/*/crash/**`.
+`tests/architecture/test_fuzz_artifacts_are_ignored.py` asserts both halves.
+
+**Options considered** — (a) leave the existing root-anchored rules; (b) broaden the ignore
+rules and negate the authored fixtures; (c) broaden the rules and move the authored
+fixtures somewhere the patterns do not reach.
+
+**Pros and cons** — (a) is the status quo, and the rules were anchored to the repository
+root (`/fuzz-out/`, `/corpus/`), so a fuzz run inside `demo/repositories/<target>/` — which
+is exactly where every fuzz run will happen — produced files git would happily have staged.
+Crash inputs and corpus entries are derived from a target repository's content; this
+repository is private today and the CEO can open it at any point (D-001), at which moment a
+`crash-8f3a...` committed three weeks earlier becomes target content published without
+anyone deciding to. (c) would work and means renaming directories the demo-target owner
+already built and referenced. (b) keeps their layout and costs four negation lines.
+
+The negations are load-bearing, not decorative: `crash-*` as a broad pattern eats
+`demo/repositories/pktcfg/crash/crash-literal-tab.bin`, which is an authored fixture the D5
+gate depends on. Verified against the real `feat/demo-target` tree — all eight seed inputs
+and the crash fixture stay tracked, and simulated campaign output in four different
+locations is ignored.
+
+**Cost implications** — none.
+
+**Security implications** — positive, and it is a rising risk rather than a current one:
+the exposure arrives the day the repository goes public, by which time the artifacts are
+already in history and removing them is a rewrite.
+
+**Scalability implications** — none.
+
+**Final approval authority** — `cybersecurity`, with the demo-target owner confirming that
+nothing they rely on became ignored. The evidence for that is in the PR.
