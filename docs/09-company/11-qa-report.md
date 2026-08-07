@@ -3,18 +3,162 @@
 **Author of this report:** `qa` agent
 **Date:** 2026-08-07 (D1)
 **Under test:** PR #87 — Django + django-ninja control API and the frozen mission contract
-**Tested at:** `origin/feat/control-api-scaffold` (`a853e80`) **merged with** `origin/main`
-(`ff0a11e`), merge commit `1eeb176` in a throwaway detached worktree. Nothing was pushed.
-**Issues in scope:** #6, #9 (Django half), #77, #78, #80, and the CTO/security conditions
-held against this code.
+**Round 1 tested at:** `origin/feat/control-api-scaffold` (`a853e80`) merged with `origin/main`
+(`ff0a11e`), merge commit `1eeb176`.
+**Round 2 (re-review) tested at:** `origin/feat/control-api-scaffold` (`743ffa9`), already
+containing `origin/main` (`81e7657`) — no merge needed.
+Both in throwaway detached worktrees. Nothing was pushed to either branch.
+**Issues in scope:** #6, #9 (Django half), #77, #78, #80, #103, and the CTO's nine conditions
+C1–C9 (review comment on **#79** — see §0).
 
 ---
 
-## Verdict
+## 0. Round 2 — re-review after the mechanical fixes
+
+Round 1 rejected this PR on two blockers. Both are fixed, plus BUG-016. I re-ran §2, §3, §4
+and §9 against `743ffa9`. **Everything below in this section is executed output from the
+re-run, not a report of what I was told.**
+
+| Bug | Round 1 | Round 2 | Evidence |
+|---|---|---|---|
+| **BUG-001** `USE_X_FORWARDED_HOST` | **blocker** — CI job `pytest` red | **CLOSED** | §9.1 |
+| **BUG-002** exporter ignores `argv[1]` | **blocker** — drift gate dead | **CLOSED** | §9.2 |
+| **BUG-016** C5 check skipping in CI | minor | **CLOSED** | §9.1 |
+| BUG-003 – BUG-005, BUG-007 – BUG-010, BUG-012, BUG-014, BUG-017 | open | **still open, re-verified byte for byte** | §3, §4 |
+| BUG-006, BUG-011, BUG-013 | `cybersecurity`'s to rate | unchanged | §3, §10 |
+
+**The verdict moves from REJECTED to APPROVED WITH KNOWN ISSUES.** The revised verdict, and
+what it is conditional on, is in §0.4.
+
+### 0.1 Correction to my Round 1 assumption about C1–C9
+
+I recorded in Round 1 that I could not find a nine-condition set and had tested the
+*substance* of the two conditions described to me rather than their labels. That assumption
+is now resolved: **the nine conditions are a CTO review comment on PR #79**, not the merged
+`05-cto-technical-review.md` I read (which carries C1–C8 of an earlier, different ruling).
+Retrieved and read in this session. My substance-first approach was correct, and the mapping is:
+
+- **BUG-004 is the CTO's C1** — *"no `PatchCandidate` may be attached to a mission after the
+  first `VerificationRecord` for that mission is written. Enforce it where the transition
+  guard lives, not by convention. Test: `test_cannot_add_candidate_after_verification_starts`."*
+  That test does not exist and the rule is not enforced. **C1 unmet.**
+- **BUG-003 is the CTO's C6** — *"Take `Sequence[VerificationRecord]` and read `record.verdict`
+  … Passing raw enum values snaps [the chain] at the one link that matters."* The signature
+  says `Sequence[VerificationRecord]`; Python does not check it, and §4b shows an in-contract
+  `CandidateVerdict` satisfying the guard. **C6 met in letter, not in substance.**
+- One deviation from C6 worth naming, and it is in the *safe* direction: C6 says *"Keep
+  empty-list → `HUMAN_REVIEW`"*. The implementation raises `VerificationRequiredError`
+  instead (§4a, case A1). Refusing is stricter than degrading. Recorded, not filed.
+- **C2** (*mission verdict carries its candidate denominator*) is **met at contract level** —
+  `MissionVerdictSummary` carries `candidates` plus `verified_count` / `rejected_count` /
+  `human_review_count`, which is everything the "1 of 2 candidates verified" string needs.
+  Rendering is #42/#51, not this PR.
+- **C3** (*where two candidates both verify, the bundle must name the recommended one*) is
+  **unmet** and is a **new finding this round** — see BUG-018, §0.3.
+- **C5** (*`gateway/` not importable from the ASGI process*) now genuinely asserts, having
+  silently skipped before (§9.1).
+
+### 0.2 I verified the fixer's own account of their rejected first attempt
+
+The orchestrator reported that their first BUG-016 fix also set `DJANGO_SETTINGS_MODULE` on
+the root architecture step, which broke the step outright, and that they caught it by
+replaying the CI job rather than reading the YAML. I reproduced that failure mode rather than
+take it on trust:
+
+```
+$ DJANGO_SETTINGS_MODULE=config.settings.test pytest tests/ -q -rs
+  File ".../pytest_django/plugin.py", line 193, in _handle_import_error
+    raise ImportError(msg) from None
+ImportError: No module named 'config'
+
+pytest-django could not find a Django project (no manage.py file could be found). You must
+explicitly add your Django project to the Python path to have it picked up.
+```
+
+Dies before a single test runs. The shipped fix — install first, no env block — is correct.
+The self-report is accurate.
+
+### 0.3 New this round — BUG-018, CTO C3 unmet. **minor.**
+
+Now that I have the real condition text, one is not satisfied by the contract:
+
+```
+EvidenceBundle fields: ['mission_id','generated_at','snapshot_sha256','authorization_statement',
+ 'baseline','findings','reproducers','fuzzing','patches','verifications','verdict_summary',
+ 'resource_usage','gates_not_run','substitutions','isolation_mode','tool_versions']
+any recommended / primary / chosen field: NONE
+```
+
+C3: *"where two candidates both verify, the bundle must name the recommended one. Minor.
+`EvidenceBundle.verifications` is a list and nothing says which diff we are claiming. One
+field."* Still one field. Cheap now, and it is the field a judge asks about the moment two
+candidates both pass.
+
+### 0.4 Revised verdict
+
+# APPROVED WITH KNOWN ISSUES
+
+The two blockers are closed and I verified each by executing the failing case, not by reading
+the diff. What remains are **contract-shape questions with a live CTO ruling behind them** —
+C1 and C6 are the CTO's own open conditions, and the orchestrator deliberately did not patch
+them, which is the right call. A QA gate is not the place to decide a contract shape over the
+CTO's head.
+
+**This approval is conditional on all four of these, and I will re-check each:**
+
+1. **C1 (BUG-004) and C6 (BUG-003) are ruled on by the CTO before #12 merges** — not before
+   #12 *starts*, before it *merges*, since #12 is the code that encodes the answer. Fix or a
+   written deferral with an owner and a date; silence is not a ruling.
+2. **BUG-005 (`PAUSED → EXPORTING` reaches `VERIFIED` skipping `PATCH` and `VERIFY`) is fixed
+   or ruled on in the same pass.** It is the same class as C1 and arrived from a different
+   direction.
+3. **BUG-007 and BUG-008 are fixed, or the PR body's "structurally impossible" wording is
+   corrected** to "validated where declared". Either is acceptable. Both claims cannot stand
+   as written, because that wording is the kind that reaches a slide.
+4. **#103 is fixed before any second Python version touches this repository** (§0.5).
+
+**What "approved with known issues" does not mean.** It does not mean the eight open findings
+are acceptable at D6. It means they are not merge-blockers for a D1 scaffold whose HTTP
+surface is 22 of 23 endpoints returning 501, and that holding the branch hostage while the CTO
+rules would cost more than merging it does. Every one of them is in §11 with a severity and an
+owner.
+
+### 0.5 #103 — confirmed, and it is the right call to file it
+
+```
+Python 3.12.13    422 -> 'Unprocessable Entity'
+Python 3.13.12    422 -> 'Unprocessable Content'
+
+$ grep -o "Unprocessable [A-Za-z]*" packages/schemas/openapi.json | sort | uniq -c
+  23 Unprocessable Entity
+```
+
+Twenty-three occurrences, inherited from `http.HTTPStatus`. The suite on 3.13, with
+`pytest-asyncio` present:
+
+```
+$ .venv313/bin/python -m pytest --tb=no
+1 failed, 168 passed in 0.97s
+FAILED contracts/tests/test_openapi_dump.py::test_committed_dump_is_current
+E  - ocessable Content"
+E  + ocessable Entity"
+```
+
+Exactly one failure and exactly the predicted cause. The orchestrator's framing is right and
+worth repeating: **the interpreter version is an undeclared input to a supposedly
+deterministic exporter**, and a drift detector that fires on non-drift is one people learn to
+mute. The fix belongs in the exporter (normalise the reason phrase) rather than in a pin,
+because a pin only holds until someone runs it locally on a newer Python — which is precisely
+how this was found.
+
+---
+
+## Verdict — Round 1 (superseded by §0.4)
 
 # REJECTED
 
 **Two blockers.** Both are CI-red-on-merge, and both are cheap to fix today.
+**Both were fixed in `1db13a2` / `743ffa9` and re-verified closed in §0 and §9.**
 
 | | |
 |---|---|
@@ -84,6 +228,20 @@ $ cd apps/control-api && .venv/bin/python -m pytest
 169 passed in 0.99s
 ```
 
+**Round 2, `743ffa9`, fresh venv, Python 3.12.13 — still 169, still all passing:**
+
+```
+$ .venv/bin/python -m pytest
+........................................................................ [ 42%]
+........................................................................ [ 85%]
+.........................                                                [100%]
+169 passed in 1.23s
+```
+
+On **Python 3.13.12**, which CI does not use: `1 failed, 168 passed`, the single failure being
+`test_committed_dump_is_current` on the HTTP-422 reason phrase. That is issue **#103** and it
+is environmental, not a defect in this PR — full evidence in §0.5.
+
 Collected breakdown, so the number is not just a total:
 
 ```
@@ -142,7 +300,23 @@ operations: 23
 Note: the PR says "twenty-two typed endpoints". There are 22 *paths* and **23 operations**
 (`/api/v1/missions` carries both `get` and `post`). Documentation nit, no action.
 
-### TC-4 — Is drift actually caught? **PASS (in-suite) / FAIL (CI gate — see BUG-002).**
+**Round 2, `743ffa9`.** The exporter now takes an optional output path, so I re-checked that
+the *no-argument* default still writes where it always did and still produces the same bytes:
+
+```
+$ md5 ../../packages/schemas/openapi.json
+MD5 (...) = 8862ca7e4ade67e7365744af71ddbd36
+$ .venv/bin/python tools/export_openapi.py
+unchanged: .../packages/schemas/openapi.json (172311 bytes)
+$ md5 ../../packages/schemas/openapi.json
+MD5 (...) = 8862ca7e4ade67e7365744af71ddbd36
+$ git status --porcelain packages/
+(empty)
+```
+
+Identical digest to Round 1. The `argv[1]` change did not alter the default output.
+
+### TC-4 — Is drift actually caught? **Round 1: PASS in-suite / FAIL at the CI gate. Round 2: PASS at both.**
 
 I injected a real schema change (`ArtifactRef.kind` gained a description) and re-ran:
 
@@ -154,7 +328,9 @@ FAILED contracts/tests/test_openapi_dump.py::test_committed_dump_is_current
 1 failed in 0.27s
 ```
 
-The in-suite guard is real. The CI-level guard is not — see BUG-002.
+The in-suite guard was always real. The CI-level guard was not, in Round 1 — see BUG-002 and
+its Round-2 resolution in §9.2, where I re-injected the same drift and confirmed the gate now
+fails for the *right* reason and leaves the committed dump untouched.
 
 ### TC-5 — Contract completeness. **PASS.**
 
@@ -274,6 +450,24 @@ idna.encode(uts46=True): b'api.openai.com'
   with the model gateway (#35). **NOT RUN — not yet applicable.**
 - **No DNS-resolving-outward test against a live resolver**, beyond the decimal-encoding
   case above, which is the same class and needed no network. **NOT RUN.**
+
+### Round 2 re-run of this entire section — **unchanged, byte for byte**
+
+`contracts/model_policy.py` was not touched by the fix commit, and I re-ran the table rather
+than infer that from the diff:
+
+```
+$ .venv/bin/python attack_model_policy.py        # against 743ffa9
+MISMATCHES: 19 of 30
+
+$ SMALL_MODEL_BASE_URL=... .venv/bin/python manage.py check
+https://api.openai.com/v1                  -> SystemCheckError (brahmadatta.E001)   [correct]
+http://169.254.169.254/                    -> System check identified no issues (0 silenced).
+http://api。openai。com/v1                 -> System check identified no issues (0 silenced).
+http://134744072/v1                        -> System check identified no issues (0 silenced).
+```
+
+Nothing regressed and nothing improved. SEC-02 and the new decimal-encoding case both stand.
 
 ### Sandbox egress vocabulary — **PASS**
 
@@ -402,6 +596,30 @@ drop `EXPORTING`; and `EXPORTING` should only be reachable from `VERIFY`.
 [refused] E3  CREATED -> VERIFIED directly:  InvalidStateTransitionError: not a legal transition
 [ALLOWED] E4  VERIFY -> HUMAN_REVIEW with no records  (documented as legitimate — correct)
 ```
+
+### 4f. Round 2 re-run of §4a–§4e — **every case reproduces identically**
+
+The fix commit touched `config/settings/base.py` and `tools/export_openapi.py` only. I still
+re-executed the full attack suite against `743ffa9` rather than reason from the diff, because
+"nothing in `contracts/` changed" is a claim and re-running is a measurement:
+
+```
+A1 refused · A2 refused · A3 refused · A4 refused · A5 allowed (expected)
+B1 BYPASS  · B2 BYPASS  · B3 AttributeError
+C1 BYPASS  · C2 BYPASS  · C3 BYPASS  · C4 BYPASS
+D1 BYPASS  · D2 BYPASS  · D3 BYPASS  · D4 refused (expected)
+E1 refused · E2 refused · E3 refused · E4 allowed · E5 allowed
+
+F   mission reached VERIFIED without ever entering PATCH or VERIFY: True
+G   allowed_transitions(HUMAN_REVIEW) = []
+H   POSTURE_BY_STATE[CANCELLED] = CANCELLED   ·   PAUSED = HUMAN_REVIEW
+I   two candidates -> two records -> [VERIFIED, REJECTED] in one EvidenceBundle: works
+J   schema names containing candidate-set / frozen / manifest / freeze: NONE
+```
+
+Identical to Round 1 in every case. **#77 stays fixed; C1 and C6 stay open.** The orchestrator
+stated they deliberately did not patch BUG-003/004/005 pending a CTO ruling, and that is what
+the code shows.
 
 ---
 
@@ -688,7 +906,87 @@ the answer belongs to `product-manager`, not to me.
 
 ## 9. CI — the two blockers, with output
 
-### BUG-001 — required job `pytest` goes red on merge
+> **Round 2 status: all three CI findings in this section are CLOSED.** §9.1 and §9.2 below
+> carry the Round-1 evidence first, then the Round-2 re-verification. I closed each by
+> executing the case that failed, not by reading the fix.
+
+### 9.1 — BUG-001 and BUG-016, CLOSED. Round-2 evidence first.
+
+I replayed CI job 1 in the exact step order `ci.yml` now specifies:
+
+```
+--- step: Install test tooling (root requirements-dev.txt)
+--- step: Install control API dependencies          <- NEW, and it is the whole fix
+--- step: Architecture tests:  pytest tests/ -q -rs
+....................................                                     [100%]
+36 passed in 0.67s
+```
+
+**36 passed, zero skipped.** Round 1 was `1 failed, 34 passed, 1 skipped`. Both the failure
+and the skip are gone, and the skip's disappearance is the more valuable half — a check that
+skips is a check that reports green while asserting nothing.
+
+The two specific checks that were broken, named individually so this is not a count:
+
+```
+tests/architecture/test_ingress_contract.py::test_use_x_forwarded_host_is_enabled          PASSED
+tests/architecture/test_ingress_contract.py::test_finale_closes_database_connections...    PASSED
+tests/architecture/test_ingress_contract.py::test_secure_proxy_ssl_header_is_set           PASSED
+tests/architecture/test_import_direction.py::test_asgi_packages_do_not_import_the_gateway  PASSED
+tests/architecture/test_import_direction.py::test_importing_the_asgi_app_does_not_load...  PASSED
+5 passed in 0.17s
+```
+
+`test_import_direction` is the CTO's **C5**. It was skipping silently in Round 1; it now
+asserts.
+
+The setting landed in `base.py`, not `finale.py`, so **both profiles carry it** — I checked
+both rather than trusting the file location:
+
+```
+development  USE_X_FORWARDED_HOST=True  SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTO', 'https')
+finale       USE_X_FORWARDED_HOST=True  SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTO', 'https')
+```
+
+That is better than what I asked for. My Round-1 recommendation said "one line in `base.py`";
+putting `SECURE_PROXY_SSL_HEADER` there too means the development profile, which runs behind
+the same nginx, stops having the same defect.
+
+**Regression check — did the ingress fix break the running surface?** Smoke-tested under
+uvicorn after the change:
+
+```
+GET  /api/v1/system/health          -> 200
+GET  /api/v1/missions (no token)    -> 401
+GET  /api/v1/missions (operator)    -> 501
+GET  /api/v1/openapi.json           -> 200
+POST /api/v1/missions network=allow -> 422
+health via forwarded headers        -> 200
+SSE:  10:06:38.707 : brahmadatta stream open
+      10:06:38.952 : heartbeat
+      10:06:39.205 : heartbeat
+      10:06:39.212 event: contract.not_implemented
+```
+
+Nothing regressed; SSE still genuinely streams at 250 ms intervals.
+
+**One operational note, verified and deliberately *not* filed as a bug.** With
+`USE_X_FORWARDED_HOST = True`, an `X-Forwarded-Host` outside `ALLOWED_HOSTS` now yields
+`400 Bad Request`. That is correct Django behaviour and it is the point of the setting. I
+checked whether the infrastructure already accounts for it, and it does — nginx forwards
+`$http_host` as both `Host` and `X-Forwarded-Host`
+(`infrastructure/compose/nginx/includes/proxy-headers.conf:25,29`), and the finale compose
+already hard-fails without the hostname:
+
+```
+docker-compose.finale.yml:109  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set to the finale hostname}
+```
+
+So the coupling exists, it predates this change, and infra handled it. Recording it because
+whoever runs the finale needs to know a wrong `DJANGO_ALLOWED_HOSTS` is now a 400 on every
+request rather than a subtly wrong redirect.
+
+### BUG-001 — Round-1 evidence: required job `pytest` goes red on merge
 
 On clean `origin/main`, the check skips:
 
@@ -763,17 +1061,86 @@ Fix (backend developer, `apps/control-api/tools/export_openapi.py`): honour `sys
 as the output path when given. Four lines. The script's dual-shape support then works as
 designed.
 
-### BUG-016 — C5's import-direction check silently skips in CI. **minor.**
+### 9.2 — BUG-002, CLOSED. Round-2 evidence.
+
+The fix landed as recommended. Clean run, exit 0, and the committed dump untouched:
+
+```
+$ infrastructure/scripts/openapi-contract-check.sh
+  exporter: apps/control-api/tools/export_openapi.py
+  dump:     packages/schemas/openapi.json
+updated: /private/var/folders/.../tmp.SmHiu7Hocu/openapi.json (172311 bytes)
+openapi contract: PASS — the committed dump matches the live schema
+REAL EXIT=0
+
+$ git status --porcelain packages/schemas/openapi.json
+(empty)
+```
+
+Note the path in `updated:` — it is now the script's scratch directory, not the repository.
+
+**A gate that passes proves nothing; a gate that fails correctly is the whole product.** So I
+re-injected the same drift as TC-4 (`ArtifactRef.kind` gains a description, dump not
+regenerated) and ran it again:
+
+```
+REAL EXIT=1
+updated: /private/var/folders/.../tmp.HpXzfXgcLU/openapi.json (172358 bytes)
+--- /dev/fd/63
++++ /dev/fd/62
+@@ -49,6 +49,7 @@
+         "properties": {
+           "kind": {
++            "description": "QA DRIFT PROBE 2",
+             "maxLength": 64,
+
+openapi contract: FAILED — the committed dump is stale.
+
+The API schema changed and packages/schemas/openapi.json was not regenerated. Anything
+generated from that file — the frontend client above all — is now describing an API that
+does not exist.
+
+Fix:
+  python3 apps/control-api/tools/export_openapi.py packages/schemas/openapi.json
+  git add packages/schemas/openapi.json
+
+$ git status --porcelain packages/schemas/openapi.json
+(empty)          <- the gate did NOT self-heal the dump this time
+```
+
+Three properties, each of which had to hold and each of which I checked separately:
+
+1. it **fails** on real drift (exit 1, not the Round-1 exit-1-for-the-wrong-reason);
+2. it fails with a **readable unified diff naming the exact field**, which is what makes the
+   message actionable rather than a wall;
+3. it leaves the committed dump **unmodified**, which is the property whose absence made the
+   Round-1 gate worse than no gate.
+
+The in-suite `test_committed_dump_is_current` also still fails on the same drift, so the
+freeze now has two independent guards rather than one guard and one decoy. Issue #6's
+acceptance criterion is true for the first time.
+
+### BUG-016 — CLOSED. Round-1 evidence: C5's import-direction check silently skips in CI. **minor.**
 
 ```
 SKIPPED [1] tests/architecture/test_import_direction.py:125:
   could not import config.asgi in this environment (dependencies missing?)
 ```
 
-`ci.yml` runs `pytest tests/ -q` **before** installing `apps/control-api/requirements.txt`,
-so this architecture invariant — the ASGI process must not import the gateway — will skip on
-every run rather than fail. Reorder the steps. Owner: `devops` (ci.yml came from #91, not
-this PR), but the skip only became reachable because this PR added `config/asgi.py`.
+`ci.yml` ran `pytest tests/ -q` **before** installing `apps/control-api/requirements.txt`,
+so this architecture invariant — the ASGI process must not import the gateway — skipped on
+every run rather than failing. Owner: `devops` (ci.yml came from #91, not this PR), but the
+skip only became reachable because this PR added `config/asgi.py`.
+
+**Round 2: closed** — a dedicated install step now precedes the architecture step, and
+`-rs` was added so any future skip prints its reason in the CI log instead of passing as a
+dot. Evidence in §9.1: 36 passed, zero skipped, `test_import_direction` named and passing.
+
+The first attempt at this fix also set `DJANGO_SETTINGS_MODULE` on that step, which broke it
+outright. The fixer caught it themselves and reported it; I reproduced it rather than take
+the account on trust (§0.2). Worth recording because it is a good failure: the bug was found
+by *replaying the CI job* instead of reasoning about the YAML, which is the same reason this
+QA phase caught BUG-002 at all.
 
 ### BUG-015 — "ruff / mypy … both were green at D1" is not accurate. **trivial.**
 
@@ -866,26 +1233,29 @@ separate readiness probe. Owner: backend developer, with `devops` on the compose
 
 Severity: **blocker** = cannot merge; **major** = must fix before the D6 demo depends on it;
 **minor** = fix when convenient; **trivial** = cosmetic.
+**Status** is as of Round 2 (`743ffa9`). Every "CLOSED" was verified by executing the case
+that previously failed — none was closed by reading a diff.
 
-| ID | Sev | Summary | Owner |
-|---|---|---|---|
-| **BUG-001** | **blocker** | `USE_X_FORWARDED_HOST` unset → required CI job `pytest` fails on merge (§9) | backend-developer |
-| **BUG-002** | **blocker** | Exporter ignores `argv[1]` → CI job `openapi dump is current` cannot pass and rewrites the dump it polices (§9) | backend-developer |
-| BUG-003 | major | `assert_verdict_is_evidenced` duck-types on `.verdict`; an in-contract `CandidateVerdict` with no gate matrix satisfies the #77 guard (§4b) | backend-developer |
-| BUG-004 | major | The verification-record set is not bound to the mission: cross-mission records accepted, duplicates counted twice, dropping a `REJECTED`/`HUMAN_REVIEW` record reaches `VERIFIED`. Candidate set is not frozen (CTO C1, #80) (§4c) | backend-developer |
-| BUG-005 | major | `PAUSED → EXPORTING` lets a mission reach `VERIFIED` having never entered `PATCH` or `VERIFY` (§4d) | backend-developer |
-| BUG-006 | *deferred to `cybersecurity`* | `model_policy` accepts metadata endpoints, IDNA homographs, and **a decimal-encoded public IPv4** (`http://134744072/` → 8.8.8.8) — the last is new beyond SEC-02 (§3) | cybersecurity → backend-developer |
-| BUG-007 | major | Provenance defaults point at the strong claim: `ModelProvenance` replay fields default to "live", `GateResult.evidence_source` defaults to `TOOL_EXECUTION` (§8) | backend-developer |
-| BUG-008 | major | An operator-supplied patch is recordable as `MODEL_GENERATED` with two invented strings; `prompt_sha256` is optional (§8) | backend-developer |
-| BUG-009 | minor | `MissionDetail(verdict=…, verdict_summary=None)` and `(state=VERIFIED, posture=FAILED)` both constructible, contradicting their own docstrings (§8) | backend-developer |
-| BUG-010 | major | `sqlite:///name.db` → `/name.db`; `migrate` fails; the repo's own `ci.yml` uses this form twice (§10) | backend-developer |
-| BUG-011 | *deferred to `cybersecurity`* | PostgreSQL DSN query params silently dropped — `?sslmode=require` ignored (§10) | cybersecurity → backend-developer |
-| BUG-012 | minor | `/api/v1/system/health` returns 200 while `degraded` (§10) | backend-developer + devops |
-| BUG-013 | *deferred to `cybersecurity`* | `/api/v1/docs` and `/api/v1/openapi.json` are unauthenticated in the **finale** profile (§6) | cybersecurity |
-| BUG-014 | minor | `HUMAN_REVIEW` is terminal with no outgoing transitions — a reviewed mission cannot be resumed, resolved or cancelled. `PAUSED` also displays as `HUMAN_REVIEW` (§8) | product-manager (decision), then backend-developer |
-| BUG-015 | trivial | `ci.yml` asserts ruff and mypy "were green at D1"; ruff reports 29, mypy 2 (§9) | backend-developer |
-| BUG-016 | minor | `ci.yml` runs `pytest tests/` before installing control-api deps, so C5's import-direction check skips silently on every run (§9) | devops |
-| BUG-017 | minor | No `GET /missions/{id}/verifications` collection route; the D6 side-by-side panel must fan out over patches (§5) | backend-developer + product-manager |
+| ID | Sev | Status | Summary | Owner |
+|---|---|---|---|---|
+| **BUG-001** | **blocker** | **CLOSED** §9.1 | `USE_X_FORWARDED_HOST` unset → required CI job `pytest` fails on merge. Now in `base.py`, so both profiles carry it; 36 passed, 0 skipped | backend-developer |
+| **BUG-002** | **blocker** | **CLOSED** §9.2 | Exporter ignored `argv[1]` → the drift gate rewrote the dump it polices and could never fail. Now exits 0 clean, exits 1 with a field-level diff on real drift, and leaves the dump untouched | backend-developer |
+| BUG-016 | minor | **CLOSED** §9.1 | `ci.yml` ran `pytest tests/` before installing control-api deps, so C5's import-direction check skipped silently every run | devops |
+| BUG-003 | major | **open** — CTO **C6** | `assert_verdict_is_evidenced` duck-types on `.verdict`; an in-contract `CandidateVerdict` with no gate matrix satisfies the #77 guard (§4b) | **CTO ruling**, then backend-developer |
+| BUG-004 | major | **open** — CTO **C1** | The verification-record set is not bound to the mission: cross-mission records accepted, duplicates counted twice, dropping a `REJECTED`/`HUMAN_REVIEW` record reaches `VERIFIED`. Candidate set is not frozen; `test_cannot_add_candidate_after_verification_starts` does not exist (§4c) | **CTO ruling**, then backend-developer |
+| BUG-005 | major | **open** | `PAUSED → EXPORTING` lets a mission reach `VERIFIED` having never entered `PATCH` or `VERIFY` (§4d) | **CTO ruling**, then backend-developer |
+| BUG-006 | *deferred to `cybersecurity`* | open | `model_policy` accepts metadata endpoints, IDNA homographs, and **a decimal-encoded public IPv4** (`http://134744072/` → 8.8.8.8) — the last is new beyond SEC-02 (§3) | cybersecurity → backend-developer |
+| BUG-007 | major | **open** | Provenance defaults point at the strong claim: `ModelProvenance` replay fields default to "live", `GateResult.evidence_source` defaults to `TOOL_EXECUTION` (§8) | backend-developer |
+| BUG-008 | major | **open** | An operator-supplied patch is recordable as `MODEL_GENERATED` with two invented strings; `prompt_sha256` is optional (§8) | backend-developer |
+| BUG-009 | minor | **open** | `MissionDetail(verdict=…, verdict_summary=None)` and `(state=VERIFIED, posture=FAILED)` both constructible, contradicting their own docstrings (§8) | backend-developer |
+| BUG-010 | major | **open** | `sqlite:///name.db` → `/name.db`; `migrate` fails; the repo's own `ci.yml` uses this form twice (§10) | backend-developer |
+| BUG-011 | *deferred to `cybersecurity`* | open | PostgreSQL DSN query params silently dropped — `?sslmode=require` ignored (§10) | cybersecurity → backend-developer |
+| BUG-012 | minor | **open** | `/api/v1/system/health` returns 200 while `degraded` (§10) | backend-developer + devops |
+| BUG-013 | *deferred to `cybersecurity`* | open | `/api/v1/docs` and `/api/v1/openapi.json` are unauthenticated in the **finale** profile (§6) | cybersecurity |
+| BUG-014 | minor | **open** | `HUMAN_REVIEW` is terminal with no outgoing transitions — a reviewed mission cannot be resumed, resolved or cancelled. `PAUSED` also displays as `HUMAN_REVIEW` (§8) | product-manager (decision), then backend-developer |
+| BUG-015 | trivial | **open** | `ci.yml` asserts ruff and mypy "were green at D1"; ruff reports 29, mypy 2. Re-checked on `743ffa9`: the two changed files carry one finding, `export_openapi.py:71 T201 print found` (pre-existing pattern, and the script is meant to talk to the operator) | backend-developer |
+| BUG-017 | minor | **open** | No `GET /missions/{id}/verifications` collection route; the D6 side-by-side panel must fan out over patches (§5) | backend-developer + product-manager |
+| **BUG-018** | minor | **open** — CTO **C3**, new in Round 2 | `EvidenceBundle` has no `recommended_patch_id`. Where two candidates both verify, nothing says which diff we are claiming. One field (§0.3) | backend-developer |
 
 ### Reproduction
 
@@ -920,10 +1290,63 @@ Listed because omitting them would be the dishonest part.
 | Accessibility and UI testing | **N/A** | No UI in this PR. |
 | Load, soak, or resource-ceiling testing | **NOT RUN** | Every endpoint but health is a 501. |
 | Unhandled-500 envelope and traceback leakage with `DEBUG=False` | **NOT RUN** | I could not trigger an unhandled exception; every path I reached raised a typed `ContractError`. Worth a deliberate fault-injection test later. |
+| **Round 2 only:** PostgreSQL re-verification (§6) | **NOT RE-RUN** | Round 1's PostgreSQL run stands. The fix commit touched `base.py` (two settings) and `export_openapi.py` only, and `env.database_from_url` is unchanged — but I am recording this as *not re-run* rather than implying it was. |
+| **Round 2 only:** §7 HTTP surface in full | **PARTIAL** | Re-smoked after the ingress change (health, 401, 501, 422, openapi, forwarded headers, SSE — all in §9.1). The full role/envelope matrix and the trace-ID table were **not** re-executed; Round 1's results stand for those. |
 
 ---
 
-## 13. Decision record — recommending rejection on D1
+## 13. Decision records
+
+### DR-QA-2 (Round 2) — approving with known issues once the blockers closed
+
+**Decision.** Move the verdict from REJECTED to **APPROVED WITH KNOWN ISSUES**, conditional
+on the four items in §0.4.
+
+**Options considered.**
+(a) **APPROVED WITH KNOWN ISSUES** — the two blockers are executed-verified closed; the eight
+open findings are documented with owners, and the two sharpest are the CTO's own open
+conditions.
+(b) **Hold REJECTED until C1 and C6 are ruled on.** Nothing merges until the contract shape
+is settled.
+(c) **APPROVED, clean.** Not defensible — eight findings remain, three of them touching the
+product's central claim.
+
+**Pros and cons.**
+(a) unblocks the Command Center against a frozen, drift-guarded contract on D1, and both CI
+jobs are now green with the drift gate proven to fail correctly on injected drift. Con: eight
+findings ride into `main`, and "known issues" is a phrase that decays into "issues" if nobody
+re-checks. Mitigated by §0.4's four named conditions and §14's re-check list.
+(b) is the purist call and I considered it seriously, because BUG-004 is the CTO's C1 and C1
+is the one that makes D6 structurally reachable. I rejected it for a reason of authority, not
+convenience: **C1 and C6 are the CTO's conditions, and QA blocking a merge to force a CTO
+ruling inverts who decides what.** My job is to make the cost of not ruling visible, which
+§0.4 and §14 do. It is also empirically weak — the branch sitting unmerged does not make the
+ruling arrive faster, and it stops a frontend developer starting against a contract that is
+now demonstrably frozen.
+(c) invalid; §11 lists eighteen findings, eight still open.
+
+**Cost implications.** Approving now costs the re-check in §14 — about an hour of mine when
+#12 lands. Holding would cost every role downstream of the frozen contract a day, to force a
+decision I do not own.
+
+**Security implications.** Unchanged from Round 1. BUG-006, BUG-011 and BUG-013 are
+`cybersecurity`'s to rate; none is regressed by this PR and one (the decimal-encoded public
+IPv4) is new information for them. The ingress fix is a net security improvement: the
+development profile stops having the same forwarded-header defect the finale profile had
+fixed.
+
+**Scalability implications.** None from this decision. CTO C1's thread-pool question (§7)
+remains genuinely untested and is called out as NOT RUN, not as passed.
+
+**Recommendation.** (a), with §0.4's four conditions binding and re-checked by me.
+
+**Final approval authority.** CTO for BUG-003/004/005 (they are C6, C1 and a sibling of C1);
+`product-manager` for BUG-014 and BUG-017; `cybersecurity` for BUG-006/011/013. My verdict
+covers the release gate only — it is a statement of what was executed and what it showed.
+
+---
+
+### DR-QA-1 (Round 1, superseded by DR-QA-2) — recommending rejection on D1
 
 **Decision.** Reject PR #87 rather than merge with the two CI blockers filed as follow-ups.
 
@@ -966,17 +1389,48 @@ is not a veto on the schedule — it is a statement of what was executed and wha
 
 ---
 
-## 14. Exit criteria for re-review
+## 14. Exit criteria
 
-I will re-run everything in §2, §3, §4 and §9 on the updated branch. To flip to APPROVED:
+### Round 1's exit criteria, and how each was met
 
-1. `pytest tests/ -q` green on the merge result (BUG-001).
-2. `infrastructure/scripts/openapi-contract-check.sh` exits 0, **and** leaves
-   `git status --porcelain packages/schemas/openapi.json` empty (BUG-002). I will verify by
-   injecting drift and confirming it fails for the right reason.
-3. A ruling — fix or explicit written deferral with an owner and a date — on BUG-003,
-   BUG-004 and BUG-005. A deferral is acceptable; silence is not.
-4. BUG-007 and BUG-008 fixed, or the PR body's "structurally impossible" wording corrected
-   to "validated where declared". Either is fine. Both claims cannot stand as written.
-5. 169+ tests still green, with new regression tests covering whichever of B2, C1–C4 and F
-   get fixed.
+| # | Criterion | Result |
+|---|---|---|
+| 1 | `pytest tests/ -q` green on the merge result (BUG-001) | **MET** — `36 passed`, and the 1 skip is gone too |
+| 2 | `openapi-contract-check.sh` exits 0 **and** leaves the dump unmodified; verified by injecting drift and confirming it fails for the right reason (BUG-002) | **MET** — all three properties checked separately, §9.2 |
+| 3 | A ruling on BUG-003, BUG-004, BUG-005 | **NOT MET — carried forward.** Correctly so: these are CTO C6, C1 and a sibling of C1. The fixer declined to patch them pending a ruling, which is the right call |
+| 4 | BUG-007 and BUG-008 fixed, or the "structurally impossible" wording corrected | **NOT MET — carried forward** |
+| 5 | 169+ tests green, with regression tests for whichever bypasses got fixed | **PARTIAL** — 169 green; no bypasses were fixed, so no new regression tests were due |
+
+Two of five met, and they are the two that were blocking. Three carry forward into §0.4.
+
+### What I re-check next, and when
+
+**Trigger: before #12 merges** — because #12 is the code that encodes whatever answer the CTO
+gives on C1 and C6.
+
+1. **BUG-003 / C6** — re-run attack case B2 (`CandidateVerdict` satisfying the guard). Expect
+   a refusal, not an `AttributeError`.
+2. **BUG-004 / C1** — re-run cases C1–C4, and check for the existence of
+   `test_cannot_add_candidate_after_verification_starts` by name, since the CTO specified it
+   by name.
+3. **BUG-005** — re-run the seven-step `PAUSED → EXPORTING → VERIFIED` walk (case F).
+4. **BUG-007 / BUG-008** — re-run cases D1, D2, D3. If the wording is corrected instead of the
+   code, I check the wording in the PR body, `00-product-identity.md` and any slide copy, and
+   the finding closes as documentation rather than as code.
+5. **#103** — re-run the suite on **both** 3.12 and 3.13 and require the same result from each.
+   A version-independent exporter is the fix; a pin is not.
+6. **BUG-010** — re-run the DSN table the moment D2's models land, since that is when it stops
+   being dormant.
+7. **BUG-018 / C3** — check `EvidenceBundle` for a recommended-candidate field.
+
+**Trigger: before D6** — the items in §12 that cannot be tested against a 501 surface:
+SSE through nginx (`smoke-sse.sh`), CTO C1's thread-pool behaviour under genuinely held
+streams, C3's gap-free `sequence` under two writers, and the full suite against PostgreSQL
+once there is a schema to exercise.
+
+### Standing note on this report
+
+Round 1 and Round 2 are both preserved above rather than overwritten. A QA report that
+silently rewrites its own history to match the current state is worth as much as a drift
+detector that regenerates the file it is checking — which is, as it happens, exactly the bug
+this phase found.
