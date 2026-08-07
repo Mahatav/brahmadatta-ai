@@ -1388,3 +1388,158 @@ already in history and removing them is a rewrite.
 
 **Final approval authority** — `cybersecurity`, with the demo-target owner confirming that
 nothing they rely on became ignored. The evidence for that is in the PR.
+
+---
+
+## D-038 · Mission phase order is `STRESS_TEST → CORRELATE`; `CLAUDE.md` is stale and gets amended · 2026-08-07 · CTO
+
+**Decision** — The mission phase order is:
+
+```
+authorize → ingest → baseline → analyze → stress-test → correlate → patch → verify → export evidence
+```
+
+`STRESS_TEST` precedes `CORRELATE`. The architecture spec's ordering stands as ratified; the
+`CLAUDE.md` "Mission workflow" sentence is **stale, not authoritative**, and is amended by the
+CEO rather than silently superseded. This unblocks §7.1a of
+`docs/09-company/04-design-system.md` and the `--bd-phase-order-status` token.
+
+Ruling requested by the orchestrator after the `ui-ux-designer` seat found the conflict,
+correctly refused to pick a winner, and left the Core's arc geometry unbuilt behind a greppable
+blocker. That was the right handling and it is why this costs an hour instead of a re-cut.
+
+**Options considered** — (a) `CORRELATE → STRESS_TEST`, per the `CLAUDE.md` workflow sentence
+and the boilerplate repeated at the foot of the pack; (b) `STRESS_TEST → CORRELATE`, per the
+executable state machine.
+
+**Pros and cons.** Three independent arguments, and they agree.
+
+*1. Substance.* `CORRELATE`'s defined job — architecture spec §2.1, narrowed further in §2.5
+after P2-10 cut multi-finding correlation — is to bind the sanitizer-confirmed crash to a
+`SourceLocation` and produce the bounded `FindingDetail.code_slice` that the patch stage feeds
+the model. Its **input is produced by `STRESS_TEST`** and its **output is consumed by `PATCH`**.
+In the seven-day build this is decisive rather than merely tidy: Semgrep (#22) and
+compiler-warning capture (#23) are CUT, so `TRIAGE`/`ANALYZE` produces nothing at all. Under
+(a), `CORRELATE` would run with **zero inputs** — an arc on the Brahmadatta Core that lights up
+and advances for a stage doing no work. That is not a mis-ordering, it is decorative telemetry,
+and it is banned twice over: by `CLAUDE.md`'s own "no decorative fake metrics" rule and by §2.6
+of the design system. `CLAUDE.md` contains both rules and they contradict each other under the
+P0 cut. The telemetry rule is the one that survives contact with a judge, so it wins.
+
+*2. Weight of sources.* This is not "the CEO's document versus the architect's". Four sources
+already say `STRESS_TEST → CORRELATE`, one says otherwise:
+
+| Source | Order | |
+|---|---|---|
+| `docs/03-technical/16-system-architecture-document.md`, "Mission state machine" | `TRIAGE → STRESS_TEST → CORRELATE` | the pack's **own** architecture document — the one whose job is to specify this |
+| `contracts/enums.py::MissionStage` | `ANALYZE → STRESS_TEST → CORRELATE` | as built; its docstring already flags this exact conflict and resolves it the same way |
+| `contracts/state_machine.py::STATE_SEQUENCE` | `TRIAGE → STRESS_TEST → CORRELATE` | as built |
+| `docs/09-company/06-architecture-spec.md` §2.1–2.2 | `STRESS_TEST → CORRELATE` | ratified on PR #79 |
+| `CLAUDE.md`, "Mission workflow" | `correlate → stress-test` | a restatement of the sentence repeated identically across the pack |
+
+The lone dissenting source is the *one* the project has already characterised as unreliable:
+§6.2 of `docs/09-company/01-vision-and-p0-cut.md` identifies the copy-pasted block at the foot
+of all 79 pack documents as the specific reason blocking items stayed invisible — *"repeating a
+question 79 times is indistinguishable from answering it zero times."* A sentence duplicated
+across 84 files was never independently authored 84 times; it was authored once and propagated.
+It carries the weight of one draft, not of eighty-four.
+
+*3. Cost asymmetry.* Option (a) means changing a frozen contract enum, the state sequence, the
+regenerated OpenAPI dump and its TypeScript types, plus the Core. Option (b) means amending one
+sentence in one document and swapping two arc labels, two `textPath` offsets and two timeline
+row indices. It is not close.
+
+**Cost implications** — under an hour today; a re-derivation of every arc's `textPath`
+direction, the ramp pitch alignment, the §7.2 mapping table and every screenshot already in the
+deck if it waits until after the Core ships.
+
+**Security implications** — none directly. Indirectly protective: option (a) would have put a
+stage on the Core that advances without doing work, which is the visual form of the dishonesty
+D-008, D-009 and D-010 each rule against in their own domain.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), as decided. The six Core arcs become, clockwise from 12 o'clock:
+
+```
+PHASE_ORDER = INGEST → ANALYZE → STRESS TEST → CORRELATE → REMEDIATE → VERIFY
+```
+
+Design seat sets `--bd-phase-order-status: "RESOLVED-D-038"` when the swap lands.
+
+### On amending `CLAUDE.md` — amend, do not supersede silently
+
+Two live sources disagreeing is precisely the defect §6.2 diagnosed, and leaving it guarantees
+the next seat re-litigates this from scratch. So it is amended, not quietly overridden. The
+replacement sentence, ready to apply:
+
+> - **Mission workflow:** authorize → ingest → baseline → analyze → stress-test → correlate →
+>   patch → verify → export evidence.
+
+**I am not making that edit.** `CLAUDE.md` is the CEO's document, and no instruction from
+another agent seat — the orchestrator included — is authority for me to change it. This is a
+one-line CEO edit and it is escalated as such. **The code is not blocked on it:** this ruling is
+what unblocks the Core, and the doc amendment is bookkeeping that follows.
+
+**The 79-document pack is left unedited.** Amending a boilerplate footer across 84 files is
+zero-value churn and would rewrite prior work at scale. Precedent is already set three times —
+the P0 cut left `03-mvp-scope-document.md` unedited, the design system left `docs/02-design/`
+unedited, D-010 left the metrics documents unedited. One erratum line in `docs/README.md`
+instead, folded into **#9**, which already owns reconciling the pack against decisions taken
+after it was written.
+
+### Condition — the phase order is served from the contract, not hardcoded in the UI
+
+A `PHASE_ORDER` array of string literals in the frontend puts the ordering in **two** places:
+`contracts/enums.py` and the Core. A future reorder changes one and not the other, silently,
+and the Core then displays a phase order the pipeline is not following — the exact fake-telemetry
+failure this ruling just avoided, arriving later by a different door.
+
+The codebase has already solved this problem once. `POSTURE_BY_STATE` and `posture_for()` exist
+so that, per their own docstring, *"the UI never invents its own mapping."* The nine
+`MissionStage` members project onto six Core arcs, so it is that **mapping** — not the enum —
+that must be served, exactly as posture is.
+
+Expose the ordered stage list and its Core-arc projection as a typed response in the contract
+(a `GET /api/v1/meta/phases`, or a field on the mission summary — the shape is the backend
+developer's call). It then lands in the committed OpenAPI dump, the generated TypeScript types
+derive `PHASE_ORDER` from it, and #6's CI diff catches any divergence at build time rather than
+on stage. Same cost today; converts "a one-line change later" into "cannot diverge".
+**[Δ #6, #19]**
+
+**Final approval authority** — **CTO for the technical order** (it is determined by a data
+dependency, which is a technical fact, not a preference). **CEO for the `CLAUDE.md` amendment**,
+escalated above with the exact replacement text.
+
+---
+
+## D-039 · Two `ui-ux-designer` corrections affirmed, with one condition · 2026-08-07 · CTO
+
+Recorded for the log, not re-decided — both calls were the designer's to make and both were
+made correctly. Noting them because each sets a precedent another seat will reason from.
+
+**Fragment Mono advance corrected 0.52em → 0.6em, recorded rather than applied silently.**
+Correct handling, and it is D-010's rule reaching a place nobody had thought to apply it: an
+unmeasured layout constant is an unvalidated number in exactly the way an unmeasured latency
+target is. **Condition:** the real advance is measured against the shipped font file before the
+compare columns are built. The centre column closes at 424 + 24 + 236 = 684 with **zero** slack,
+so a 0.6em that is really 0.605em overflows with no margin to absorb it. If the measurement does
+not fit, **the column widths give, not the type size** — shrinking the type to make a number fit
+is how a dense instrument becomes unreadable at 1440×900. **[Δ #19, #43]**
+
+**`[ SESSION SECURE ]` retired in favour of `[ LOCAL · LOOPBACK ONLY ]`.** Affirmed. The finale
+runs over `http://localhost` (#92), and a chip reading `SESSION SECURE` over plain HTTP asserts
+a transport property the system does not have. This is the no-decorative-metrics rule applied to
+a *claim* rather than a *number*, and that extension is right: D-008 (provenance), D-009 (gate
+disclosure) and D-010 (unmeasured targets) are all the same principle, and none of them is about
+numbers specifically. Retiring the chip rather than qualifying it is the stronger move — a
+hedged safety claim is still a safety claim.
+
+**Note on `[ EGRESS DENIED ]`, which is kept.** The design system describes it as being about
+the sandbox. As of **D-028** it is true of every product process: nginx is the only container on
+the external network, so nothing holding repository content has a route out. That is a
+materially stronger claim and we are now entitled to it — **but only once
+`tests/security/test_egress.py` is green in CI.** Until then the chip states the sandbox
+property only. A claim we have decided to earn is not yet a claim we have earned.
+
+**Final approval authority** — `ui-ux-designer` for both calls; CTO noting and conditioning.
