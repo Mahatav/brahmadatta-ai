@@ -7,7 +7,7 @@
 | Status | Active — D1 |
 | Owner | devops |
 | Last updated | 2026-08-07 |
-| Implements | issues #10, #11 · decisions D-013, D-018, D-019, D-020, D-021 |
+| Implements | issues #10, #11 · decisions D-013, D-031 to D-037 · CTO rulings C4, C5 · security review Critical (#78) |
 
 Everything in this document is implemented by files under `infrastructure/`. Where the two
 disagree, the files win and this document is the bug.
@@ -55,6 +55,100 @@ browser ──TLS──> nginx :8443 ┬─ /                             → As
 reachable except through the proxy, so nobody can accidentally test the event stream
 without the thing that breaks it in the path.
 
+### C4 — nginx is the only container with a route off the host
+
+| network | gateway | services |
+|---|---|---|
+| `external` | yes | **nginx only** (plus `command-center-deps`, dev-only, see below) |
+| `api` | no (`internal: true`) | nginx, control-api — **and nothing else** |
+| `edge` | no (`internal: true`) | nginx, command-center (development only; absent from the finale stack) |
+| `backend` | no (`internal: true`) | control-api, worker, db, redis |
+
+This was raised from "a good idea" to "the thing gating the competition run" by a
+`cybersecurity` **BLOCKED** verdict with one Critical. It was not theoretical: the reviewer
+opened a socket to `api.openai.com` from inside the running container and OpenAI answered,
+in the profile that would run in front of judges.
+
+`control-api` has its own network with nginx rather than sharing one with the Astro dev
+server, because the two have different blast radii. If someone later needs to give the dev
+server a route out to make something work, that must not silently hand egress to the
+process holding repository snapshots and operator credentials.
+
+The invariant "repository content never reaches an external inference API" was being
+enforced over *configuration* — a base URL validated at startup. Configuration is not a
+boundary. `http://169.254.169.254/` passes a "must be a private range" validator, and on a
+rented VM that is the cloud metadata endpoint that hands out instance credentials.
+Meanwhile the container that holds the repository snapshot and assembles the prompt had no
+egress restriction at all; only the sandbox did, and the sandbox holds no inference client.
+
+So the boundary is the network. `internal: true` removes the gateway, which blocks egress
+and not ingress, so nginx still reaches every service normally.
+
+Two scripts assert it, and they fail differently:
+
+- **`infrastructure/scripts/egress-test.sh`** — a topology check read straight out of
+  `docker compose config` (needs nothing running, so it cannot be skipped for being
+  inconvenient) plus a live probe on the real networks. Catches a compose-file regression.
+  The probe also runs on nginx's networks, where egress **must** succeed; without that
+  control, a wall of "denied" results could just mean the probe is broken.
+- **`infrastructure/scripts/finale-egress-evidence.sh`** — starts the finale profile,
+  `exec`s into the running `control-api`, and tries to open a socket to `api.openai.com`,
+  `api.anthropic.com`, the cloud metadata endpoint and a bare IP. This is the one the
+  security reviewer re-runs, because inspecting configuration is not what the Critical was
+  about. It also connects to Postgres as a control, so "nothing was reachable" cannot be
+  explained by a broken container.
+
+Measured 2026-08-07 from inside `brahmadatta-finale-control-api`, running the real control
+API image on the finale compose file:
+
+```
+networks: brahmadatta-finale_api brahmadatta-finale_backend
+user: app:app  read_only: true  privileged: false
+routing table: two on-link subnets, no default route
+
+api.openai.com:443       gaierror: [Errno -3] Temporary failure in name resolution
+api.anthropic.com:443    gaierror: [Errno -3] Temporary failure in name resolution
+169.254.169.254:80       OSError:  [Errno 101] Network is unreachable
+1.1.1.1:443              OSError:  [Errno 101] Network is unreachable
+db:5432                  CONNECTED          <- the control
+```
+
+**One exception, development only:** `command-center-deps` is a short-lived service that
+runs `npm ci` and exits before the Astro dev server starts. It needs the npm registry, it
+holds no repository content, and it runs no inference client. The dev server itself has no
+`external` attachment — if a dependency is missing, the fix is to re-run the installer, not
+to give the dev server a route out. **The finale stack has no npm step and therefore no
+exception at all.**
+
+### The container runtime socket is never mounted
+
+`tests/architecture/test_container_isolation.py`. The plan called for rootless Podman for
+the target sandbox; Podman is not installed on the build host, so the security review
+accepted `--network none` plus a non-root user as a substitute. What that loses is
+rootless's guarantee that an escape lands you unprivileged rather than as root on the host,
+and **never mounting the runtime socket is what most nearly recovers it** — a container
+with `/var/run/docker.sock` can start a sibling with `--privileged -v /:/host`.
+
+The test asserts, across both compose files and every tracked file: no `docker.sock` or
+`podman.sock` bind mount, no host system path bind-mounted, no `privileged: true`, no host
+namespace, and no `SYS_ADMIN` / `SYS_PTRACE` / `SYS_MODULE` / `SYS_RAWIO` / `NET_ADMIN`.
+
+**A pull request that trips this test is a security change, not a test to relax.** It needs
+a `cybersecurity` review, because it is the condition under which the Podman substitution
+was accepted.
+
+### C5 — the gateway is not importable from the ASGI process
+
+`tests/architecture/test_import_direction.py`. "Modules, not services" is the right call at
+this size and has exactly one failure mode: the boundaries are conventions, and conventions
+decay. `from gateway import ...` in a view is a one-line change nobody notices, and by the
+end of the week there is one mud ball with no seam to split along. Two checks — a static
+AST scan of `config/`, `api/` and `contracts/`, and a runtime check that importing
+`config.asgi` leaves no `gateway*` module in `sys.modules`.
+
+An inference client imported into the ASGI process is an inference client inside the
+request path — the process holding operator credentials and repository snapshots.
+
 ---
 
 ## 3. What the control API must do
@@ -64,11 +158,12 @@ proxy headers do nothing.
 
 | Requirement | Why |
 |---|---|
-| `USE_X_FORWARDED_HOST = True` | Otherwise Django builds URLs from its own `Host`, not the browser's |
-| `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` | Otherwise `request.is_secure()` is `False` behind the proxy and every absolute URL comes out `http://` |
+| `USE_X_FORWARDED_HOST = True` | Otherwise Django builds URLs from its own `Host`, not the browser's. **Not set as of 2026-08-07** — asserted by `tests/architecture/test_ingress_contract.py`, which fails until it is |
+| `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")` | Otherwise `request.is_secure()` is `False` behind the proxy, every absolute URL comes out `http://`, and secure cookies are not set. **Not set as of 2026-08-07** — same test |
 | Listen on `0.0.0.0:8000` inside the container | A loopback-bound listener is unreachable from the nginx container. `config/asgi.py`'s docstring shows `127.0.0.1`, which is right for a bare-metal run and wrong in compose |
 | ASGI callable at `config.asgi:application` | Named in `infrastructure/compose/images/control-api.Dockerfile` |
 | `requirements.txt` at `apps/control-api/` | The image installs from it |
+| `CONN_MAX_AGE = 0` in the finale settings (set in the environment by `docker-compose.finale.yml`) | Persistent database connections are thread-local under ASGI. A held SSE stream occupies a thread for the life of the connection, pinning an idle Postgres connection alongside it. Five operator tabs is five wasted slots |
 | Emit `X-Accel-Buffering: no` on the event stream | Redundant with `sse.conf` on purpose — belt and braces, so the stream survives a second proxy hop being added later. **Not currently sent** (measured 2026-08-07) |
 | Emit `: keepalive` (or a comment frame) every ~15s on the stream | `proxy_read_timeout` is 3600s so an idle stream survives a long fuzzing phase; a heartbeat is what detects a genuinely dead TCP path long before that. **Already implemented** — the D1 stub stream sends `: heartbeat` |
 | Allowed hosts must include `localhost` and the compose service names | nginx forwards the browser's `Host` verbatim |
@@ -266,7 +361,7 @@ Three things worth watching by eye during a finale run, because none of them is 
 ## 9. Secrets
 
 No credential is committed, ever. `.gitignore` refuses `.env`, `.env.*` (except
-`.env.example`), `*.pem` and `*.key`, and the `secrets-guard` job in
+`.env.example`), `*.pem` and `*.key`, and the first step of the `pytest` job in
 `.github/workflows/ci.yml` fails the build if a tracked file matches those patterns or
 contains a private-key block.
 
@@ -283,6 +378,26 @@ Injection, per environment:
   named error instead of starting with a default.
 
 Development TLS keys are generated locally and never leave the machine.
+
+## 9a. Generated fuzzer output
+
+Crash inputs, corpus entries and coverage profiles produced by a fuzz campaign are derived
+from a target repository's content. They are not committable, at any depth —
+`.gitignore` covers `fuzz-out/`, `crashes/`, libFuzzer's `crash-*` / `leak-*` / `timeout-*`
+/ `oom-*` / `slow-unit-*` artifacts, `*.profraw`, `*.profdata`, `*.sancov` and `*.sarif`.
+The previous rules were anchored to the repository root, so a run inside
+`demo/repositories/<target>/` — which is where every run will happen — produced files git
+would have staged.
+
+The **authored** fixtures are the exception and are tracked deliberately:
+`demo/repositories/*/corpus/**` and `demo/repositories/*/crash/**` are product artifacts
+the demo-target owner wrote and reviewed, and a clean clone needs them for the D5 gate.
+`tests/architecture/test_fuzz_artifacts_are_ignored.py` asserts both halves, because a
+`.gitignore` edit is exactly the kind of change that gets one right and silently breaks the
+other.
+
+This is a rising risk rather than a current one. The exposure arrives the day the
+repository goes public (D-001), by which point anything committed is already in history.
 
 ---
 
@@ -325,5 +440,16 @@ Listed so the next shift does not rediscover them.
 - Django static is proxied in dev and served from a shared volume in the finale; the
   finale path needs `STATIC_ROOT = /app/staticfiles` and a `collectstatic` step, which is
   not yet wired.
-- No integration job runs the stack in CI. CI validates configuration and tests SSE against
-  a stub. A full compose-up smoke test is worth adding once the frontend exists.
+- CI is two jobs by CTO ruling: `pytest` and the OpenAPI dump freshness check. The lint,
+  type-check and infrastructure checks all still exist and are all still green — they run
+  locally (`docs/04-development/31-development-setup-guide.md` §Checks) rather than on every
+  pull request this week. `smoke-sse.sh` and `egress-test.sh` are the two worth promoting
+  back first, because both guard invariants that fail silently.
+- `infrastructure/scripts/openapi-contract-check.sh` auto-detects the exporter and the dump
+  path. Neither exists yet, so its behaviour is **unverified against a real schema** — it is
+  written against a stated contract and fails loudly if `apps/control-api` exists but the
+  contract is not met.
+- `USE_X_FORWARDED_HOST` and `SECURE_PROXY_SSL_HEADER` are still unset in the control API.
+  The architecture test will fail on the first pull request that brings `apps/control-api`
+  onto `main`. That is intended — it is a two-line fix and the alternative is a documented
+  contract that is implemented nowhere.

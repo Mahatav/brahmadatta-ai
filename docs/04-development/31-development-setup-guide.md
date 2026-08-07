@@ -108,8 +108,17 @@ npm run typecheck        # skips loudly until apps/command-center exists
 docker compose -f infrastructure/compose/docker-compose.yml config --quiet
 infrastructure/scripts/nginx-validate.sh     # nginx -t, both profiles
 infrastructure/scripts/smoke-sse.sh          # SSE survives the proxy
+infrastructure/scripts/egress-test.sh        # only nginx can reach off-host (C4)
+infrastructure/scripts/finale-egress-evidence.sh  # the same, proven from inside the container
+infrastructure/scripts/openapi-contract-check.sh
 shellcheck infrastructure/scripts/*.sh
+actionlint
 ```
+
+**CI runs two of these: `pytest` and the OpenAPI dump check.** The CTO cut D1's CI scope on
+the grounds that lint and type-check matrices are cost with no gate behind them this week.
+The configuration is all still here and all still green — running the block above before you
+push is what keeps it that way, and it takes about a minute.
 
 `ruff check --fix` and `ruff format` resolve most findings automatically.
 
@@ -139,6 +148,7 @@ docker compose -f infrastructure/compose/docker-compose.yml down -v    # DELETE 
 | nginx will not start | `infrastructure/scripts/nginx-validate.sh` shows the parse error |
 | Django builds `http://` URLs | `USE_X_FORWARDED_HOST` / `SECURE_PROXY_SSL_HEADER` are not set — section 3 of the ingress contract |
 | A port is already bound | Only 8080 and 8443 are published, on 127.0.0.1 |
+| A container cannot reach the internet | Working as designed (C4). Only nginx has a route off the host. If `npm ci` needs to run, that is the `command-center-deps` service's job |
 
 ---
 
