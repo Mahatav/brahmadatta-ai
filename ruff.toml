@@ -1,0 +1,58 @@
+# Ruff — formatter and linter for all Python in the repository.
+#
+# This lives at the repository root as ruff.toml rather than in a root pyproject.toml,
+# so it cannot collide with apps/control-api/pyproject.toml if the backend developer adds
+# one. Ruff only treats a pyproject.toml as configuration when it contains a [tool.ruff]
+# table, so a per-app override remains possible and would win for that app's files.
+#
+# Rule selection is deliberately mid-weight. A seven-day build cannot absorb a lint sweep,
+# and a linter that fires on style opinions gets switched off. Everything selected here is
+# either a real bug class or something that matters for this project specifically:
+#
+#   E,W,F   pyflakes/pycodestyle — undefined names, unused imports, real errors
+#   I       import sorting, so two people in two timezones stop conflicting on import blocks
+#   UP      pyupgrade — the codebase is 3.12-only, no compatibility shims
+#   B       bugbear — mutable default args, loop-variable capture, the usual traps
+#   S       bandit — this is a security product; subprocess and shell usage must be seen
+#   ASYNC   the SSE path is async; a blocking call inside it stalls every viewer
+#   T20     no stray print() in server code; docs/06-operations ask for structured logs
+#   RUF     ruff's own checks
+#
+# Deliberately NOT selected: ANN (annotations everywhere), D (docstring style), COM
+# (trailing commas), ERA (commented-out code). Each would produce hundreds of findings on
+# a young codebase and teach the team to ignore the linter.
+line-length = 100
+target-version = "py312"
+
+extend-exclude = [
+    ".venv",
+    "venv",
+    "**/migrations/**",   # Django writes these; they are not ours to style
+    "demo/repositories",  # vulnerable-by-design C target fixtures
+]
+
+[lint]
+select = ["E", "W", "F", "I", "UP", "B", "S", "ASYNC", "T20", "RUF"]
+ignore = [
+    "E501",    # line length is enforced by the formatter, not the linter
+    "S101",    # assert is how pytest works
+    "B008",    # function call in a default argument — django-ninja's Depends/Query idiom
+]
+
+[lint.per-file-ignores]
+# Test code legitimately does things production code should not.
+"**/tests/**" = ["S", "T20"]
+"**/test_*.py" = ["S", "T20"]
+"**/conftest.py" = ["S", "T20"]
+# Operational scripts are meant to talk to the operator on stdout.
+"infrastructure/scripts/**" = ["T20"]
+# Django's generated entrypoint.
+"**/manage.py" = ["T20"]
+
+[lint.isort]
+known-first-party = ["api", "config", "contracts", "packages", "services", "workers"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

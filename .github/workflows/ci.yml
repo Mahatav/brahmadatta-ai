@@ -1,0 +1,227 @@
+# Brahmadatta AI — continuous integration.
+#
+# Runs on every pull request into main, and on pushes to main after merge.
+#
+# Design notes:
+#
+#   - Actions are pinned to a commit SHA, not a tag. A tag is mutable; `@v5` can be
+#     repointed at new code without any change on our side. Same rule as the image digest
+#     pins in infrastructure/compose/. The version the SHA corresponds to is in the
+#     trailing comment.
+#   - permissions is read-only at workflow level. No job here needs to write to the repo.
+#   - Jobs SKIP cleanly when the directory they check does not exist yet, and say so in
+#     the log. On D1 the frontend does not exist; a job that hard-failed on that would
+#     make every unrelated pull request red.
+#   - No secret is used by any job. Nothing here talks to a paid service, a model
+#     provider, or any external inference API.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  secrets-guard:
+    name: secrets · nothing sensitive is tracked
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: No environment file, key, or certificate is tracked
+        run: |
+          set -euo pipefail
+          bad="$(git ls-files \
+            | grep -E '(^|/)\.env($|\.)|\.pem$|\.key$|\.p12$|\.pfx$|id_rsa|id_ed25519' \
+            | grep -v -E '\.env\.example$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::tracked files that must never be committed:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "ok: no tracked .env, private key, or certificate"
+
+      - name: No private key material inside tracked files
+        run: |
+          set -euo pipefail
+          # -I skips binary files. The pattern is split so this workflow does not match
+          # itself when the scan runs over .github/.
+          if git grep -I -n -E -- "-----BEGIN [A-Z ]*PRI""VATE KEY-----" -- . ; then
+            echo "::error::private key material found in a tracked file"
+            exit 1
+          fi
+          echo "ok: no private key blocks in tracked files"
+
+  # ---------------------------------------------------------------------------
+  python:
+    name: python · ruff + mypy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          ruff --version
+          mypy --version
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+      - name: mypy
+        run: |
+          set -euo pipefail
+          targets=""
+          for d in apps services workers adapters packages infrastructure/scripts; do
+            [ -d "$d" ] && targets="$targets $d"
+          done
+          if [ -z "$targets" ]; then
+            echo "no python source directories present yet — nothing to type check"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          mypy --config-file mypy.ini $targets
+
+  # ---------------------------------------------------------------------------
+  python-tests:
+    name: python · pytest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run the control API test suite
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DJANGO_DEBUG: "false"
+          # sqlite so CI needs no database service. The compose stack and the finale both
+          # use PostgreSQL; anything that depends on Postgres-specific behaviour needs an
+          # integration job with a service container, which is D2 work.
+          DATABASE_URL: "sqlite:///ci.sqlite3"
+        run: |
+          set -euo pipefail
+          if [ ! -d apps/control-api ]; then
+            echo "apps/control-api does not exist yet — skipping"
+            exit 0
+          fi
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r apps/control-api/requirements.txt
+          cd apps/control-api
+          if ! ls -d -- tests ./*/tests ./test_*.py >/dev/null 2>&1; then
+            echo "no tests found in apps/control-api — skipping"
+            exit 0
+          fi
+          pytest -q
+
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend · eslint + astro check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install root tooling
+        run: npm ci --no-audit --no-fund
+
+      - name: eslint
+        run: npm run lint
+
+      # Skips with a loud message until apps/command-center exists; see
+      # infrastructure/scripts/astro-check.mjs.
+      - name: astro check
+        run: npm run typecheck
+
+  # ---------------------------------------------------------------------------
+  infrastructure:
+    name: infra · compose, nginx, SSE
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Tool versions
+        run: |
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+
+      - name: shellcheck the infrastructure scripts
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          shellcheck infrastructure/scripts/*.sh
+
+      - name: docker compose config validates (development)
+        run: docker compose -f infrastructure/compose/docker-compose.yml config --quiet
+
+      - name: docker compose config validates (finale)
+        env:
+          # The finale file uses ${VAR:?message} so a missing value fails loudly at deploy
+          # time. CI supplies throwaway values purely to exercise the parse. None of these
+          # is a credential and none of them reaches a running service.
+          DATABASE_URL: postgresql://ci:ci@db:5432/ci
+          REDIS_URL: redis://redis:6379/0
+          DJANGO_ALLOWED_HOSTS: ci.invalid
+          DJANGO_CSRF_TRUSTED_ORIGINS: https://ci.invalid
+          POSTGRES_PASSWORD: ci-parse-only
+          REDIS_PASSWORD: ci-parse-only
+        run: docker compose -f infrastructure/compose/docker-compose.finale.yml config --quiet
+
+      - name: nginx -t on both profiles
+        run: infrastructure/scripts/nginx-validate.sh
+
+      # The regression test for the trap in D-013: nginx buffers proxied responses by
+      # default, which silently breaks the mission event stream. Case 2 of this script
+      # deliberately turns buffering back on and requires the stream to fail, so a green
+      # result cannot be vacuous.
+      - name: SSE survives the proxy
+        run: infrastructure/scripts/smoke-sse.sh
+
+  # ---------------------------------------------------------------------------
+  workflows:
+    name: infra · workflow lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          # Pinned by version; the checksum is verified before anything is executed.
+          VERSION=1.7.7
+          SHA256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+          curl -fsSL -o actionlint.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+          ./actionlint -color
