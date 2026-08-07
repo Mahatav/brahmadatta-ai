@@ -85,11 +85,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # BUG-016: this step used to run BEFORE control-api's dependencies existed, so the
+      # import-direction check (C5) and the ingress-contract check could not import Django
+      # and skipped silently — green, every run, testing nothing. Installing first turns
+      # them back into real assertions.
+      - name: Install control API dependencies
+        run: |
+          if [ -d apps/control-api ]; then
+            pip install -r apps/control-api/requirements.txt
+          else
+            echo "apps/control-api does not exist yet — nothing to install"
+          fi
+
       # Architecture invariants that hold regardless of what the application looks like:
-      # the ASGI process must not import the gateway (C5), and the Django half of the
-      # ingress contract must actually be set. Both skip while apps/control-api is absent.
+      # the ASGI process must not import the gateway (C5), the Django half of the ingress
+      # contract is set, and no container but nginx sits on a routable network.
+      # No DJANGO_SETTINGS_MODULE here on purpose. Setting it makes pytest-django try to
+      # bootstrap a Django project from the repository root, where there is no manage.py,
+      # and the whole step dies on an ImportError before a single test runs. The tests that
+      # need Django put apps/control-api on sys.path themselves.
+      # `-rs` prints the reason for any skip, so a test that quietly stops asserting is
+      # visible in the log rather than passing as a dot.
       - name: Architecture tests
-        run: pytest tests/ -q
+        run: pytest tests/ -q -rs
 
       - name: Control API tests
         env:

@@ -1,0 +1,8 @@
+# Control API runtime dependencies.
+# Versions are the ones installed and exercised on 2026-08-07; see the D1 PR evidence.
+Django==5.2.17
+django-ninja==1.6.2
+pydantic==2.13.4
+psycopg[binary]==3.3.4
+python-dotenv==1.2.2
+uvicorn[standard]==0.52.1
