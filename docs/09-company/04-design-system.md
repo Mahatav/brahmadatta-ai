@@ -4,7 +4,7 @@
 |---|---|
 | Project | Brahmadatta AI |
 | Document | Company-workflow D1/D2 deliverable — GitHub issue #7 |
-| Status | **Amended 2026-08-07** to clear the product review's conditions C1–C4 and C6–C8. C5 is escalated and deliberately unresolved (§7.1a). Frozen otherwise; §14 is the amendment record and §15 the decision records. |
+| Status | **Amended 2026-08-07** to clear the product review's conditions C1–C4 and C6–C8. C5 (phase order) resolved by D-038 on the same day — §7.1a. Frozen otherwise; §14 is the amendment record and §15 the decision records. |
 | Drafted by | `ui-ux-designer` seat |
 | Date | 2026-08-07 (rev 2) |
 | Governs | The five P0 panels (P0-13) and every token used to build them |
@@ -303,8 +303,8 @@ behaviour is cut (§11).
 │           configured in this build                                          #2 LLVMFuzzer…│
 │           00:01:08      [ > RUN ]          ──────────────────────────────  [ FRAMES 3/11 ]│
 │    ─────────────────────────                                              [ FULL TRACE ]  │
-│    [ 05 ] CORRELATE          [ · QUEUED ]  [ VERDICT ]                    ────────────────│
-│    [ 06 ] STRESS TEST        [ · QUEUED ]  Pending    ─ Instrument Serif 72 [ EVIDENCE ·  │
+│    [ 05 ] STRESS TEST        [ · QUEUED ]  [ VERDICT ]                    ────────────────│
+│    [ 06 ] CORRELATE          [ · QUEUED ]  Pending    ─ Instrument Serif 72 [ EVIDENCE ·  │
 │    [ 07 ] REMEDIATE          [ · QUEUED ]  ═══════════════════════════════   REPRODUCER ] │
 │    [ 08 ] VERIFY             [ · QUEUED ]  [ — GATES · NONE RAN ]         minimized       │
 │    [ 09 ] EXPORT EVIDENCE    [ · QUEUED ]  [ — COMPILE · NOT RUN · … ]    4 812 → 61 B    │
@@ -505,11 +505,11 @@ re-pins.
 backend happens to emit; a stage that has not started is `[ · QUEUED ]`, which is information.
 
 ```
-[ 01 ] AUTHORIZE        [ 06 ] STRESS TEST
+[ 01 ] AUTHORIZE        [ 06 ] CORRELATE
 [ 02 ] INGEST           [ 07 ] REMEDIATE
 [ 03 ] BASELINE         [ 08 ] VERIFY
 [ 04 ] ANALYZE          [ 09 ] EXPORT EVIDENCE
-[ 05 ] CORRELATE        [ 10 ] TEARDOWN
+[ 05 ] STRESS TEST      [ 10 ] TEARDOWN
 ```
 
 Rows 09 and 10 are new in this revision. **Row 10 is the primary surface for C1** — teardown is a
@@ -1046,59 +1046,31 @@ jitter on the `textPath`, which would read as motion that means nothing.
 
 Clockwise from 12 o'clock, one 60° arc each:
 
-`INGEST → ANALYZE → CORRELATE → STRESS TEST → REMEDIATE → VERIFY`
+`INGEST → ANALYZE → STRESS TEST → CORRELATE → REMEDIATE → VERIFY`
 
-### 7.1a ⚠ BLOCKED — the position of CORRELATE and STRESS TEST is not settled
+### 7.1a Phase order — RESOLVED by D-038
 
-**Do not resolve this while building the Core. It is with the CTO.**
+`STRESS TEST` occupies arc 3 and `CORRELATE` arc 4. The CTO ruled on 2026-08-07; this seat
+had left it deliberately unchosen because two authoritative sources disagreed, and the arcs
+are fixed 60° geometry.
 
-The spoke order above, and the matching row order in the stage timeline (§6.2, rows 05 and 06),
-follow one source. Another source says the opposite. This is not an error in either document; it
-is a genuine conflict between two things that are both authoritative, and it was raised as
-condition C5 of the product review.
+The argument that settled it is worth keeping here, because it is not the obvious one. Under
+the P0 cut, Semgrep (#22) and compiler-warning capture (#23) are both cut — so `ANALYZE`
+produces **nothing**. Ordering `CORRELATE` before `STRESS TEST` would light an arc and advance
+it for a stage running with zero inputs. That is decorative telemetry, which this product bans
+outright. The old ordering was not merely less tidy; under the cut it was a fake progress
+indicator.
 
-| Source | Says | Implies |
-|---|---|---|
-| [`CLAUDE.md`](../../CLAUDE.md), "Mission workflow" | `authorize → ingest → baseline → analyze → **correlate → stress-test** → patch → verify → export evidence` | CORRELATE occupies arc 3, STRESS TEST arc 4 — **as currently drawn** |
-| [`06-architecture-spec.md` §2.1 / §2.2](06-architecture-spec.md), the executable state machine | `BASELINE → TRIAGE → **STRESS_TEST → CORRELATE** → PATCH` | STRESS TEST occupies arc 3, CORRELATE arc 4 |
+`CLAUDE.md`'s workflow sentence is stale and is amended by the CEO rather than superseded
+silently. The 79-document pack keeps its boilerplate footer; an erratum line in
+`docs/README.md` is folded into #9.
 
-**What this document has done:** left the order as `CORRELATE → STRESS TEST`, unchanged, and
-flagged it here. Changing it unilaterally would be picking a winner between the CEO's stated
-workflow and the architect's state machine, which is not this seat's call.
-
-**One observation, offered to the CTO and explicitly non-binding.** Architecture spec §2.1
-defines `CORRELATE` as *"bind the confirmed crash to a source location"* — which reads as
-depending on a crash that `STRESS_TEST` produces. If that dependency is real, the state machine
-is right and `CLAUDE.md`'s ordering is stale. That is an inference from a definition, not a
-ruling, and the ruling is the CTO's.
-
-**Why this is worth ten minutes now.** The geometry is fixed 60° arcs, so today the fix is
-swapping two arc labels, two `textPath` start offsets and two timeline row indices — under an
-hour. After the Core ships it is a re-derivation of every arc's `textPath` direction, the ramp
-pitch alignment across the swap, the timeline indices, the §7.2 mapping table, every screenshot
-in the deck, and the rehearsed narration. **Whoever builds the Core must not pick one at random.**
-If the ruling has not landed when the Core is built, build the arcs as six unlabelled 60° segments
-driven by a `PHASE_ORDER` array in one place, so the swap is a one-line edit.
-
-**Blocks:** the `BrahmadattaCore` component (§11 inventory), timeline row indices 05 and 06.
-**Owner:** CTO. **Does not block:** anything else in this document.
-
-Phase state is expressed as **ASCII-density shading inside the arc band** — monospace glyphs set
-along the arc path at a 4px pitch. Not a fill, not a gradient, not a glow.
-
-| Phase state | Ramp glyph | Fill |
-|---|---|---|
-| Pending | ` ` (empty) | Band empty; only the spoke dividers are drawn |
-| Running | `:` | Filled to the **real reported fraction**. Never interpolated, never eased toward a guess. |
-| Complete | `#` | Full arc |
-| Skipped | `-` | Full arc, sparse — used for cut gates such as static delta |
-| Failed | `X` | Full arc |
-
-The running arc's ramp shifts by one glyph pitch every 800ms. **This is the only continuous
-animation in the product, and it is a liveness indicator rather than decoration: it ticks because
-events are arriving, and it stops when they stop.** A frozen ramp is information. Under
-`prefers-reduced-motion: reduce` the ramp is static and liveness is carried by the
-`[ ● LIVE · LAST EVENT +1s ]` counter instead.
+**Condition attached to the ruling: the phase order is served, not hardcoded.** A
+`PHASE_ORDER` array of string literals here puts the ordering in two places — `contracts/enums.py`
+and the Core — and a future reorder changes one silently. The nine `MissionStage` members
+project onto six arcs, and it is that *mapping* that must come from the contract, the same way
+`POSTURE_BY_STATE` already exists so the UI never invents its own. Derive it from the generated
+types so #6's CI diff catches divergence at build time.
 
 ### 7.2 Mapping to the backend state machine
 
@@ -1363,7 +1335,7 @@ Owners named. Answered ones are struck through with the answer, kept for the rec
 | 5 | ~~Is a second patch candidate guaranteed at demo time?~~ | product-manager | **Answered: guaranteed.** PR #74 merged with both candidates committed as files, so candidate B produces a real gate matrix every run. §6.4 is built compare-first with single-column as the degraded state. |
 | 6 | **New.** What is the measured advance width of the shipped Fragment Mono woff2? Every column budget in §3, §6.4 and §6.5 assumes 0.6em. | frontend-developer | **Open, cheap, and first.** Thirty seconds with a ruler string. See §2.2. |
 | 7 | **New.** Does a `TEARDOWN_CONFIRMED` event distinguish a sandbox from a model-host lease, and does it carry a receipt identifier? §6.6 renders one chip per resource kind and shows the receipt in the timeline event row. | backend-developer | **Open.** If the event carries only a count, the ledger degrades to one chip and loses the model-host lease — which is the specific gap C1 identified. |
-| 8 | **BLOCKED, not open.** CORRELATE vs STRESS TEST spoke and row order — see §7.1a. | **CTO** | Two authoritative sources disagree. This seat has deliberately not chosen. |
+| 8 | ~~CORRELATE vs STRESS TEST order~~ — **RESOLVED by D-038**: STRESS TEST is arc 3, CORRELATE arc 4. Under the P0 cut ANALYZE produces nothing, so the old order would have advanced an arc for a stage with zero inputs. | CTO | Closed 2026-08-07. |
 
 ---
 
