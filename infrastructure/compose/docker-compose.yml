@@ -1,0 +1,257 @@
+# Brahmadatta AI — DEVELOPMENT stack.
+#
+#   infrastructure/scripts/dev-up.sh          # preferred; preflights, then up
+#   docker compose -f infrastructure/compose/docker-compose.yml --env-file .env up
+#
+# Relative paths below resolve against THIS FILE's directory (infrastructure/compose/),
+# which is why nothing here uses --project-directory. `--env-file` changes interpolation
+# only, not path resolution, so it is safe to point at the repository-root .env.
+#
+# Rules this file follows, from the D1 brief and CLAUDE.md:
+#   - every image is pinned by multi-arch index digest; no `latest`, no bare tags
+#   - containers run as a non-root user wherever the base image permits (see the
+#     per-service notes; postgres and redis are the two that cannot, and why)
+#   - no service reaches an external inference API; the model endpoints in .env.example
+#     are blank and the control API rejects a hosted-provider host at startup
+#     (contracts.checks.check_model_endpoints, owned by the backend developer)
+
+name: brahmadatta
+
+x-env: &env-file
+  env_file:
+    - path: ../../.env
+      required: false
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # ---------------------------------------------------------------------------
+  # Ingress. The single published surface: nothing else maps a host port.
+  # ---------------------------------------------------------------------------
+  nginx:
+    # nginxinc/nginx-unprivileged 1.29-alpine. The unprivileged variant is chosen over
+    # the stock nginx image specifically so the ingress does not run as root; it listens
+    # on 8080/8443 because uid 101 cannot bind a privileged port.
+    image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+    container_name: brahmadatta-nginx
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    cap_drop: ["ALL"]
+    ports:
+      - "127.0.0.1:8080:8080"   # plaintext, redirects to 8443
+      - "127.0.0.1:8443:8443"   # TLS, self-signed in dev
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/includes:/etc/nginx/includes:ro
+      # THE PROFILE SWITCH. docker-compose.finale.yml mounts profile/admin-deny.conf at
+      # this same path, which turns /admin into a 404 with no config edit.
+      # It lives in profile/ and not includes/ because Docker cannot create a new
+      # mountpoint inside an already read-only bind mount.
+      - ./nginx/profile/admin-allow.conf:/etc/nginx/profile/admin.conf:ro
+      - ./nginx/conf.d.dev:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - nginx-logs:/var/log/nginx
+    networks:
+      - edge
+    depends_on:
+      control-api:
+        condition: service_started
+      command-center:
+        condition: service_started
+    healthcheck:
+      # Plaintext /healthz, so the probe does not have to trust a self-signed cert.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Control API — Django + django-ninja over ASGI (uvicorn).
+  # No published port on purpose: the only way in is through nginx, so the proxy is
+  # never accidentally bypassed while testing SSE. See includes/sse.conf.
+  # ---------------------------------------------------------------------------
+  control-api:
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: dev
+    container_name: brahmadatta-control-api
+    <<: [*env-file, *hardening]
+    environment:
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
+      # Container-local overrides of the values in apps/control-api/.env.example, which
+      # are written for a bare-metal run. Inside compose the hostnames are service names
+      # and the browser origin is the nginx TLS listener, not the Astro dev port.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://brahmadatta:brahmadatta-dev@db:5432/brahmadatta}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,control-api,nginx}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://localhost:8443,http://localhost:8080}
+      PYTHONPATH: /app
+    volumes:
+      - ../../apps/control-api:/app
+      # Keep the host's macOS/arm .venv out of the container; /opt/venv is the real one.
+      - /app/.venv
+    networks:
+      - edge
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Astro dev server.
+  #
+  # Runs from the pinned node image with the source bind-mounted rather than from
+  # images/command-center.Dockerfile, because rebuilding an image on every dependency
+  # change is a dev server nobody uses. The Dockerfile is for the finale build.
+  #
+  # UNVERIFIED as of D1: apps/command-center/ does not exist yet. dev-up.sh refuses to
+  # start rather than letting Docker create the directory as root.
+  # ---------------------------------------------------------------------------
+  command-center:
+    image: node@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af
+    container_name: brahmadatta-command-center
+    <<: [*env-file, *hardening]
+    user: "1000:1000"   # the `node` user that ships in the image
+    working_dir: /app
+    environment:
+      # Astro/Vite bind to loopback by default, which is unreachable from nginx.
+      HOST: "0.0.0.0"
+      PORT: "4321"
+      # Public API origin as the BROWSER sees it — through nginx, not the service name.
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-https://localhost:8443}
+      NPM_CONFIG_UPDATE_NOTIFIER: "false"
+    command: >
+      sh -c "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 4321"
+    volumes:
+      - ../../apps/command-center:/app
+      - command-center-node-modules:/app/node_modules
+    networks:
+      - edge
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL.
+  #
+  # ROOTLESS NOTE: this image cannot be run with a `user:` override against a fresh named
+  # volume. The entrypoint starts as root, chowns PGDATA, then drops to uid 70 (postgres)
+  # via su-exec for the server itself — so the long-running process is unprivileged, but
+  # the first moments are not. Forcing `user: 70:70` makes initdb fail on a
+  # root-owned empty volume. Capabilities are trimmed to the five the chown/drop needs.
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94  # 17.6-alpine
+    container_name: brahmadatta-db
+    <<: *hardening
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-brahmadatta}
+      POSTGRES_USER: ${POSTGRES_USER:-brahmadatta}
+      # Dev-only default. The real value comes from .env; see .env.example.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmadatta-dev}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brahmadatta} -d ${POSTGRES_DB:-brahmadatta}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — the queue broker.
+  #
+  # ROOTLESS NOTE: same shape as postgres. The entrypoint chowns /data as root and then
+  # execs redis-server as the `redis` user.
+  #
+  # No password in dev. It is only reachable on the `backend` network, which is
+  # `internal: true` and publishes no host port. docker-compose.finale.yml sets one.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103  # 8.2-alpine
+    container_name: brahmadatta-redis
+    <<: *hardening
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Queue worker — OPT-IN (`--profile worker`).
+  #
+  # Gated behind a profile because the queue framework is not chosen yet: as of D1
+  # apps/control-api/requirements.txt has no rq and no celery, so the default command
+  # below would crash-loop and bury every other service's logs. It becomes a default
+  # service in the same commit that adds the dependency. See D-018 in
+  # .project/decisions.md.
+  # ---------------------------------------------------------------------------
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: dev
+    container_name: brahmadatta-worker
+    <<: [*env-file, *hardening]
+    environment:
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://brahmadatta:brahmadatta-dev@db:5432/brahmadatta}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PYTHONPATH: /app
+    command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
+    volumes:
+      - ../../apps/control-api:/app
+      - /app/.venv
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  # Everything the ingress needs to reach.
+  edge:
+    driver: bridge
+
+  # internal: true means no gateway is attached, so db and redis — which are on this
+  # network only — have no route off the host at all. control-api sits on both networks
+  # and therefore still has egress; the hard egress denial that matters is the target
+  # sandbox's, which is D2 work (issue #14), not this file's.
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  nginx-logs:
+  command-center-node-modules:
