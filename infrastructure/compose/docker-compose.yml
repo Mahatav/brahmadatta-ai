@@ -166,6 +166,8 @@ services:
     volumes:
       - ../../apps/command-center:/app
       - command-center-node-modules:/app/node_modules
+      # The Astro source imports the design system's single token source directly.
+      - ../../packages/ui-components:/packages/ui-components:ro
     networks:
       # No `external`. If a dependency is missing, the fix is to re-run
       # command-center-deps, not to give the dev server a route out.

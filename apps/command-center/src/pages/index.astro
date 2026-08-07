@@ -1,0 +1,25 @@
+---
+import { SystemStatus } from '../components/SystemStatus';
+import { LiveEventStatus } from '../components/LiveEventStatus';
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+<BaseLayout title="Brahmadatta Command Center">
+  <article class="command-center" aria-labelledby="page-title">
+    <header>
+      <p class="eyebrow">[ BRAHMADATTA AI ]</p>
+      <h1 id="page-title">Command Center</h1>
+      <p class="summary">Static Astro shell with a typed, same-origin control-plane probe.</p>
+    </header>
+
+    <section aria-labelledby="system-status">
+      <h2 id="system-status">[ SYSTEM STATUS ]</h2>
+      <SystemStatus client:load />
+    </section>
+
+    <section aria-labelledby="live-events">
+      <h2 id="live-events">[ LIVE EVENT INFRASTRUCTURE ]</h2>
+      <LiveEventStatus client:load />
+      <p class="detail">The stream remains closed until an authorized mission is selected.</p>
+    </section>
+  </article>
+</BaseLayout>
