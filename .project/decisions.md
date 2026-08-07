@@ -679,3 +679,40 @@ whether this is sufficient for the finale.
 **Final approval authority** — `cybersecurity` seat, with the CTO on the schedule trade.
 
 ---
+
+---
+
+## D-027 · A substituted path must be inexpressible as the primary one · 2026-08-07 · `backend-developer` seat
+
+**Decision** — The CEO's approved fallbacks (#81 subprocess jail, #82 model replay, #83
+reproducer replay) are carried in the contract as required, validated provenance rather than as
+optional flags. `FindingSummary.discovery_method`, `FuzzingReport.mode` and
+`SandboxStatus.isolation_mode` are required with no default; `ModelProvenance`'s three replay
+fields are all-or-nothing; `GateResult.evidence_source` means a gate may only `PASS` on a tool
+that actually ran; and `EvidenceBundle.substitutions` lists every fallback used with a mandatory
+reason.
+
+**Options considered** — (a) a single boolean `is_fallback` on the mission; (b) optional
+provenance fields the pipeline sets when it remembers; (c) required, validated provenance at
+every substitution point, with the primary claim unrepresentable from a substituted path.
+
+**Pros and cons** — (a) is one bit for four different substitutions and tells a judge nothing
+about which one happened. (b) is the version that fails: the fallback path is taken at 2am on the
+day the primary one broke, by whoever is still awake, and an optional field is exactly what does
+not get set then. (c) costs a required field at four call sites and makes the dishonest record
+impossible to construct — a replayed corpus cannot be reported as a live campaign, and a run
+whose fuzzer never executed cannot claim the renewed-fuzz gate. The cost is that the orchestrator
+must supply these values; that is the intent.
+
+**Cost implications** — none.
+
+**Security implications** — positive. `IsolationMode` means a weaker containment path is visible
+in the evidence bundle rather than implied by silence, which matters because the subprocess jail
+is materially weaker than a rootless container.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. The corresponding requirement on the orchestrator — that it
+actually populate these — belongs to #12, #81, #82 and #83.
+
+**Final approval authority** — CTO (technical); the fallbacks themselves were approved by the CEO.

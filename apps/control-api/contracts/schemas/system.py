@@ -15,6 +15,7 @@ from uuid import UUID
 
 from pydantic import Field
 
+from contracts.enums import IsolationMode
 from contracts.schemas.common import StrictSchema
 
 
@@ -56,7 +57,12 @@ class WorkersResponse(StrictSchema):
 class SandboxStatus(StrictSchema):
     id: str = Field(max_length=200)
     mission_id: UUID | None = None
-    runtime: Literal["podman", "docker"]
+    runtime: Literal["podman", "docker", "subprocess-jail"]
+    isolation_mode: IsolationMode = Field(
+        description="Required, no default. A subprocess jail (#81) is a legitimate "
+        "D3 fallback and materially weaker than a rootless container; it cannot be "
+        "reported as one."
+    )
     network: Literal["deny"] = Field(
         default="deny", description="Reported, and only ever this value."
     )

@@ -17,10 +17,14 @@ from pydantic import Field, computed_field, model_validator
 
 from contracts.enums import (
     AnalyzerTool,
+    DiscoveryMethod,
     FindingCategory,
+    FuzzingMode,
+    IsolationMode,
     PatchPolicyStatus,
     PatchProvenance,
     Severity,
+    SubstitutionKind,
     Verdict,
 )
 from contracts.schemas.common import ArtifactRef, ResourceUsage, StrictSchema
@@ -110,6 +114,17 @@ class FindingSummary(StrictSchema):
     category: FindingCategory
     severity: Severity
     tool: AnalyzerTool
+    discovery_method: DiscoveryMethod = Field(
+        description="How this finding came to exist. Required, with no default: only "
+        "FUZZING_CAMPAIGN supports the claim 'our fuzzer discovered it'. A replayed "
+        "reproducer (#83) is honest and weaker, and has to say so."
+    )
+    replay_source: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Artifact pointer to the recorded reproducer. Required when "
+        "discovery_method is REPLAYED_REPRODUCER, and forbidden otherwise.",
+    )
     location: SourceLocation
     fingerprint: str = Field(
         max_length=128, description="Stable deduplication key across runs."
@@ -120,6 +135,21 @@ class FindingSummary(StrictSchema):
     )
     detected_at: datetime
     title: str = Field(max_length=300)
+
+    @model_validator(mode="after")
+    def _replay_source_matches_discovery_method(self) -> "FindingSummary":
+        replayed = self.discovery_method is DiscoveryMethod.REPLAYED_REPRODUCER
+        if replayed and not self.replay_source:
+            raise ValueError(
+                "REPLAYED_REPRODUCER findings must name the recorded reproducer they "
+                "were replayed from."
+            )
+        if not replayed and self.replay_source:
+            raise ValueError(
+                "replay_source is only meaningful for REPLAYED_REPRODUCER findings; a "
+                "live discovery must not carry one."
+            )
+        return self
 
 
 class ReproducerRecord(StrictSchema):
@@ -195,6 +225,10 @@ class BaselineReport(StrictSchema):
 
 class FuzzingReport(StrictSchema):
     mission_id: UUID
+    mode: FuzzingMode = Field(
+        description="Whether a campaign actually ran. Required, no default — a "
+        "replayed corpus (#83) cannot be reported as a live campaign."
+    )
     harness: str = Field(max_length=200)
     engine: str = Field(default="libFuzzer", max_length=100)
     runtime_seconds: float = Field(ge=0)
@@ -204,7 +238,30 @@ class FuzzingReport(StrictSchema):
     corpus_size: int = Field(ge=0)
     sanitizers: list[str] = Field(default_factory=list)
     finding_ids: list[UUID] = Field(default_factory=list)
+    replay_source: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Artifact pointer to the recorded corpus. Required when mode is "
+        "REPLAYED_CORPUS, forbidden otherwise.",
+    )
     recorded_at: datetime
+
+    @model_validator(mode="after")
+    def _mode_matches_the_numbers(self) -> "FuzzingReport":
+        if self.mode is FuzzingMode.REPLAYED_CORPUS and not self.replay_source:
+            raise ValueError(
+                "REPLAYED_CORPUS must name the recorded corpus it was replayed from."
+            )
+        if self.mode is not FuzzingMode.REPLAYED_CORPUS and self.replay_source:
+            raise ValueError("replay_source is only meaningful for REPLAYED_CORPUS.")
+        if self.mode is FuzzingMode.NOT_RUN and (
+            self.executions or self.runtime_seconds or self.crashes_found
+        ):
+            raise ValueError(
+                "a campaign reported as NOT_RUN cannot also report executions, "
+                "runtime, or crashes."
+            )
+        return self
 
 
 class PatchCandidate(StrictSchema):
@@ -335,6 +392,28 @@ class MissionVerdictSummary(StrictSchema):
         return self
 
 
+class Substitution(StrictSchema):
+    """One fallback path that was used instead of the primary one.
+
+    The CEO approved fallbacks for D1–D7 (#81, #82, #83). Using one is legitimate;
+    letting a reader infer it from a missing section is not. Every substitution is
+    declared here, printed in the report, and shown in the UI.
+    """
+
+    kind: SubstitutionKind
+    reason: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="Why the primary path was not used. Stated plainly.",
+    )
+    artifact_ref: str | None = Field(
+        default=None,
+        max_length=500,
+        description="The recorded artifact the substitution drew on, where one exists.",
+    )
+    recorded_at: datetime
+
+
 class EvidenceBundle(StrictSchema):
     """What the judge is handed (P0-12)."""
 
@@ -364,6 +443,16 @@ class EvidenceBundle(StrictSchema):
     gates_not_run: list[str] = Field(
         default_factory=list,
         description="Gates that did not run, disclosed rather than omitted.",
+    )
+    substitutions: list[Substitution] = Field(
+        default_factory=list,
+        description="Every fallback path used in this run. Empty means the primary "
+        "path ran throughout — a claim the pipeline has to earn, not assume.",
+    )
+    isolation_mode: IsolationMode = Field(
+        default=IsolationMode.ROOTLESS_CONTAINER,
+        description="How the target was contained. A subprocess jail (#81) is weaker "
+        "than a rootless container and is reported as what it is.",
     )
     tool_versions: dict[str, str] = Field(default_factory=dict)
 

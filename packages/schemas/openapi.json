@@ -411,6 +411,16 @@
         "title": "DependencyStatus",
         "type": "object"
       },
+      "DiscoveryMethod": {
+        "description": "How a finding came to exist. Required on every finding; no default.\n\n`FUZZING_CAMPAIGN` is the strongest claim and the only one that supports \"our\nfuzzer discovered it\". The other two are honest and weaker: the seven-day plan\nalready names direct harnessing as the *starting* position rather than the\nfallback, and #83 adds reproducer replay under that.",
+        "enum": [
+          "FUZZING_CAMPAIGN",
+          "DIRECT_HARNESS",
+          "REPLAYED_REPRODUCER"
+        ],
+        "title": "DiscoveryMethod",
+        "type": "string"
+      },
       "ErrorCode": {
         "description": "The error vocabulary from `docs/03-technical/21-api-specification.md`, plus\nthe transport-level codes the API cannot avoid emitting.\n\n`GPU_LIMIT_EXCEEDED` is retained even though rented GPU is CUT (D-015): the local\nmodel host is leased and torn down the same way, and dropping the code would make\nthe evidence bundles of a future run unreadable by an older client.",
         "enum": [
@@ -578,6 +588,15 @@
             "title": "Generated At",
             "type": "string"
           },
+          "isolation_mode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IsolationMode"
+              }
+            ],
+            "default": "ROOTLESS_CONTAINER",
+            "description": "How the target was contained. A subprocess jail (#81) is weaker than a rootless container and is reported as what it is."
+          },
           "mission_id": {
             "format": "uuid",
             "title": "Mission Id",
@@ -605,6 +624,14 @@
             "pattern": "^[0-9a-f]{64}$",
             "title": "Snapshot Sha256",
             "type": "string"
+          },
+          "substitutions": {
+            "description": "Every fallback path used in this run. Empty means the primary path ran throughout — a claim the pipeline has to earn, not assume.",
+            "items": {
+              "$ref": "#/components/schemas/Substitution"
+            },
+            "title": "Substitutions",
+            "type": "array"
           },
           "tool_versions": {
             "additionalProperties": {
@@ -661,6 +688,15 @@
         ],
         "title": "EvidenceExportPayload",
         "type": "object"
+      },
+      "EvidenceSource": {
+        "description": "Whether a gate result came from running a tool or from a stored artifact.\n\nA gate may only PASS on `TOOL_EXECUTION`. A replayed artifact can be recorded and\ndisplayed; it cannot pass a gate.",
+        "enum": [
+          "TOOL_EXECUTION",
+          "REPLAYED_ARTIFACT"
+        ],
+        "title": "EvidenceSource",
+        "type": "string"
       },
       "ExportReceipt": {
         "additionalProperties": false,
@@ -838,6 +874,10 @@
             "title": "Detected At",
             "type": "string"
           },
+          "discovery_method": {
+            "$ref": "#/components/schemas/DiscoveryMethod",
+            "description": "How this finding came to exist. Required, with no default: only FUZZING_CAMPAIGN supports the claim 'our fuzzer discovered it'. A replayed reproducer (#83) is honest and weaker, and has to say so."
+          },
           "fingerprint": {
             "description": "Stable deduplication key across runs.",
             "maxLength": 128,
@@ -856,6 +896,19 @@
             "format": "uuid",
             "title": "Mission Id",
             "type": "string"
+          },
+          "replay_source": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Artifact pointer to the recorded reproducer. Required when discovery_method is REPLAYED_REPRODUCER, and forbidden otherwise.",
+            "title": "Replay Source"
           },
           "reproducible": {
             "description": "True only when a minimized input replayed the failure from a clean build. Not a guess.",
@@ -880,6 +933,7 @@
           "category",
           "severity",
           "tool",
+          "discovery_method",
           "location",
           "fingerprint",
           "reproducible",
@@ -888,6 +942,16 @@
         ],
         "title": "FindingSummary",
         "type": "object"
+      },
+      "FuzzingMode": {
+        "description": "Whether a fuzzing campaign actually ran (#83).",
+        "enum": [
+          "LIVE_CAMPAIGN",
+          "REPLAYED_CORPUS",
+          "NOT_RUN"
+        ],
+        "title": "FuzzingMode",
+        "type": "string"
       },
       "FuzzingPayload": {
         "additionalProperties": false,
@@ -950,10 +1014,27 @@
             "title": "Mission Id",
             "type": "string"
           },
+          "mode": {
+            "$ref": "#/components/schemas/FuzzingMode",
+            "description": "Whether a campaign actually ran. Required, no default — a replayed corpus (#83) cannot be reported as a live campaign."
+          },
           "recorded_at": {
             "format": "date-time",
             "title": "Recorded At",
             "type": "string"
+          },
+          "replay_source": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Artifact pointer to the recorded corpus. Required when mode is REPLAYED_CORPUS, forbidden otherwise.",
+            "title": "Replay Source"
           },
           "runtime_seconds": {
             "minimum": 0,
@@ -975,6 +1056,7 @@
         },
         "required": [
           "mission_id",
+          "mode",
           "harness",
           "runtime_seconds",
           "executions",
@@ -1035,7 +1117,7 @@
       },
       "GateResult": {
         "additionalProperties": false,
-        "description": "One deterministic gate's outcome, with the tool that produced it.",
+        "description": "One deterministic gate's outcome, with the tool that produced it.\n\nA gate may only `PASS` on the strength of a tool that actually ran. Replayed\nartifacts are recordable — the fallbacks in #82 and #83 need them — but a replayed\nartifact cannot pass a gate, and a `PASS` with no named tool cannot be constructed.\nThat is what stops a mission whose fuzzer never ran from claiming the renewed-fuzz\ngate as evidence.",
         "properties": {
           "detail": {
             "default": "",
@@ -1056,6 +1138,15 @@
             ],
             "description": "Opaque artifact pointer (artifact://...). Resolved through a signed short-lived link, never returned inline.",
             "title": "Evidence Ref"
+          },
+          "evidence_source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceSource"
+              }
+            ],
+            "default": "TOOL_EXECUTION",
+            "description": "Where this result came from. A REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS."
           },
           "name": {
             "$ref": "#/components/schemas/GateName"
@@ -1143,6 +1234,15 @@
         ],
         "title": "HealthResponse",
         "type": "object"
+      },
+      "IsolationMode": {
+        "description": "How the target was contained (#81).\n\n`SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an\nacceptable D3 fallback and it must never be reported as the container path.",
+        "enum": [
+          "ROOTLESS_CONTAINER",
+          "SUBPROCESS_JAIL"
+        ],
+        "title": "IsolationMode",
+        "type": "string"
       },
       "LanguageAdapter": {
         "enum": [
@@ -2527,10 +2627,11 @@
           },
           "runtime": {
             "default": "podman",
-            "description": "Rootless container runtime.",
+            "description": "Rootless container runtime, or the subprocess-jail fallback (#81). The fallback is weaker isolation and is reported as such everywhere it is used — it is not a silent substitution.",
             "enum": [
               "podman",
-              "docker"
+              "docker",
+              "subprocess-jail"
             ],
             "title": "Runtime",
             "type": "string"
@@ -2546,6 +2647,10 @@
             "maxLength": 200,
             "title": "Id",
             "type": "string"
+          },
+          "isolation_mode": {
+            "$ref": "#/components/schemas/IsolationMode",
+            "description": "Required, no default. A subprocess jail (#81) is a legitimate D3 fallback and materially weaker than a rootless container; it cannot be reported as one."
           },
           "mission_id": {
             "anyOf": [
@@ -2585,7 +2690,8 @@
           "runtime": {
             "enum": [
               "podman",
-              "docker"
+              "docker",
+              "subprocess-jail"
             ],
             "title": "Runtime",
             "type": "string"
@@ -2606,6 +2712,7 @@
         "required": [
           "id",
           "runtime",
+          "isolation_mode",
           "running"
         ],
         "title": "SandboxStatus",
@@ -2936,6 +3043,58 @@
         ],
         "title": "StateChangedPayload",
         "type": "object"
+      },
+      "Substitution": {
+        "additionalProperties": false,
+        "description": "One fallback path that was used instead of the primary one.\n\nThe CEO approved fallbacks for D1–D7 (#81, #82, #83). Using one is legitimate;\nletting a reader infer it from a missing section is not. Every substitution is\ndeclared here, printed in the report, and shown in the UI.",
+        "properties": {
+          "artifact_ref": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The recorded artifact the substitution drew on, where one exists.",
+            "title": "Artifact Ref"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SubstitutionKind"
+          },
+          "reason": {
+            "description": "Why the primary path was not used. Stated plainly.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reason",
+          "recorded_at"
+        ],
+        "title": "Substitution",
+        "type": "object"
+      },
+      "SubstitutionKind": {
+        "description": "The fallback paths that exist. Any that was used is disclosed in the evidence\nbundle rather than inferred by a reader from a missing section.",
+        "enum": [
+          "MODEL_REPLAY",
+          "REPRODUCER_REPLAY",
+          "SUBPROCESS_JAIL_ISOLATION",
+          "OPERATOR_SUPPLIED_PATCH"
+        ],
+        "title": "SubstitutionKind",
+        "type": "string"
       },
       "TeardownPayload": {
         "additionalProperties": false,

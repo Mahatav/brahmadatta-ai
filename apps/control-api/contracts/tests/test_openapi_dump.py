@@ -157,6 +157,25 @@ def test_cancelled_has_its_own_posture_in_the_published_contract(schema: dict):
     assert "CANCELLED" in schema["components"]["schemas"]["MissionPosture"]["enum"]
 
 
+def test_substitution_provenance_is_published_and_required(schema: dict):
+    """The approved fallbacks (#81, #82, #83) must be expressible — and the primary
+    path must not be claimable by a substituted one — in the document the frontend and
+    the evidence report are generated from."""
+    components = schema["components"]["schemas"]
+
+    for name in ("DiscoveryMethod", "FuzzingMode", "IsolationMode", "EvidenceSource",
+                 "SubstitutionKind", "Substitution"):
+        assert name in components, f"{name} missing from the published contract"
+
+    # Required, not optional: a discovery method cannot simply be left out.
+    assert "discovery_method" in components["FindingSummary"]["required"]
+    assert "mode" in components["FuzzingReport"]["required"]
+    assert "isolation_mode" in components["SandboxStatus"]["required"]
+
+    # The bundle discloses substitutions rather than leaving them to be inferred.
+    assert "substitutions" in components["EvidenceBundle"]["properties"]
+
+
 def test_confidence_appears_only_on_model_provenance(schema: dict):
     """A structural read of the published contract, not of our source."""
     offenders = {

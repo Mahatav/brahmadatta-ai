@@ -21,17 +21,26 @@ import pytest
 from pydantic import ValidationError
 
 from contracts.enums import (
+    AnalyzerTool,
+    DiscoveryMethod,
+    EvidenceSource,
+    FindingCategory,
+    FuzzingMode,
     GateName,
     GateStatus,
     PatchPolicyStatus,
     PatchProvenance,
+    Severity,
     Verdict,
 )
 from contracts.schemas.evidence import (
     CandidateVerdict,
+    FindingSummary,
+    FuzzingReport,
     MissionVerdictSummary,
     ModelProvenance,
     PatchCandidate,
+    SourceLocation,
     VerificationRecord,
 )
 from contracts.verdict import (
@@ -143,6 +152,115 @@ def test_an_optional_gate_that_ran_and_failed_rejects():
         static_delta=gate(GateName.STATIC_DELTA, GateStatus.FAIL),
     )
     assert derive_verdict(gates) is Verdict.REJECTED
+
+
+# --- a substituted path cannot be expressed as the primary one --------------------
+
+
+def test_a_replayed_artifact_cannot_pass_a_gate():
+    """#83: a mission whose fuzzer never ran must not claim the renewed-fuzz gate."""
+    with pytest.raises(ValidationError) as excinfo:
+        GateResult(
+            name=GateName.RENEWED_FUZZING,
+            status=GateStatus.PASS,
+            evidence_source=EvidenceSource.REPLAYED_ARTIFACT,
+            tool="recorded corpus from 2026-08-11",
+        )
+    assert "not a passed gate" in str(excinfo.value)
+
+
+def test_a_gate_cannot_pass_without_naming_the_tool_that_ran():
+    with pytest.raises(ValidationError):
+        GateResult(name=GateName.COMPILE, status=GateStatus.PASS, tool="  ")
+
+
+def test_a_replayed_artifact_may_still_be_recorded():
+    """Recording the substitution is the point; only the PASS claim is refused."""
+    recorded = GateResult(
+        name=GateName.RENEWED_FUZZING,
+        status=GateStatus.NOT_RUN,
+        evidence_source=EvidenceSource.REPLAYED_ARTIFACT,
+        detail="Replayed corpus; no live campaign for this run.",
+    )
+    assert recorded.evidence_source is EvidenceSource.REPLAYED_ARTIFACT
+
+
+def test_a_finding_must_declare_how_it_was_discovered():
+    with pytest.raises(ValidationError):
+        FindingSummary(
+            id=uuid4(),
+            mission_id=uuid4(),
+            category=FindingCategory.HEAP_BUFFER_OVERFLOW,
+            severity=Severity.HIGH,
+            tool=AnalyzerTool.ADDRESS_SANITIZER,
+            location=SourceLocation(file_path="src/parser.c", line=88),
+            fingerprint="abc123",
+            reproducible=True,
+            detected_at=NOW,
+            title="heap-buffer-overflow in parse_header",
+        )
+
+
+def finding(**overrides) -> FindingSummary:
+    data = {
+        "id": uuid4(),
+        "mission_id": uuid4(),
+        "category": FindingCategory.HEAP_BUFFER_OVERFLOW,
+        "severity": Severity.HIGH,
+        "tool": AnalyzerTool.ADDRESS_SANITIZER,
+        "discovery_method": DiscoveryMethod.FUZZING_CAMPAIGN,
+        "location": SourceLocation(file_path="src/parser.c", line=88),
+        "fingerprint": "abc123",
+        "reproducible": True,
+        "detected_at": NOW,
+        "title": "heap-buffer-overflow in parse_header",
+    }
+    data.update(overrides)
+    return FindingSummary(**data)
+
+
+def test_a_replayed_finding_must_name_its_source():
+    with pytest.raises(ValidationError):
+        finding(discovery_method=DiscoveryMethod.REPLAYED_REPRODUCER)
+
+    replayed = finding(
+        discovery_method=DiscoveryMethod.REPLAYED_REPRODUCER,
+        replay_source="artifact://reproducers/parser-lib-crash-001",
+    )
+    assert replayed.discovery_method is DiscoveryMethod.REPLAYED_REPRODUCER
+
+
+def test_a_live_discovery_cannot_carry_a_replay_source():
+    """Otherwise the two are indistinguishable to anything reading the record."""
+    with pytest.raises(ValidationError):
+        finding(replay_source="artifact://reproducers/parser-lib-crash-001")
+
+
+def test_a_replayed_corpus_cannot_be_reported_as_a_live_campaign():
+    base = {
+        "mission_id": uuid4(),
+        "harness": "fuzz_parse_header",
+        "runtime_seconds": 0.0,
+        "executions": 0,
+        "crashes_found": 0,
+        "unique_crashes": 0,
+        "corpus_size": 12,
+        "recorded_at": NOW,
+    }
+    with pytest.raises(ValidationError):
+        FuzzingReport(mode=FuzzingMode.REPLAYED_CORPUS, **base)
+
+    replayed = FuzzingReport(
+        mode=FuzzingMode.REPLAYED_CORPUS,
+        replay_source="artifact://corpora/parser-lib-2026-08-11",
+        **base,
+    )
+    assert replayed.mode is FuzzingMode.REPLAYED_CORPUS
+
+    with pytest.raises(ValidationError):
+        FuzzingReport(
+            mode=FuzzingMode.NOT_RUN, **{**base, "executions": 4_000_000}
+        )
 
 
 # --- the mission verdict over N candidates ---------------------------------------

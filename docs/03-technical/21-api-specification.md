@@ -151,12 +151,24 @@ stream, plus the derived boolean `BaselineReport.passed` (configure and build su
 at least one test ran, none failed). Whoever checks the gate on 2026-08-09 should look
 for the event type, not for a state.
 
-### Model replay provenance
+### Fallback provenance — a substituted path is inexpressible as the primary one
 
-`ModelProvenance` carries `replayed_from_transcript`, `captured_at` and
-`transcript_sha256`, set together or not at all. A response served from a captured
-transcript is legitimate; presenting it as a live generation is not, and the UI must be
-able to say "replayed". Same rule as D-008 on patch provenance.
+The CEO approved fallbacks for D1–D7 (issues #81 subprocess jail, #82 model replay,
+#83 reproducer replay). Using one is legitimate. Presenting one as the primary path is
+not, and the schemas make that impossible rather than relying on a flag someone
+remembers to set:
+
+| Fallback | How the contract prevents the inflated claim |
+|---|---|
+| Model replay (#82) | `ModelProvenance.replayed_from_transcript` / `captured_at` / `transcript_sha256` — a validator requires all three or none, so a half-declared replay cannot be mistaken for live inference |
+| Reproducer replay (#83) | `FindingSummary.discovery_method` is **required with no default** — `FUZZING_CAMPAIGN`, `DIRECT_HARNESS` or `REPLAYED_REPRODUCER` — and a replayed finding must name its `replay_source` while a live one may not carry one. `FuzzingReport.mode` is required, and `NOT_RUN` cannot report executions or crashes |
+| Gate evidence | `GateResult.evidence_source`: a gate may only `PASS` on `TOOL_EXECUTION` with a named tool. A replayed artifact is recordable and displayable and **cannot pass a gate** — so a run whose fuzzer never executed cannot claim the renewed-fuzz gate |
+| Subprocess jail (#81) | `IsolationMode` is required on `SandboxStatus` and recorded on `EvidenceBundle`; `SUBPROCESS_JAIL` cannot be reported as `ROOTLESS_CONTAINER` |
+| Operator-supplied patch (D-008) | `PatchCandidate` validator: `MODEL_GENERATED` requires `ModelProvenance`, `OPERATOR_SUPPLIED` forbids it |
+
+`EvidenceBundle.substitutions` lists every fallback used, with a mandatory non-empty
+reason. An empty list is the claim that the primary path ran throughout — a claim the
+pipeline has to earn, not one a reader has to infer from a missing section.
 
 ### Properties the schemas enforce structurally
 

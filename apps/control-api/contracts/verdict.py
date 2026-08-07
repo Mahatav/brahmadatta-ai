@@ -26,18 +26,30 @@ from __future__ import annotations
 from typing import Iterator, Sequence
 
 from ninja import Schema
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from contracts.enums import GateName, GateStatus, Verdict
+from contracts.enums import EvidenceSource, GateName, GateStatus, Verdict
 
 
 class GateResult(Schema):
-    """One deterministic gate's outcome, with the tool that produced it."""
+    """One deterministic gate's outcome, with the tool that produced it.
+
+    A gate may only `PASS` on the strength of a tool that actually ran. Replayed
+    artifacts are recordable — the fallbacks in #82 and #83 need them — but a replayed
+    artifact cannot pass a gate, and a `PASS` with no named tool cannot be constructed.
+    That is what stops a mission whose fuzzer never ran from claiming the renewed-fuzz
+    gate as evidence.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: GateName
     status: GateStatus
+    evidence_source: EvidenceSource = Field(
+        default=EvidenceSource.TOOL_EXECUTION,
+        description="Where this result came from. A REPLAYED_ARTIFACT result may be "
+        "recorded and displayed; it may not be PASS.",
+    )
     tool: str = Field(
         default="",
         max_length=120,
@@ -54,6 +66,22 @@ class GateResult(Schema):
         description="Opaque artifact pointer (artifact://...). Resolved through a "
         "signed short-lived link, never returned inline.",
     )
+
+    @model_validator(mode="after")
+    def _a_pass_requires_a_tool_that_ran(self) -> "GateResult":
+        if self.status is not GateStatus.PASS:
+            return self
+        if self.evidence_source is not EvidenceSource.TOOL_EXECUTION:
+            raise ValueError(
+                f"gate {self.name} cannot PASS on a {self.evidence_source}; a replayed "
+                f"artifact is recordable evidence but it is not a passed gate."
+            )
+        if not self.tool.strip():
+            raise ValueError(
+                f"gate {self.name} cannot PASS without naming the tool that produced "
+                f"the result."
+            )
+        return self
 
     @classmethod
     def not_run(cls, name: GateName, reason: str) -> "GateResult":

@@ -226,6 +226,69 @@ class LanguageAdapter(StrEnum):
     C_MAKE_CTEST = "C_MAKE_CTEST"
 
 
+# --- substitution provenance ---------------------------------------------------
+#
+# The CEO approved fallbacks for D1–D7 (issues #81, #82, #83). A fallback is
+# legitimate; presenting one as the primary path is not. These enums exist so a
+# substituted path is *inexpressible* as the primary one — same rule as D-008 on
+# operator-supplied patches. Each is a required field somewhere, so "we'll remember to
+# set the flag" is not a thing that can be forgotten at 2am on the day.
+
+
+class DiscoveryMethod(StrEnum):
+    """How a finding came to exist. Required on every finding; no default.
+
+    `FUZZING_CAMPAIGN` is the strongest claim and the only one that supports "our
+    fuzzer discovered it". The other two are honest and weaker: the seven-day plan
+    already names direct harnessing as the *starting* position rather than the
+    fallback, and #83 adds reproducer replay under that.
+    """
+
+    FUZZING_CAMPAIGN = "FUZZING_CAMPAIGN"
+    DIRECT_HARNESS = "DIRECT_HARNESS"
+    REPLAYED_REPRODUCER = "REPLAYED_REPRODUCER"
+
+
+class EvidenceSource(StrEnum):
+    """Whether a gate result came from running a tool or from a stored artifact.
+
+    A gate may only PASS on `TOOL_EXECUTION`. A replayed artifact can be recorded and
+    displayed; it cannot pass a gate.
+    """
+
+    TOOL_EXECUTION = "TOOL_EXECUTION"
+    REPLAYED_ARTIFACT = "REPLAYED_ARTIFACT"
+
+
+class FuzzingMode(StrEnum):
+    """Whether a fuzzing campaign actually ran (#83)."""
+
+    LIVE_CAMPAIGN = "LIVE_CAMPAIGN"
+    REPLAYED_CORPUS = "REPLAYED_CORPUS"
+    NOT_RUN = "NOT_RUN"
+
+
+class IsolationMode(StrEnum):
+    """How the target was contained (#81).
+
+    `SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an
+    acceptable D3 fallback and it must never be reported as the container path.
+    """
+
+    ROOTLESS_CONTAINER = "ROOTLESS_CONTAINER"
+    SUBPROCESS_JAIL = "SUBPROCESS_JAIL"
+
+
+class SubstitutionKind(StrEnum):
+    """The fallback paths that exist. Any that was used is disclosed in the evidence
+    bundle rather than inferred by a reader from a missing section."""
+
+    MODEL_REPLAY = "MODEL_REPLAY"
+    REPRODUCER_REPLAY = "REPRODUCER_REPLAY"
+    SUBPROCESS_JAIL_ISOLATION = "SUBPROCESS_JAIL_ISOLATION"
+    OPERATOR_SUPPLIED_PATCH = "OPERATOR_SUPPLIED_PATCH"
+
+
 class Role(StrEnum):
     """Roles from `docs/03-technical/22-authentication-and-authorization-plan.md`."""
 

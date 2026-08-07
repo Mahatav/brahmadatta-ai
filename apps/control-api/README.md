@@ -76,6 +76,8 @@ that fail if the property is removed:
 | No stage runs without an active authorization record | `contracts/state_machine.py` | `contracts/tests/test_state_machine.py` |
 | No inference endpoint may be a hosted third party | `contracts/model_policy.py`, `contracts/checks.py` | `contracts/tests/test_model_policy.py` |
 | Sandbox egress cannot be requested | `SandboxPolicy.network: Literal["deny"]` | `api/tests/test_http_surface.py` |
+| No verdict state without a verification record | `contracts/state_machine.py` `assert_verdict_is_evidenced` | `contracts/tests/test_state_machine.py` |
+| A substituted path cannot be claimed as the primary one | `DiscoveryMethod`, `FuzzingMode`, `IsolationMode`, `EvidenceSource`, `ModelProvenance` replay fields | `contracts/tests/test_verdict.py` |
 
 ## Changing the contract
 
