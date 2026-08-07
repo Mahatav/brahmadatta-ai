@@ -569,3 +569,186 @@ hairline chakra engraving with ASCII-density shading rather than a glowing progr
 non-figural rule from D-017 stands unchanged.
 
 **Final approval authority** — CEO. Decided.
+
+---
+
+## D-019 · Panels are constructed from hairline rules and corner crop marks, not boxes · 2026-08-07 · `ui-ux-designer` seat
+
+**Decision** — No panel in the Command Center has a border, a background fill, a shadow or a
+corner radius. A panel is located by (a) full-bleed 1px rules between major regions and (b) four
+corner crop marks — two 10px strokes per corner, each stopping 3px short so the corner is implied
+and never drawn. Two rule weights exist in the entire system: 1px for everything, 2px for exactly
+three elements. Specified in `docs/09-company/04-design-system.md` §2.4.
+
+**Options considered** — (a) the pack's nested glass panels with luminous borders and restrained
+glow, per `docs/02-design/00-ui-design-direction.md`; (b) conventional 1px bordered boxes, the
+neutral default; (c) rules and crop marks with no boxes at all.
+
+**Pros and cons** — (a) is the pack's own words and is now superseded by D-017, which the CEO
+decided after the pack was written; it also describes a look every competitor's dashboard will
+converge on. (b) is safe, fast to build, and forgettable — a bordered box grid is what a judge
+sees in every other entry, and it fights the flat-field mandate because a box implies a surface
+above the plane. (c) keeps everything sitting directly on the one colour plane, which is what
+makes the reference striking, and gives each panel a free state channel: the tick colour changes
+with panel state at no pixel cost. Its risk is that under-defined crop marks read as an unfinished
+layout rather than a deliberate one, which is why the tick geometry is specified to the pixel
+rather than left to taste. Chose (c).
+
+**Cost implications** — favourable. One shared `FrameAndTicks` primitive replaces per-panel border
+and background styling, and flat 1px strokes are materially cheaper to repaint than layered glass
+under a live event feed.
+
+**Security implications** — none.
+
+**Scalability implications** — none at one operator. Positive for render cost at high event rates.
+
+**Recommendation** — as implemented. Reversible: reintroducing borders is a token change, since no
+component hardcodes a colour or a weight.
+
+**Final approval authority** — CEO for the visual call, under D-017 and D-018.
+
+---
+
+## D-020 · One screen, with the diff as a full-width overlay · 2026-08-07 · `ui-ux-designer` seat
+
+**Decision** — The Command Center is a single screen: three columns (336 / 608 / 336) holding the
+Core, the stage timeline, the findings list and the verdict panel. The diff opens as an opaque
+full-content-width overlay (1328 × 684) inset inside the page frame, so the top strip and mission
+clock stay visible. Screens 1, 3, 5 and 6 of
+`docs/02-design/31-dashboard-screen-specification.md` are not built.
+
+**Options considered** — (a) the pack's six screens; (b) one screen with the diff in a side rail;
+(c) two layout modes — a MISSION mode and an EVIDENCE mode that rebuilds the grid around the diff;
+(d) one screen plus a full-width diff overlay.
+
+**Pros and cons** — (a) is six screens' worth of routing, state and empty states against a P0 that
+names five panels. (b) fails on arithmetic: a unified C diff needs roughly 80 columns, about 624px
+at the specified size, and neither 336px rail can hold it — the diff would wrap and become
+unreadable at exactly the moment a judge is reading it. (c) gives the diff the most room and is
+the best result, but it is two full layouts to build and test in a seven-day window, and it
+removes the Core from view during the most cinematic step of the demo. (d) gives the diff the
+same 1328px that (c) would, costs one overlay component, and keeps mission continuity because the
+frame and clock never disappear. Chose (d).
+
+**Cost implications** — materially lower than (a) or (c). One overlay versus five screens or two
+grids.
+
+**Security implications** — none.
+
+**Scalability implications** — none. If a post-competition product needs the six screens, the
+panel specs here are the content for four of them.
+
+**Recommendation** — as implemented. If the overlay proves awkward in rehearsal, (c) is the
+upgrade path and no panel spec changes.
+
+**Final approval authority** — PM for the screen-scope reduction (it narrows user-facing scope);
+CTO if the frontend disputes the buildability.
+
+---
+
+## D-021 · Instrument Serif 400 and Fragment Mono 400, self-hosted, single weights accepted · 2026-08-07 · `ui-ux-designer` seat
+
+**Decision** — Display type is Instrument Serif 400; all utility, label and data type is Fragment
+Mono 400. Both ship exactly one weight and both are self-hosted as woff2 in the Astro build.
+Emphasis in mono is carried by case, tracking and colour, never by weight, and synthetic bold is
+prohibited.
+
+**Options considered** — (a) the two fonts confirmed in use on the CEO's reference B; (b) a true
+light Didone such as Bodoni Moda 300 for display, matching reference A's weight more literally;
+(c) a second mono with multiple weights for dense tabular data alongside Fragment Mono for labels;
+(d) load from the Google Fonts CDN rather than self-hosting.
+
+**Pros and cons** — (a) is what the CEO named and both are freely licensed; the honest cost is
+that a single-weight mono removes the most common tool for hierarchy in a dense dashboard.
+(b) matches reference A's 300-weight Didone more exactly, but Instrument Serif's stroke contrast
+is high enough that at 48px and above it already reads light, and Bodoni Moda at display size is
+more decorative than the reference. (c) would restore weight-based hierarchy but adds a third
+family, and the single-weight discipline is a large part of why reference B looks composed rather
+than busy — hierarchy is instead carried by size, case and the bracket grammar. (d) is one line of
+CSS and a single point of failure: the finale machine may have no internet, and a failed CDN
+import drops the entire dashboard to Times New Roman with different metrics, which would be
+discovered on stage. Chose (a) with self-hosting; (d) rejected outright.
+
+**Cost implications** — negligible. Two woff2 subsets in the build.
+
+**Security implications** — mildly positive. Self-hosting removes a third-party request from the
+operator browser and one more origin from the CSP.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. The single-weight mono is a real constraint and is recorded
+as a risk, not hidden: if hierarchy proves insufficient in rehearsal, the fix is a second size
+step, not a second font.
+
+**Final approval authority** — CEO for the typeface choice, under D-018, which named both
+families.
+
+---
+
+## D-022 · Nothing in the UI advances on a timer; a stale stream freezes the display · 2026-08-07 · `ui-ux-designer` seat
+
+**Decision** — Every progress indicator steps only when an event arrives on the stream. No
+interpolation between events, no easing toward a predicted value, no idle animation implying work.
+The Core's ASCII ramp tick is the single continuous animation in the product and exists as a
+liveness signal: it ticks because events are arriving and stops when they stop. After 10s without
+an event the display freezes exactly where it is and shows
+`[ ! STREAM STALE · LAST EVENT +Ns ]`.
+
+**Options considered** — (a) smooth interpolated progress between events, the conventional
+dashboard behaviour; (b) a continuous idle animation on the Core so it always looks alive;
+(c) event-driven stepping only, with an explicit stale state.
+
+**Pros and cons** — (a) looks better in every frame and is a fabricated metric — the interpolated
+positions are values no tool ever reported. (b) is worse: a Core that keeps moving while the
+backend is dead actively misleads the operator and the judges, and it is the exact failure the
+CLAUDE.md no-decorative-metrics rule names. (c) is occasionally visually abrupt — an arc will jump
+rather than glide — and in exchange every pixel of motion on screen corresponds to something that
+actually happened. It also converts the animation into a diagnostic: a frozen ramp during the
+demo tells the operator the SSE connection died, which behind a default nginx config is the single
+most likely live failure.
+
+**Cost implications** — lower. No animation loop, no interpolation state.
+
+**Security implications** — none directly. It is the same integrity principle as D-008, D-009 and
+D-010: the system never displays more than it can evidence.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented. Reviewers should treat any client-side timer that advances a
+displayed value as a defect.
+
+**Final approval authority** — CTO (technical), under the CEO's standing no-fake-metrics rule.
+
+---
+
+## D-023 · The em dash is the not-measured glyph; a zero is only shown once measured · 2026-08-07 · `ui-ux-designer` seat
+
+**Decision** — A value that has not been produced renders as `—` in secondary text, never in a
+state colour. A numeral `0` appears only after the step that produces it has actually completed.
+`[ FINDINGS · — ]` before analysis runs; `[ FINDINGS · 0 ]` after it completes clean. Unrun
+verification gates render as `[ — STATIC DELTA · NOT RUN ]` alongside the verdict, never as absent
+and never in green.
+
+**Options considered** — (a) render unproduced values as `0`, the default of most dashboards;
+(b) hide unproduced values entirely until they exist; (c) an explicit not-measured glyph.
+
+**Pros and cons** — (a) is the specific failure D-010 already legislated against in written
+material, reappearing in the UI: a zero dressed as a result is indistinguishable from a measured
+clean run, and a judge cannot tell which they are looking at. (b) is honest but destroys layout
+stability — panels reflow as values arrive — and, worse, an absent gate in a verdict matrix is
+exactly the omission D-009 requires be disclosed. (c) costs one glyph and makes the distinction
+between "not measured", "measured as zero" and "failed" visible at a glance and checkable in
+review.
+
+**Cost implications** — none.
+
+**Security implications** — this is an integrity control of the same family as D-008, D-009 and
+D-010. Any panel that renders an unproduced value as `0` should be treated as a finding by the
+`cybersecurity` seat when it reviews judge-facing output.
+
+**Scalability implications** — none.
+
+**Recommendation** — as implemented, and extended to the exported evidence report so the UI and
+the artifact tell the same story. That extension is the PM's and the backend's to accept.
+
+**Final approval authority** — CEO for the product rule, consistent with D-010.
