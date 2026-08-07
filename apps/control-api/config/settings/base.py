@@ -158,3 +158,14 @@ LOGGING = {
     },
     "root": {"handlers": ["console"], "level": env.get_str("LOG_LEVEL", "INFO")},
 }
+
+# The Django half of the ingress contract. nginx overwrites both headers on every request
+# in both profiles (infrastructure/compose/nginx/includes/proxy-headers.conf), so trusting
+# them is safe and NOT trusting them is the bug: without these, Django builds http:// URLs
+# and the wrong host behind a TLS-terminating proxy.
+#
+# In base.py rather than finale.py deliberately. The development profile runs behind the
+# same nginx and had the same defect — the security review flagged it, and
+# tests/architecture/test_ingress_contract.py fails if either is absent.
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

@@ -1,0 +1,26 @@
+# Ignore list for the control-api build context (apps/control-api/).
+#
+# BuildKit reads <dockerfile>.dockerignore when the Dockerfile sits outside its context,
+# which is what lets this list live in infrastructure/ instead of inside the application
+# directory owned by another role.
+#
+# The .venv exclusion is not cosmetic: apps/control-api/.venv is a host-built macOS/arm
+# virtualenv. Copying it into a Linux image would both bloat the context and shadow
+# /opt/venv with binaries that cannot run.
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Never bake a real environment file into an image.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store

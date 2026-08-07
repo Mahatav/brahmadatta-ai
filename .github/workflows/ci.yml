@@ -1,0 +1,160 @@
+# Brahmadatta AI — continuous integration.
+#
+# TWO JOBS, deliberately. The CTO cut D1's CI scope to `pytest` and an OpenAPI dump
+# freshness check, on the grounds that a lint matrix, a type-check matrix and a coverage
+# gate are cost with no gate behind them in a seven-day build. The configuration for all
+# of those still exists and is still run locally — see
+# docs/04-development/31-development-setup-guide.md §Checks — it is just not spending
+# runner minutes on every pull request this week.
+#
+# What is NOT in CI, and how it is covered instead:
+#
+#   ruff / mypy / eslint / astro check   ruff.toml, mypy.ini, eslint.config.js — run
+#                                        locally; both were green at D1
+#   docker compose config, nginx -t      infrastructure/scripts/nginx-validate.sh
+#   SSE survives the proxy               infrastructure/scripts/smoke-sse.sh
+#   only nginx has egress (C4)           infrastructure/scripts/egress-test.sh
+#   shellcheck, actionlint               run locally
+#
+# Those four scripts are the ones worth promoting back into CI first, in that order, when
+# the budget for it exists. `smoke-sse.sh` and `egress-test.sh` guard invariants that fail
+# silently, which is the argument for them going first.
+#
+# Design notes that survive the cut:
+#   - Actions are pinned to a commit SHA, not a tag. A tag is mutable and can be repointed
+#     at new code without any change on our side. Same rule as the image digest pins in
+#     infrastructure/compose/.
+#   - permissions is read-only. No job writes to the repository.
+#   - No secret is used by any job. Nothing here talks to a paid service, a model provider,
+#     or any external inference API.
+#   - Steps that depend on a directory which does not exist yet skip cleanly and say so, so
+#     an unrelated pull request does not go red while the tree is still filling in.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  pytest:
+    name: pytest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Folded in as a step rather than a third job: it takes two seconds, needs no setup,
+      # and "no credential is ever committed" is not the kind of rule to leave to review
+      # attention across a twelve-hour handoff.
+      - name: No environment file, key, or certificate is tracked
+        run: |
+          set -euo pipefail
+          bad="$(git ls-files \
+            | grep -E '(^|/)\.env($|\.)|\.pem$|\.key$|\.p12$|\.pfx$|id_rsa|id_ed25519' \
+            | grep -v -E '\.env\.example$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::tracked files that must never be committed:"
+            echo "$bad"
+            exit 1
+          fi
+          if git grep -I -n -E -- "-----BEGIN [A-Z ]*PRI""VATE KEY-----" -- . ; then
+            echo "::error::private key material found in a tracked file"
+            exit 1
+          fi
+          echo "ok: no tracked .env, private key, or certificate"
+
+      - name: Install test tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # BUG-016: this step used to run BEFORE control-api's dependencies existed, so the
+      # import-direction check (C5) and the ingress-contract check could not import Django
+      # and skipped silently — green, every run, testing nothing. Installing first turns
+      # them back into real assertions.
+      - name: Install control API dependencies
+        run: |
+          if [ -d apps/control-api ]; then
+            pip install -r apps/control-api/requirements.txt
+          else
+            echo "apps/control-api does not exist yet — nothing to install"
+          fi
+
+      # Architecture invariants that hold regardless of what the application looks like:
+      # the ASGI process must not import the gateway (C5), the Django half of the ingress
+      # contract is set, and no container but nginx sits on a routable network.
+      - name: Architecture tests
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DJANGO_DEBUG: "false"
+          DATABASE_URL: "sqlite:///ci-arch.sqlite3"
+        run: pytest tests/ -q -rs
+
+      - name: Control API tests
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DJANGO_DEBUG: "false"
+          # sqlite so CI needs no database service. The compose stack and the finale both
+          # use PostgreSQL; anything depending on Postgres-specific behaviour needs an
+          # integration job with a service container, which is D2 work.
+          DATABASE_URL: "sqlite:///ci.sqlite3"
+        run: |
+          set -euo pipefail
+          if [ ! -d apps/control-api ]; then
+            echo "apps/control-api does not exist yet — skipping"
+            exit 0
+          fi
+          pip install -r apps/control-api/requirements.txt
+          cd apps/control-api
+          pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Without this, issue #6's acceptance criterion — "a contract change breaks the frontend
+  # build" — is simply false: a hand-committed OpenAPI dump drifts silently the first time
+  # someone edits a schema and forgets to re-export, and everything downstream is then
+  # generated from a description of an API that no longer exists.
+  openapi-contract:
+    name: openapi dump is current
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the control API
+        run: |
+          set -euo pipefail
+          if [ ! -d apps/control-api ]; then
+            echo "apps/control-api does not exist yet — nothing to install"
+            exit 0
+          fi
+          python -m pip install --upgrade pip
+          pip install -r apps/control-api/requirements.txt
+
+      - name: Regenerate and diff
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DATABASE_URL: "sqlite:///ci.sqlite3"
+        run: infrastructure/scripts/openapi-contract-check.sh

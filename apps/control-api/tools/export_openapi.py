@@ -58,12 +58,17 @@ def render(schema: dict) -> str:
 
 
 def main() -> int:
+    # An optional output path, so CI can regenerate to a scratch file and diff it against
+    # the committed dump. Without this the drift check regenerated OVER the committed file
+    # and then compared it with itself — it could never fail, which made the contract freeze
+    # in #6 honour-based on the day it was declared frozen. Found by QA (BUG-002).
+    out = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else OUTPUT_PATH
     text = render(build_schema())
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    previous = OUTPUT_PATH.read_text(encoding="utf-8") if OUTPUT_PATH.exists() else ""
-    OUTPUT_PATH.write_text(text, encoding="utf-8")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    previous = out.read_text(encoding="utf-8") if out.exists() else ""
+    out.write_text(text, encoding="utf-8")
     status = "unchanged" if previous == text else "updated"
-    print(f"{status}: {OUTPUT_PATH} ({len(text)} bytes)")
+    print(f"{status}: {out} ({len(text)} bytes)")
     return 0
 
 

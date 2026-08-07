@@ -1,0 +1,28 @@
+# Development and CI tooling for the whole repository.
+#
+# Runtime dependencies are NOT here — those live in apps/control-api/requirements.txt and
+# are owned by the backend developer. This file is the tools that check the code.
+#
+# Versions are pinned exactly, and resolved on 2026-08-07. A floating linter version means
+# a pull request can go red because a tool released overnight, which in a seven-day build
+# costs a shift for nothing.
+#
+#   python3.12 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-dev.txt
+
+ruff==0.16.1
+mypy==2.3.0
+
+pytest==9.1.1
+pytest-django==4.13.0
+pytest-asyncio==1.4.0
+
+# For exercising the API and the SSE stream from tests.
+httpx==0.28.1
+
+# tests/architecture/test_container_isolation.py parses the compose files structurally
+# rather than by regex, so "is the Docker socket mounted" is answered by the same document
+# Docker reads.
+PyYAML==6.0.3
+# mypy stubs for the above.
+types-PyYAML==6.0.12.20260724

@@ -30,11 +30,56 @@ build/
 /evidence-out/
 *.log
 
-# Fuzzing / analysis output — never commit crashes or corpora
-/fuzz-out/
-/corpus/
+# Fuzzing / analysis output — never commit anything a campaign PRODUCES
+#
+# The rules above this line were anchored to the repository root (`/fuzz-out/`,
+# `/corpus/`), which meant a fuzz run inside demo/repositories/<target>/ wrote committable
+# crash inputs and corpus entries. Those artifacts are derived from a target's content, and
+# the day this repository goes public they become the thing that leaks it. Broadened to
+# match at any depth.
+#
+# libFuzzer names its artifacts crash-<sha1>, leak-<sha1>, timeout-<sha1>, oom-<sha1> and
+# slow-unit-<sha1> in the artifact_prefix directory, hence the prefix patterns.
+fuzz-out/
+**/fuzz-out/
+**/fuzz-artifacts/
 crashes/
+**/crashes/
+**/.cifuzz-corpus/
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*
 *.sarif
+*.profraw
+*.profdata
+*.sancov
+/corpus/
+
+# ...but the AUTHORED demo fixtures are tracked deliberately. The pktcfg seed corpus and
+# its one crash input are product artifacts we wrote and reviewed, not campaign output, and
+# the demo depends on them being in the repository. Re-included by exact path so the
+# broadening above cannot swallow them, and asserted by
+# tests/architecture/test_fuzz_artifacts_are_ignored.py.
+# SEC-06-R: re-included by EXACT PATH, never by wildcard. `!.../corpus/**` re-admitted
+# whatever a campaign wrote there, and libFuzzer's default artifact_prefix is the corpus
+# directory — so the broadening above was undone by the exception beneath it. Note also
+# that the authored crash fixture is named `crash-literal-tab.bin`, which the generic
+# `crash-*` rule matches; only an exact path distinguishes it from a generated `crash-<sha1>`.
+#
+# Adding a fixture means adding a line here. That is the point: each one is a reviewed act.
+!demo/repositories/pktcfg/corpus/
+!demo/repositories/pktcfg/corpus/seed-bad-magic.bin
+!demo/repositories/pktcfg/corpus/seed-empty.bin
+!demo/repositories/pktcfg/corpus/seed-escaped-tab.bin
+!demo/repositories/pktcfg/corpus/seed-escaped.bin
+!demo/repositories/pktcfg/corpus/seed-hex.bin
+!demo/repositories/pktcfg/corpus/seed-multi.bin
+!demo/repositories/pktcfg/corpus/seed-simple.bin
+!demo/repositories/pktcfg/corpus/seed-truncated.bin
+!demo/repositories/pktcfg/crash/
+!demo/repositories/pktcfg/crash/crash-literal-tab.bin
 
 # Claude local state
 .claude/settings.local.json

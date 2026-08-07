@@ -1,0 +1,389 @@
+/* ==========================================================================
+   Brahmadatta AI — Design Tokens
+   --------------------------------------------------------------------------
+   Single source of truth for the Brahmadatta Command Center's visual system.
+
+   Specification: docs/09-company/04-design-system.md   (rev 2)
+   Direction:     .project/decisions.md D-017 (flat engraving, epic geometry,
+                  no depicted figures), D-018 … D-023.
+   Rev 2 records:  §15 of the design system doc, DS-01 … DS-06. They are held
+                  there rather than in .project/decisions.md while several
+                  seats contend over that file.
+
+   RULES FOR ANYONE IMPORTING THIS FILE
+   1. No hardcoded colour, size, or spacing value may appear in any component
+      downstream. If a value you need is not here, add it here first.
+   2. Use the SEMANTIC layer (§2) in components. The PRIMITIVE layer (§1) is
+      the palette definition and should not be referenced directly.
+   3. Every colour pair below carries its measured WCAG 2.1 contrast ratio
+      against the field. Do not introduce a pair without measuring it.
+   4. State is never carried by colour alone. Every state token has a paired
+      word and glyph token; use both.
+   5. Every layout constant in §5 that governs a text column was derived from
+      a 0.6em monospace advance. MEASURE the shipped Fragment Mono woff2
+      against a 60-character ruler string before building any panel that does
+      width arithmetic. >3% drift means the budgets in the design system's
+      §3, §6.4 and §6.5 are re-derived first. See DS-06.
+   ========================================================================== */
+
+:root {
+  /* ========================================================================
+     1. PRIMITIVES — the whole palette. Eight colours. Do not add a ninth
+        without a decision record.
+        The field is one flat, saturated, unmodulated plane. There are no
+        gradients, no glass, no bevels, no shadows and no glow in this system.
+        Every ratio below is measured against --bd-field.
+     ======================================================================== */
+
+  /* The field. Saturated indigo-ultramarine, HSL 236° 75% 31%.
+     Everything in the product sits directly on this plane. */
+  --bd-c-field:        #141C8C;   /* relative luminance 0.0287              */
+
+  /* Ink. Near-white, very slightly warm so it does not read as clinical grey. */
+  --bd-c-white:        #F4F3EE;   /* 12.00:1 on field — primary text        */
+  --bd-c-veil:         #9FA1C9;   /*  5.34:1 on field — secondary text      */
+
+  /* Line. Three weights of presence for the rule-and-tick construction. */
+  --bd-c-rule:         #7276B5;   /*  3.16:1 on field — informational rules */
+  --bd-c-rule-faint:   #4A50A4;   /*  1.8:1  on field — non-informational
+                                      construction lines only. Never carries
+                                      meaning, so the 3:1 floor does not
+                                      apply.                                */
+  --bd-c-disabled:     #6569AF;   /*  2.6:1  on field — WCAG exempts
+                                      disabled controls. Always pair with a
+                                      written reason; never signal
+                                      unavailability by dimness alone.      */
+
+  /* State. Three, and only three. */
+  --bd-c-verified:     #39E08A;   /*  7.77:1 on field — verified, operational,
+                                      gate passed                            */
+  --bd-c-warning:      #FFB020;   /*  7.29:1 on field — warning, escalation,
+                                      degraded, held for human review        */
+  --bd-c-critical:     #FF6B66;   /*  4.80:1 on field — critical only:
+                                      failed gate, rejected verdict, unsafe
+                                      condition. Nothing else.               */
+
+  /* ========================================================================
+     2. SEMANTIC COLOUR — what components reference.
+     ======================================================================== */
+
+  --bd-surface:              var(--bd-c-field);
+  --bd-text:                 var(--bd-c-white);
+  --bd-text-secondary:       var(--bd-c-veil);
+  --bd-text-disabled:        var(--bd-c-disabled);
+
+  --bd-rule:                 var(--bd-c-rule);
+  --bd-rule-construction:    var(--bd-c-rule-faint);
+  --bd-rule-active:          var(--bd-c-white);
+
+  --bd-tick:                 var(--bd-c-rule);        /* corner crop marks  */
+  --bd-tick-active:          var(--bd-c-white);
+
+  --bd-state-verified:       var(--bd-c-verified);
+  --bd-state-warning:        var(--bd-c-warning);
+  --bd-state-critical:       var(--bd-c-critical);
+  --bd-state-idle:           var(--bd-c-veil);
+  --bd-state-running:        var(--bd-c-white);
+
+  /* NOT RUN — a verification gate that did not execute.
+     No ninth colour: this aliases the existing amber primitive.
+
+     USE IT ONLY FOR GATES IN A VERDICT MATRIX. D-009's whole protection is
+     that an unrun gate is as visible as a failed one, and --bd-text-secondary
+     is this system's colour of de-emphasis. Architecture spec §5.4 requires
+     amber with the reason string inline; this token is that reconciliation.
+
+     DO NOT use it for an unproduced value. `[ FINDINGS · — ]` before analysis
+     has run stays --bd-text-secondary, per D-023. The review question that
+     separates them is: "is this in a gate matrix?"
+
+     Always paired with --bd-glyph-not-measured and the word NOT RUN, so the
+     state is carried by glyph and word as well as colour. The reason string
+     is REQUIRED and is rendered verbatim from GateResult.detail; a gate row
+     with an empty reason renders critical, not amber.
+     See docs/09-company/04-design-system.md §2.1, §5, §6.4.3 and DS-03. */
+  --bd-state-not-run:        var(--bd-c-warning);   /* 7.29:1 on field */
+
+  --bd-focus-ring:           var(--bd-c-white);
+
+  /* Model self-report is NEVER a state colour and NEVER a verdict colour.
+     It is deliberately the same as ordinary secondary text so it cannot be
+     mistaken for an outcome. See docs/09-company/04-design-system.md §6.4. */
+  --bd-model-selfreport:     var(--bd-c-veil);
+
+  /* ========================================================================
+     3. TYPEFACES
+
+        Display: Instrument Serif 400 — the only weight it ships. Its stroke
+        contrast is high enough that at 48px and above it reads as a light
+        Didone, which is the effect the reference calls for.
+        Approved substitute if a glyph is missing: Bodoni Moda 400.
+
+        Utility: Fragment Mono 400 — also a single weight. Emphasis in mono
+        is carried by case, tracking and colour, never by weight. Do not
+        synthesise a bold; browsers fake it badly and it breaks the tick grid.
+
+        BOTH FONTS MUST BE SELF-HOSTED as woff2 in the Astro build. The
+        finale machine may have no internet; a Google Fonts @import that
+        fails drops the entire dashboard to Times New Roman.
+     ======================================================================== */
+
+  --bd-font-display: "Instrument Serif", "Bodoni Moda", Didot, "Times New Roman", serif;
+  --bd-font-mono:    "Fragment Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* ========================================================================
+     4. TYPE SCALE
+        Mono sizes are tight because the dashboard is dense. Display sizes are
+        large because the finale is judged partly on legibility across a room.
+        Sizes marked ROOM are the tier guaranteed legible at ~4 m; anything a
+        judge must read from a distance uses one of those.
+     ======================================================================== */
+
+  /* Mono — size / line-height / letter-spacing */
+  --bd-type-mono-3xs:         10px;  /* bracket micro-labels, uppercase only */
+  --bd-type-mono-3xs-lh:      14px;
+  --bd-type-mono-3xs-ls:      0.14em;
+
+  --bd-type-mono-2xs:         11px;  /* panel labels                         */
+  --bd-type-mono-2xs-lh:      16px;
+  --bd-type-mono-2xs-ls:      0.12em;
+
+  --bd-type-mono-xs:          12px;  /* dense tabular data, sub-lines        */
+  --bd-type-mono-xs-lh:       18px;
+  --bd-type-mono-xs-ls:       0.06em;
+
+  --bd-type-mono-sm:          13px;  /* primary rows, event lines            */
+  --bd-type-mono-sm-lh:       20px;
+  --bd-type-mono-sm-ls:       0.02em;
+
+  --bd-type-mono-md:          15px;  /* diff code, active state chips  ROOM  */
+  --bd-type-mono-md-lh:       22px;
+  --bd-type-mono-md-ls:       0;
+
+  --bd-type-mono-lg:          18px;  /* active stage name, key values  ROOM  */
+  --bd-type-mono-lg-lh:       26px;
+  --bd-type-mono-lg-ls:       0;
+
+  --bd-type-mono-xl:          24px;  /* mission clock                  ROOM  */
+  --bd-type-mono-xl-lh:       30px;
+  --bd-type-mono-xl-ls:       0;
+
+  /* Display — Instrument Serif 400 */
+  --bd-type-display-sm:       32px;
+  --bd-type-display-sm-lh:    1.0;
+  --bd-type-display-md:       48px;                             /*      ROOM */
+  --bd-type-display-md-lh:    0.98;
+  --bd-type-display-lg:       72px;  /* verdict word, Core centre     ROOM  */
+  --bd-type-display-lg-lh:    0.94;
+  --bd-type-display-xl:      104px;  /* reserved: single hero readout ROOM  */
+  --bd-type-display-xl-lh:    0.92;
+
+  /* All numeric data is tabular. Apply with font-variant-numeric. */
+  --bd-numeric:               tabular-nums lining-nums;
+
+  /* ========================================================================
+     5. SPACING — 4px base unit. No value outside this scale.
+     ======================================================================== */
+
+  --bd-space-1:    4px;
+  --bd-space-2:    8px;
+  --bd-space-3:   12px;
+  --bd-space-4:   16px;
+  --bd-space-5:   24px;   /* column gutter, panel padding                    */
+  --bd-space-6:   32px;   /* page frame inset                               */
+  --bd-space-7:   48px;
+  --bd-space-8:   64px;
+  --bd-space-9:   96px;
+
+  /* Layout constants for the 1440 × 900 baseline. Columns are fixed; extra
+     viewport width is absorbed by the centre column. */
+  --bd-frame-inset:        var(--bd-space-6);   /*  32 */
+  --bd-frame-pad:          var(--bd-space-5);   /*  24 */
+  --bd-col-rail:           336px;
+  --bd-col-centre:         608px;               /* min; grows with viewport */
+  --bd-strip-top:          64px;
+  --bd-strip-bottom:       56px;
+  --bd-body-h:            684px;                /* the height everything in
+                                                   the centre column must
+                                                   divide into exactly       */
+  --bd-row-h:              44px;                /* list rows = hit target   */
+  --bd-row-event-h:        28px;                /* nested event lines       */
+  --bd-control-h:          44px;                /* every control's hit area */
+
+  /* Centre column, rev 2. These three MUST sum to --bd-body-h.
+     424 + 24 + 236 = 684, with zero slack. If one changes, another must.
+     DS-01: the wheel shrank from 440 so the verdict panel could hold all
+     five gate rows with their reason strings inline, which architecture
+     spec §5.4 requires and 124px could not deliver. */
+  --bd-core-block:        424px;   /* 380 wheel + 44 label block           */
+  --bd-core-wheel:        380px;   /* SVG viewBox stays 440; scale 0.8636  */
+  --bd-core-label:         44px;   /* two mono-md lines                    */
+  --bd-verdict-panel:     236px;   /* 16+4+68+2+8+26+12+(5 × 20)           */
+
+  /* Candidate Compare overlay, rev 2. DS-02.
+     652 + 24 + 652 = 1328 = the full content width. The comparison lives
+     here, NOT in the verdict panel — an overlay that covers the panel doing
+     the comparing is the contradiction rev 1 shipped.
+     [ OPEN FULL DIFF ] is a MODE of this overlay at --bd-overlay-w.
+     Nothing in this system opens an overlay on top of an overlay. */
+  --bd-overlay-w:        1328px;
+  --bd-overlay-h:         684px;
+  --bd-compare-col:       652px;   /* 72 chars at mono-md — enough for the
+                                      longest NOT RUN reason inline        */
+  --bd-compare-gutter:    var(--bd-space-5);   /* 24, with a 1px rule
+                                                  centred in it            */
+  --bd-compare-header-h:   81px;   /* 16 + 22 + 22 + 8 + 1 + 12            */
+  --bd-compare-body-h:    603px;   /* 684 − 81; the column budget in the
+                                      design system §6.4.1 closes on this  */
+  --bd-diff-scroll-h:     194px;   /* 8 full mono-md rows visible          */
+
+  /* Findings-rail evidence block, rev 2. DS-05. This is where demo step 4's
+     ASan trace and 5/5 replay record live — they landed nowhere in rev 1. */
+  --bd-evidence-frames:       3;   /* stack frames shown in the rail before
+                                      [ FRAMES n OF N ] discloses the rest.
+                                      NEVER truncate a trace silently.     */
+  --bd-evidence-frame-chars: 43;   /* the rail holds this many at mono-xs  */
+
+  /* Bounded rendering, rev 2. Replaces rev 1's 200-row virtualization,
+     which was moot once #31 was cut. There is no windowing machinery: an
+     expanded stage renders its most recent N event rows and states the
+     count of what it is not showing. 50 is the threshold above which the
+     ui-ux-pro-max guideline set calls for virtualization, so sitting at it
+     keeps plain rendering correct. The real number this survives is a
+     40-minute fuzz campaign at one throttled event per 5 s (~480 rows). */
+  --bd-event-window:         50;
+  --bd-diff-max-lines:      200;   /* reachable only on the policy-failure
+                                      path; a policy-PASSING diff is capped
+                                      at 25 changed lines, which is why the
+                                      old 2000-line state was unreachable  */
+
+  /* ========================================================================
+     6. RULES AND TICKS — the construction system.
+        Panels have NO borders and NO background. A panel is located by a
+        hairline rule between regions plus four corner crop marks.
+     ======================================================================== */
+
+  --bd-rule-hair:          1px;   /* everything                              */
+  --bd-rule-heavy:         2px;   /* page frame top rule, verdict underline,
+                                     diff gutter marks. Nothing else.        */
+  --bd-tick-len:          10px;   /* length of each arm of a crop mark       */
+  --bd-tick-gap:           3px;   /* arms stop short of the corner; the
+                                     corner is implied, never drawn          */
+  --bd-frame-corner-gap:  24px;   /* break in the page frame at each corner  */
+
+  --bd-radius:             0;     /* nothing in this system is rounded       */
+
+  /* ========================================================================
+     7. MOTION
+        The only continuous animation in the product is the ASCII ramp tick on
+        the Core's active phase arc, and it exists to signal that the event
+        stream is alive. If the stream stops, the tick stops. Nothing animates
+        on a timer, because a timer-driven animation is a fabricated metric.
+     ======================================================================== */
+
+  --bd-motion-fast:      150ms;   /* hover, focus — colour only, no transform */
+  --bd-motion-base:      200ms;   /* state chip and arc step changes          */
+  --bd-motion-slow:      300ms;   /* overlay open/close                       */
+  --bd-motion-ramp:      800ms;   /* one glyph pitch of the Core ASCII ramp   */
+  --bd-motion-ease:      cubic-bezier(0.2, 0, 0.2, 1);
+
+  --bd-stale-threshold:  10000ms; /* no event for this long → degraded chip   */
+
+  /* ========================================================================
+     8. Z-INDEX — fixed scale, no arbitrary values.
+     ======================================================================== */
+
+  --bd-z-content:   10;
+  --bd-z-sticky:    20;
+  --bd-z-overlay:   30;   /* diff overlay                                    */
+  --bd-z-dialog:    40;   /* destructive-action confirmation                 */
+  --bd-z-alert:     50;
+
+  /* ========================================================================
+     9. GLYPH TOKENS — state is never colour-only, so each state owns a glyph
+        and a word. Use with the `content` property or as text.
+        The em dash is the NOT MEASURED glyph. A zero is only ever displayed
+        after the step that produces it has actually completed; before that
+        the value is an em dash. See docs/09-company/04-design-system.md §2.6.
+     ======================================================================== */
+
+  --bd-glyph-not-measured: "\2014";  /* — */
+  --bd-glyph-pass:         "+";
+  --bd-glyph-fail:         "\00D7";  /* × */
+  --bd-glyph-warn:         "!";
+  --bd-glyph-running:      ">";
+  --bd-glyph-idle:         "\00B7";  /* · */
+
+  /* ASCII density ramp used by the Core's phase arcs, sparse → dense. */
+  --bd-ramp-pending:  " ";
+  --bd-ramp-skipped:  "-";
+  --bd-ramp-running:  ":";
+  --bd-ramp-complete: "#";
+  --bd-ramp-failed:   "X";
+
+  /* Glyph pitch along the arc textPath. 4px at the old 440 block scales to
+     3.45 at 380; rounded to 3.5 and the 1.4% drift over a 60° arc accepted.
+     Do NOT use a fractional pitch — it makes the glyphs jitter, which reads
+     as motion that means nothing, and every pixel of motion in this product
+     is supposed to correspond to an event that happened. */
+  --bd-ramp-pitch:    3.5px;
+
+  /* ========================================================================
+     10. ⚠ BLOCKED — PHASE ORDER. Do not hardcode the spoke sequence.
+
+     The position of CORRELATE and STRESS TEST is unresolved and is with the
+     CTO. Two authoritative sources disagree:
+
+       CLAUDE.md, "Mission workflow"
+         ... analyze -> CORRELATE -> STRESS-TEST -> patch ...
+       docs/09-company/06-architecture-spec.md §2.1/§2.2, the state machine
+         BASELINE -> TRIAGE -> STRESS_TEST -> CORRELATE -> PATCH
+
+     The design system leaves the order as CLAUDE.md has it and does NOT
+     choose. See docs/09-company/04-design-system.md §7.1a.
+
+     WHOEVER BUILDS THE CORE: drive the six arcs from a single PHASE_ORDER
+     array in one module, so the swap is a one-line edit. The geometry is
+     fixed 60° arcs, so this costs nothing now. After the Core ships it is a
+     re-derivation of every arc's textPath direction and start offset, the
+     ramp pitch alignment across the swap, the timeline row indices, the
+     §7.2 mapping table, every screenshot in the deck, and the rehearsed
+     narration.
+
+     This token exists to be greppable. Delete it when the CTO rules.
+     ======================================================================== */
+  --bd-phase-order-status: "BLOCKED-ON-CTO";
+}
+
+/* ==========================================================================
+   Reduced motion. The ramp stops ticking and liveness is carried in text by
+   the StreamLiveness component instead. Nothing else in the system moves.
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --bd-motion-fast: 0ms;
+    --bd-motion-base: 0ms;
+    --bd-motion-slow: 0ms;
+    --bd-motion-ramp: 0ms;
+  }
+}
+
+/* ==========================================================================
+   Base. Kept deliberately minimal — this file defines tokens, not components.
+   ========================================================================== */
+
+html {
+  background: var(--bd-surface);
+  color: var(--bd-text);
+  font-family: var(--bd-font-mono);
+  font-size: var(--bd-type-mono-sm);
+  line-height: var(--bd-type-mono-sm-lh);
+  font-variant-numeric: var(--bd-numeric);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: var(--bd-rule-heavy) solid var(--bd-focus-ring);
+  outline-offset: var(--bd-space-1);
+}
