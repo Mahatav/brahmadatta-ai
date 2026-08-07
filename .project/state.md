@@ -3,34 +3,42 @@
 | Field | Value |
 |---|---|
 | Repository | https://github.com/Mahatav/brahmadatta-ai (private) |
-| Current phase | 0 — repository founding (complete) |
-| Next phase | 1 — discovery & product definition |
+| Board | https://github.com/users/Mahatav/projects/3 |
+| Deadline | **2026-08-20** · build target **2026-08-13** |
+| Current phase | 1 — discovery & product definition (CEO seat done; PM seat pending) |
 | Last updated | 2026-08-06 |
 
 ## Phase log
 
 ### Phase 0 — Repository founding · 2026-08-06 · **GO**
 
-Not one of the standard ten phases; recorded because the company's substrate had to exist
-first.
-
 **Completed**
 - `brahmadatta-ai` created on GitHub, private, `main` protected (PRs required, force-push and deletion blocked, admin enforcement off).
 - Full MVP documentation pack (79 documents) imported to `docs/`.
-- Folder skeleton scaffolded per `docs/04-development/35-project-folder-structure.md`.
 - `CLAUDE.md`, `.gitignore`, top-level `README.md`, `.github/` PR and issue templates.
 - `.claude/COMPANY.md` — dynamic roster, hire/fire rules, review chain.
-- Four project-specific agent seats defined on the bench: `security-research-engineer`, `compiler-toolchain-engineer`, `ml-infra-engineer`, `competition-strategist`.
+- Four project-specific agent seats defined on the bench.
 - `.project/intake.md` pre-filled from the doc pack rather than re-interviewing the CEO.
 
-**Decisions** — see `decisions.md` D-001 … D-004.
+**Decisions** — D-001 … D-005.
 
-**Blockers** — none.
+**Verdict: GO.**
 
-**Deferred** — four CEO-owned open items listed at the end of `intake.md` (GPU budget, finale
-date, team composition, demo target repository). None block phase 1.
+### Phase 1 — Discovery & product definition · 2026-08-06 · **partial**
 
-**Verdict: GO** to phase 1.
+**Hired:** `ceo` (drafting seat). **Retired** after delivery.
+
+**Completed**
+- `docs/09-company/01-vision-and-p0-cut.md` — forced P0/P1/P2 ranking (15/10/12), the nine-step minimum viable demo, checkable kill criteria, the four CEO-owned decisions with last-responsible-moment dates, and a critique of the pack. Decisions D-006 … D-012.
+- `docs/09-company/02-two-person-24h-cycle.md` — Kelowna/India shift protocol, written handoffs, work split at the API seam.
+- `docs/09-company/03-seven-day-plan.md` — the compressed plan replacing the 8-week timeline.
+- Board built: 63 issues, 10 day-milestones, `Brahmadatta Delivery` project with per-person columns.
+
+**Not done:** the `product-manager` seat has not run. Its four inherited open questions are on the board as #61, #62, #63, #64 rather than being answered in a phase-1 deliverable — the compressed schedule made a full PM pass less valuable than getting the board built.
+
+**Decisions** — D-013 (stack: Astro + Django + nginx), D-014 (14-day deadline), D-015 (rented GPU cut), D-016 (scaffold removed).
+
+**Verdict: CONDITIONAL GO.** Proceeding to implementation without a formal phase 2–4 pass, because the doc pack already contains architecture, stack, UX direction and a task breakdown, and the seven-day budget cannot absorb three more phase gates. Recorded as a deliberate deviation, not an oversight.
 
 ---
 
@@ -38,18 +46,22 @@ date, team composition, demo target repository). None block phase 1.
 
 | # | Phase | Status |
 |---|---|---|
-| 1 | Discovery & product definition | not started |
-| 2 | Technical strategy & architecture | not started |
-| 3 | UX design | not started |
-| 4 | Task breakdown | not started |
-| 5 | Implementation | not started |
-| 6 | Security review | not started |
-| 7 | QA | not started |
-| 8 | Deployment prep | not started |
-| 9 | Documentation | not started |
-| 10 | Post-launch feedback | not started |
+| 1 | Discovery & product definition | partial — CEO seat done, PM seat skipped |
+| 2 | Technical strategy & architecture | **satisfied by the doc pack** + D-013; no separate pass |
+| 3 | UX design | blocked on #8 (visual references) — no UI is built until it lands |
+| 4 | Task breakdown | **done** — the board is the breakdown |
+| 5 | Implementation | ready to start at D1 |
+| 6 | Security review | D8–11 (#53) |
+| 7 | QA | D8–11 (#57) |
+| 8 | Deployment prep | folded into D1–D2 (#9, #10, #11) |
+| 9 | Documentation | D12–14 (#58) |
+| 10 | Post-launch feedback | not applicable — competition MVP |
 
-Note: phases 1–3 have unusually strong prior input — the imported doc pack already contains a
-PRD, MVP scope, personas, architecture, stack, and UI design direction written by the CEO.
-Those phases **validate and reconcile** that material against a buildable plan; they do not
-re-derive it from nothing.
+## Open, owned by the CEO
+
+1. **#8 — visual references for the Command Center.** Hard blocker on all UI work, which starts D2.
+2. **#2 — confirm the AI Kavach submission deadline.** The 14-day figure came from the CEO; the plan now assumes 2026-08-20. If that is wrong, every milestone shifts.
+3. **#3 — competition rules on team composition and agent-authored code.** Potentially disqualifying if assumed wrong.
+4. **#63 — whether `git bisect` stays cut.** It carries the git-aware root-cause novelty claim.
+
+Closed by D-015: GPU provider and budget (was CEO decision 5.1) is moot.

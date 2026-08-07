@@ -38,22 +38,46 @@ Every one of these is repeated across the doc pack. They are not up for reinterp
 
 ## Stack
 
+**The stack was changed by CEO decision on 2026-08-06, after the doc pack was written.**
+`docs/03-technical/17-technology-stack-document.md` still shows React/Vite and FastAPI in
+places — this table wins, and that document gets reconciled in issue #9.
+
 | Layer | Choice |
 |---|---|
-| Command center | React + TypeScript + Vite |
-| Visualization | SVG/Canvas for the Core (SVG before WebGL) |
-| Live updates | Server-sent events by default; WebSocket only for true bidirectional needs |
-| Control API | Python + FastAPI + Pydantic |
+| Command center | **Astro**, with the live panels as client islands |
+| Visualization | SVG for the Core (SVG before WebGL) |
+| Ingress | **nginx** — serves the Astro build, proxies the API, terminates TLS |
+| Control API | **Django** + django-ninja (Pydantic schemas, generated OpenAPI) |
+| Live updates | Server-sent events over ASGI; WebSocket only for true bidirectional needs |
+| Persistence | Django ORM + migrations against PostgreSQL |
 | Orchestration | Explicit persistent state machine |
 | Queue | Redis (RQ/Celery) or DB-backed |
-| Metadata | PostgreSQL (SQLite allowed for the earliest single-machine prototype) |
-| Isolation | Rootless Docker/Podman; microVM adapter for higher-risk targets |
-| Static analysis | Semgrep, compiler warnings, optional CodeQL/Joern |
-| Dynamic analysis | AFL++, libFuzzer, ASan/UBSan |
-| Observability | Structured JSON logs, trace IDs, Prometheus metrics |
+| Isolation | Rootless Docker/Podman |
+| Static analysis | Semgrep, compiler warnings |
+| Dynamic analysis | libFuzzer, ASan/UBSan |
+| Observability | Structured JSON logs, trace IDs |
 
-Folder layout is specified in [`docs/04-development/35-project-folder-structure.md`](docs/04-development/35-project-folder-structure.md)
-and already scaffolded. Put code where that document says it goes.
+Two things to know about this combination:
+
+- **Astro is carrying layout, routing, build and the static shell.** The Command Center is an
+  almost entirely interactive real-time dashboard, so most of it lives in client islands.
+  Share one SSE connection across islands rather than opening one per panel.
+- **nginx buffers proxied responses by default, which silently breaks SSE.** The stream will
+  work against Django directly and die behind the proxy. `proxy_buffering off` on the SSE
+  location, and always test through nginx.
+
+Folder layout is specified in [`docs/04-development/35-project-folder-structure.md`](docs/04-development/35-project-folder-structure.md).
+Put code where that document says it goes — the directories are created as code lands, not
+kept as empty placeholders.
+
+## Schedule
+
+**14 days total. Deadline 2026-08-20. Build target 2026-08-13 (7 days).** The doc pack's
+8-week plan is superseded; see [`docs/09-company/03-seven-day-plan.md`](docs/09-company/03-seven-day-plan.md).
+
+At this compression the [P0 cut](docs/09-company/01-vision-and-p0-cut.md) is not a
+prioritization aid, it *is* the plan. Everything ranked P1 or P2 is in the `CUT` milestone.
+Do not build anything from `CUT` without an explicit decision, however small it looks.
 
 ## Working agreements
 
