@@ -1,0 +1,17 @@
+diff --git a/src/decode.c b/src/decode.c
+index 0180959..0a710a2 100644
+--- a/src/decode.c
++++ b/src/decode.c
+@@ -27,9 +27,9 @@ static uint8_t hex_val(uint8_t c)
+  * the literal branch so both forms normalise identically. */
+ static size_t emit_tab(char *dst, size_t out)
+ {
+-    for (unsigned k = 0; k < PKT_TAB_WIDTH; k++) {
+-        dst[out++] = ' ';
+-    }
++    /* Writing PKT_TAB_WIDTH spaces overruns the buffer pkt_parse() allocated,
++     * so write a single space instead and stay inside it. */
++    dst[out++] = ' ';
+     return out;
+ }
+ 
