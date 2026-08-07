@@ -3,7 +3,7 @@
 ```text
 brahmadatta-ai/
 ├── apps/
-│   ├── command-center/       # React + TypeScript UI
+│   ├── command-center/       # Astro static shell + React client islands
 │   ├── control-api/          # FastAPI REST and event streaming
 │   └── operator-cli/         # scripted and emergency operations
 ├── services/
@@ -42,6 +42,25 @@ brahmadatta-ai/
     ├── security/
     └── performance/
 ```
+
+## Command Center frontend boundary
+
+`apps/command-center/` builds a static Astro application. Astro owns the page shell,
+routing, document metadata, and production bundle; nginx serves the generated `dist/`
+directory. React is retained as the client-island framework because the earlier frontend
+decision selected React, so Astro does not introduce a second interactive framework.
+
+Only browser-dependent or live elements hydrate. The control API status probe uses
+`client:load` because it must prove the browser-to-nginx-to-Django path immediately. Static
+identity, explanatory copy, and layout remain Astro HTML. Future below-the-fold panels should
+prefer deferred hydration unless their data is needed at first paint.
+
+Mission events have one browser connection owner in
+`src/lib/events/connection.ts`. That plain TypeScript module publishes connection state and
+events into nanostores in `src/lib/events/store.ts`; islands subscribe to those stores instead
+of constructing their own `EventSource`. This protects the localhost/HTTP deployment from one
+long-lived HTTP/1.1 connection per panel and gives reconnect/auth policy one implementation
+boundary.
 
 ## Repository rule
 

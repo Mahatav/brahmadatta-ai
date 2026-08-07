@@ -1,6 +1,6 @@
 # Brahmadatta AI — continuous integration.
 #
-# TWO JOBS, deliberately. The CTO cut D1's CI scope to `pytest` and an OpenAPI dump
+# The CTO originally cut D1's CI scope to `pytest` and an OpenAPI dump
 # freshness check, on the grounds that a lint matrix, a type-check matrix and a coverage
 # gate are cost with no gate behind them in a seven-day build. The configuration for all
 # of those still exists and is still run locally — see
@@ -9,8 +9,7 @@
 #
 # What is NOT in CI, and how it is covered instead:
 #
-#   ruff / mypy / eslint / astro check   ruff.toml, mypy.ini, eslint.config.js — run
-#                                        locally; both were green at D1
+#   ruff / mypy                         ruff.toml, mypy.ini — run locally
 #   docker compose config, nginx -t      infrastructure/scripts/nginx-validate.sh
 #   SSE survives the proxy               infrastructure/scripts/smoke-sse.sh
 #   only nginx has egress (C4)           infrastructure/scripts/egress-test.sh
@@ -49,6 +48,35 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  frontend:
+    name: command center
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/command-center/package-lock.json
+
+      - name: Install frontend tooling
+        run: npm ci
+
+      - name: Install Command Center
+        run: npm ci --prefix apps/command-center
+
+      - name: Validate generated API types
+        run: npm run check:api --prefix apps/command-center
+
+      - name: Typecheck and build the static application
+        run: npm run build --prefix apps/command-center
+
+      - name: Lint frontend sources
+        run: npm run lint
+
   # ---------------------------------------------------------------------------
   pytest:
     name: pytest
