@@ -1341,3 +1341,368 @@ now exists.
 The rest of that commit — `finale-up.sh`, `astro-check.mjs`, `certbot-webroot/`, the ingress
 contract doc, and the remaining workflow jobs — landed after my snapshot and is **not
 reviewed**. Add it to §7.
+
+---
+
+## 12. Re-verification — 2026-08-07 08:20Z · SEC-01 CLOSED
+
+Run against **PR #87 head (`a853e80`) with PR #91's `infrastructure/`, `.gitignore`,
+`.github/workflows/ci.yml` and `tests/` overlaid** — the combined tree I asked for. Executed,
+not inspected.
+
+### 12.1 SEC-01 — **CLOSED. Signed off.**
+
+Ran their `infrastructure/scripts/finale-egress-evidence.sh` first. I read it before running
+it, and it is built correctly: it execs into the **real running finale container** and opens a
+socket rather than inspecting configuration, it carries a **control** (Postgres must still be
+reachable, so "nothing is reachable" cannot pass as a broken container), it prints raw output
+before the verdict, and it treats a parse failure as a failure rather than a pass.
+
+```
+== container identity and network attachments (from Docker, not from the compose file)
+  networks: brahmadatta-finale_api brahmadatta-finale_backend
+  user: app:app  read_only: true  privileged: false
+  routing table inside the container:
+    Iface  Destination  Gateway   Flags  ...  Mask
+    eth1   000016AC     00000000  0001        0000FFFF
+    eth0   00001FAC     00000000  0001        00FFFFFF
+
+  { "cloud-metadata":         { "detail": "OSError: [Errno 101] Network is unreachable", "reached": false },
+    "hosted-inference-api":   { "detail": "gaierror: [Errno -3] Temporary failure in name resolution", "reached": false },
+    "hosted-inference-api-2": { "detail": "gaierror: [Errno -3] Temporary failure in name resolution", "reached": false },
+    "internet-by-ip":         { "detail": "OSError: [Errno 101] Network is unreachable", "reached": false },
+    "postgres-in-stack":      { "detail": "CONNECTED", "reached": true } }
+
+  PASS no external target reachable from inside control-api
+  PASS postgres IS reachable from inside control-api (the control: the container works)
+
+finale egress evidence: PASS
+```
+
+**No `00000000` destination in the routing table. There is no default route.** `Network is
+unreachable` is the kernel refusing, not a library declining — which is the whole distinction
+between structural and intentional.
+
+I do not sign off on someone else's target list, so I ran my own from inside the same
+container:
+
+```
+  2606:4700:4700::1111            :443   blocked   OSError: [Errno 101] Network is unreachable
+  8.8.8.8                         :53    blocked   OSError: [Errno 101] Network is unreachable
+  1.0.0.1                         :80    blocked   OSError: [Errno 101] Network is unreachable
+  169.254.169.254                 :80    blocked   OSError: [Errno 101] Network is unreachable
+  fd00:ec2::254                   :80    blocked   OSError: [Errno 101] Network is unreachable
+  100.100.100.200                 :80    blocked   OSError: [Errno 101] Network is unreachable
+  metadata.google.internal        :80    DNS FAIL  (gaierror)
+  cdn.jsdelivr.net                :443   DNS FAIL  (gaierror)
+  pypi.org                        :443   DNS FAIL  (gaierror)
+  github.com                      :443   DNS FAIL  (gaierror)
+
+  db                              :5432  *** REACHED *** ('172.22.0.3', 5432)
+  redis                           :6379  *** REACHED *** ('172.22.0.2', 6379)
+
+  proxy vars in container env: NONE
+```
+
+**IPv6 is closed too**, all four cloud-metadata variants are closed, and there is no
+`HTTP_PROXY`/`HTTPS_PROXY` in the container environment — the three things I would have used
+to get around a fix that only removed the IPv4 default route.
+
+**And the fix does not break the demo**, which I checked because a security fix that kills
+ingress is not a fix:
+
+```
+  GET /api/v1/system/health  -> HTTP 200  (http/2)
+  GET /api/v1/missions       -> HTTP 401
+  GET /django-admin/         -> HTTP 404
+  GET /admin/                -> HTTP 404
+```
+
+end to end through the published TLS listener, with `nginx -> control-api` returning a live
+health body over the `api` network.
+
+The topology is what I asked for, and one thing better: `api` (nginx↔control-api) and `edge`
+(nginx↔Astro) are **separate** `internal: true` networks rather than one shared ingress
+network, so giving the dev server a route out later cannot silently hand egress to the process
+holding snapshots. I did not ask for that and it is the right call.
+
+### 12.2 SEC-02 — **NOT FIXED. Every bypass still passes.** Downgraded to MEDIUM.
+
+Run inside the built finale image, so this is the code that would ship:
+
+```
+  [ok  ] False hosted provider              https://api.openai.com/v1
+  [ok  ] True  loopback (must pass)         http://127.0.0.1:8080/v1
+  [FAIL] True  AWS/Azure/GCP metadata IP    http://169.254.169.254/
+  [FAIL] True  EC2 IMDS over IPv6           http://[fd00:ec2::254]/latest/meta-data/
+  [FAIL] True  GCP metadata by name         http://metadata.google.internal/computeMetadata/v1/
+  [FAIL] True  Alibaba metadata (CGNAT)     http://100.100.100.200/latest/meta-data/
+  [FAIL] True  bare 'metadata'              http://metadata.internal/
+  [FAIL] True  IDNA homograph U+3002        http://api。openai。com/v1
+  [FAIL] True  bare label                   http://openai/v1
+  [FAIL] True  IPv4-mapped metadata         http://[::ffff:169.254.169.254]/
+  [FAIL] True  unspecified addr             http://0.0.0.0:8080/
+
+MISMATCHES: 10
+```
+
+**I am downgrading it HIGH → MEDIUM, and it is no longer a blocker.** Not because the code
+improved — it is untouched — but because SEC-01's fix removed its exploit path. Set
+`MODEL_ENDPOINTS` to the homograph today and the process still cannot open the socket. That is
+precisely what defence in depth is supposed to look like when the outer layer holds, and it is
+the strongest possible argument that fixing SEC-01 was the right priority.
+
+It still has to be fixed, for two reasons that survive the network boundary:
+
+1. **The compose topology is not the only way this runs.** `docs/04-development/31-development-setup-guide.md`
+   documents a bare `uvicorn`/`manage.py runserver` on a laptop, which has a full default
+   route. In that mode the validator is the *only* control, and it currently waves through
+   the metadata endpoint and a homograph of `api.openai.com`.
+2. **A control that returns the wrong answer is worse than no control**, because people build
+   on it. `is_local_inference_endpoint("http://metadata.google.internal/")` returning `True`
+   is a function whose name is a lie, and the next person to reuse it will not re-derive the
+   four bypasses.
+
+Fix is unchanged from §2 SEC-02: IDNA-normalise before deciding, explicit metadata/link-local
+deny list rather than `is_global`, reject a leftmost `metadata` label, and replace the
+bare-label pass with a settings-driven service-name allowlist — plus the table above as a
+test.
+
+### 12.3 Can #78 close?
+
+**Yes — on one condition: SEC-02 is re-filed as its own issue, with an owner and a milestone,
+before #78 is closed.** Not after.
+
+#78's Critical is closed and verified. Its second acceptance box ("link-local, loopback-to-
+elsewhere and metadata addresses are explicitly rejected by the validator") is not ticked and
+must not be ticked. Closing an issue with a live unticked box and nothing tracking it is how
+findings get lost, and this one has ten failing cases. With SEC-02 re-filed, #78 has done its
+job and should close so the board reflects reality.
+
+### 12.4 The claim — **the strong form is now defensible.** Wording for the CEO.
+
+I pre-authorised a sentence in §5.2 conditional on this test passing. Every clause of it is now
+true and I verified each one myself. **Approved for the identity doc, the slides, and the
+evidence bundle:**
+
+> The control-plane process that holds the repository snapshot runs on a network with no
+> default route. It can reach the database and the local model host, and nothing else. This is
+> enforced by the container network, not by configuration — and here is the test that attempts
+> egress from inside that container and fails.
+
+Two bindings on it, and they are not pedantry:
+
+- **It is a claim about the finale stack, not about the software.** True of
+  `docker-compose.finale.yml`. Not true of a bare `uvicorn` on a laptop. If anyone demonstrates
+  from anything other than the compose stack, the claim lapses. Say *"the system as deployed"*,
+  not *"the system"*.
+- **"and the local model host" is currently vacuous** — there is no model host. When #35/#36
+  land, the model host must be on an `internal: true` network and I re-run this test before
+  the claim is made again. Until then the honest form of that clause is *"the database, and
+  the local model host when it is running"*.
+
+Everything I prohibited in §5.2 stays prohibited, with one narrowing: **"the system cannot
+reach the internet" is now defensible about the control plane specifically** — `Network is
+unreachable`, from the kernel — but **not about the stack as a whole**, because nginx is on a
+routable network by design and a dev-only `npm ci` installer is too. Phrase it as *"the process
+holding repository content cannot reach the internet"*. That is both stronger and true;
+"the system cannot reach the internet" is weaker-sounding and false.
+
+### 12.5 D-036 and D-037 against what I actually meant
+
+**D-036 — satisfies condition 4, and exceeds it. Accepted without reservation.**
+
+I asked that the runtime socket never be mounted and that a test assert it. D-036 does that and
+adds `privileged`, host namespaces, host-root bind mounts, and `SYS_ADMIN`/`SYS_PTRACE`/
+`SYS_MODULE`/`SYS_RAWIO`/`NET_ADMIN`/`ALL` capabilities, asserted structurally against both
+compose files **and** by a text scan of every tracked file — which catches a
+`docker run -v /var/run/docker.sock` inside a shell script or a workflow, a hole my condition
+did not name and should have.
+
+I negative-controlled it rather than trusting the green:
+
+```
+  injected a docker.sock bind mount into the nginx service
+FAILED test_no_container_mounts_a_container_runtime_socket[docker-compose.yml]
+FAILED test_no_tracked_file_mounts_the_docker_socket
+2 failed, 6 passed
+```
+
+Two independent detections. The test is real. `8 passed` on the clean tree.
+
+**D-037 — approximates what I meant. One residual, Low.**
+
+The important half is right and is better than I specified: patterns now match at any depth,
+the full libFuzzer artifact set is covered (`crash-*`, `leak-*`, `timeout-*`, `oom-*`,
+`slow-unit-*`), plus `*.profraw`, `*.profdata`, `*.sancov`, `*.sarif`. `16 passed`.
+
+The residual is the re-include shape. I specified **exact-name** negations
+(`!corpus/seed-*.bin`, `!crash/crash-literal-tab.bin`); what landed is **directory-wide**
+(`!demo/repositories/*/corpus/**`, `!demo/repositories/*/crash/**`). Those two directories are
+therefore fully re-admitted, including generated output:
+
+```
+  demo/repositories/pktcfg/corpus/5a9fd3195d289986674f806c7274b7e8f27ddbe1 -> *** COMMITTABLE ***
+  demo/repositories/pktcfg/corpus/crash-8f3a1c                             -> *** COMMITTABLE ***
+  demo/repositories/pktcfg/crash/crash-8f3a1c                              -> *** COMMITTABLE ***
+  demo/repositories/pktcfg/crash/leak-deadbeef                             -> *** COMMITTABLE ***
+  demo/repositories/othertarget/corpus/abc123                              -> *** COMMITTABLE ***
+```
+
+That matters because **libFuzzer grows its corpus in place**: `./pktcfg_fuzz corpus/` writes
+new interesting inputs into `corpus/`, which is the natural invocation and the one the README
+implies. D-037's own title — "generated fuzzer output is not committable" — is not true of the
+two directories it exempts. The test passes because its case list probes `fuzz-out/` and the
+authored seeds, never a generated name inside `corpus/`.
+
+**SEC-06-R (LOW)** — replace the four directory negations with:
+
+```gitignore
+demo/repositories/*/corpus/*
+!demo/repositories/*/corpus/seed-*
+!demo/repositories/*/crash/crash-literal-tab.bin
+```
+
+and add three cases to `test_fuzz_artifacts_are_ignored.py`:
+`demo/repositories/pktcfg/corpus/5a9fd319…`, `demo/repositories/pktcfg/corpus/crash-8f3a1c`,
+`demo/repositories/pktcfg/crash/leak-deadbeef` — all three asserted **ignored**.
+
+### 12.6 CI — **yes, and the CTO's cut does not apply to what I am asking for**
+
+Asked whether the egress test specifically has to go back into CI. It does, but that is not
+the sharpest thing I found. This is:
+
+```
+  what pytest actually collects in CI:  testpaths = contracts/tests api/tests
+  CI runs: cd apps/control-api && pytest -q   ->  tests/architecture/ is NOT collected
+```
+
+**`tests/architecture/` runs nowhere automatically.** That includes
+`test_container_isolation.py` and `test_fuzz_artifacts_are_ignored.py` — the two files D-036
+and D-037 cite as the reason those decisions are enforceable. Right now they are documentation
+that happens to be executable. **D-036's test not running means condition 4 of §6.2 is not met,
+and condition 4 is the condition under which I accepted the isolation substitution.** I am not
+willing to leave that state.
+
+I am **not** asking to reverse the CTO's two-job cut. That cut was argued on runner minutes
+against lint matrices, type-check matrices and coverage gates, and it was a reasonable call.
+It does not reach what follows, because what follows costs nothing.
+
+**SEC-R1 — REQUIRED. CI collects `tests/architecture/`.** Measured on this tree:
+`test_container_isolation.py` **0.09 s**, `test_fuzz_artifacts_are_ignored.py` **0.12 s**. No
+Docker, no network, no build. One line added to the existing `pytest` job. A cost argument
+cannot be made about 0.21 seconds, and without it two security decision records are
+unenforced.
+
+**SEC-R2 — REQUIRED. A static compose-topology test, in `tests/architecture/`.** SEC-01 —
+the Critical — currently has **no automatic regression guard at all**. Nothing fails if
+someone re-adds `- external` to `control-api` to make something work at 2am, which is exactly
+how it got there the first time. `egress-test.sh` needs Docker, but **its topology half only
+parses `docker compose config`** and ports to pure Python with PyYAML, which the architecture
+tests already depend on. I wrote the check to prove the cost:
+
+```
+  docker-compose.finale.yml
+    routable networks: ['external']
+      external: members=['nginx']  OK
+  docker-compose.yml
+    routable networks: ['external']
+      external: members=['nginx', 'command-center-deps']  *** VIOLATION ***
+
+  elapsed: 11.1 ms  (no Docker, no network, no build)
+```
+
+Eleven milliseconds, and it immediately surfaced a second member of the routable network that
+I would otherwise have missed. **`command-center-deps` is acceptable** — I read it: a
+short-lived `npm ci` container that holds no repository content, is dev-only, exits before the
+dev server starts, and the long-running `command-center` deliberately has no `external`. That
+is a good design and the comment explaining it is correct.
+
+But it is the point exactly: the difference between "a reviewed exception" and "drift" is
+whether something checks. **Spec:** assert that the members of every non-`internal` network are
+exactly an allowlist declared in the test — `{"nginx"}` for the finale file,
+`{"nginx", "command-center-deps"}` for dev — with the reason for each exception in a comment,
+and a docstring saying that changing the allowlist is a `cybersecurity` review, not a test fix.
+
+**SEC-R3 — recommended, not required.** `finale-egress-evidence.sh` needs a full stack build;
+Docker-in-CI on every PR is a real cost and I am not demanding it. Run it at **each rehearsal
+and once before submission**, recorded in `docs/10-competition/36-hour-finale-runbook.md`. The
+static guards above catch the regression that actually happens; this one catches the exotic
+case (a host route, a stray `docker network connect`) and a rehearsal cadence is proportionate
+to that.
+
+So: the answer is **yes, the egress check goes back into CI — as the free static half.** The
+expensive dynamic half stays a rehearsal gate.
+
+### 12.7 `SECURE_PROXY_SSL_HEADER` in the development profile — reframed
+
+The infra seat flagged that `SECURE_PROXY_SSL_HEADER` is set only in `finale.py:28` so
+"development carries the same defect". I read it and **the defect is the other way round**,
+which matters because fixing the stated version would be the wrong change.
+
+Setting `SECURE_PROXY_SSL_HEADER` is dangerous only when nothing overwrites the header.
+`includes/proxy-headers.conf:28` overwrites `X-Forwarded-Proto` on every request in both
+profiles, so setting it is safe. **Not** setting it in development is a correctness bug:
+`request.is_secure()` is `False` behind the TLS listener, `build_absolute_uri()` emits `http://`,
+and the generated OpenAPI `servers` block carries the wrong scheme and port — which is the CTO's
+C7 poisoning the frontend client. The infra seat has already written the test for it, and it is
+the one failing test in the combined tree:
+
+```
+FAILED tests/architecture/test_ingress_contract.py::test_use_x_forwarded_host_is_enabled
+  Add to apps/control-api/config/settings/base.py:
+      USE_X_FORWARDED_HOST = True
+      SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+```
+
+**Ruling.** Both settings move to `base.py`, paired with the strict `ALLOWED_HOSTS` that is
+what makes trusting a client-supplied Host safe. That is safe **because** control-api publishes
+no host port and shares a network only with nginx. Owner: control-api, on #9. This is C7, not a
+new finding, and the test that already exists is its acceptance criterion.
+
+**The genuinely security-relevant half is one line away and was not flagged.**
+
+**SEC-14 (LOW)** — `infrastructure/compose/images/control-api.Dockerfile:64`, the `dev` target:
+
+```
+     "--proxy-headers", "--forwarded-allow-ips", "*", \
+```
+
+The `runtime` target scopes this correctly (`:88`, `${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}`,
+set to the `api` subnet by the finale compose file) and the Dockerfile comment at `:83-85`
+explains exactly why `*` is wrong — then the `dev` target does it anyway. `*` means uvicorn
+trusts `X-Forwarded-For` and `X-Forwarded-Proto` from **any** peer, so any container that
+reaches control-api on the `api` network can forge the client IP into the access log and make
+Django believe a plaintext request arrived over TLS. Low, because control-api has no published
+port and only nginx is on that network — but the fix is to use the same
+`${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}` form in the `dev` target and set it in
+`docker-compose.yml`, which is a one-line change on a file that already has the correct pattern
+eight lines below.
+
+### 12.8 Status of every finding after re-verification
+
+| ID | Was | Now | Note |
+|---|---|---|---|
+| **SEC-01** | CRITICAL | **CLOSED ✅** | Verified twice by me, from inside the running container. Ingress confirmed unbroken. |
+| SEC-02 | HIGH | **MEDIUM, open** | Untouched; all 10 bypasses pass. Downgraded because SEC-01 removed the exploit path. Re-file as its own issue. |
+| SEC-03 | HIGH | **HIGH, open** | `APP_ENV` still env-driven (`base.py:28`); neither `finale.py` nor `docker-compose.finale.yml` sets it. My `.env` is why health read `finale`. |
+| SEC-04 | MEDIUM | **MEDIUM, open** | `client_max_body_size 0` unchanged; `tmpfs: - /tmp` still unsized. |
+| SEC-05 | MEDIUM | **MEDIUM, open** | Confirmed live through nginx: `/api/v1/openapi.json` **200**, `/api/v1/docs` **200**, unauthenticated. |
+| SEC-06 | MEDIUM | **LOW (SEC-06-R)** | D-037 fixed the important half. Residual: directory-wide re-includes re-admit generated output into `corpus/` and `crash/`. |
+| SEC-07 | MEDIUM | **MEDIUM, open** | `assert_transition` still takes no `mission_id`. Tracked on #77. |
+| SEC-08 | LOW | **LOW, open** | `admin-allow.conf:16` still `^~ /admin/`; `urls.py:25` still `django-admin/`. |
+| SEC-09, SEC-10 | LOW | open | PR #74 conditions; unchanged. |
+| **SEC-12** | — | **MEDIUM, new** | `tests/architecture/` is not collected by CI. D-036 and D-037 are unenforced. See SEC-R1. |
+| **SEC-13** | — | **MEDIUM, new** | No static regression guard on the SEC-01 topology. See SEC-R2. |
+| **SEC-14** | — | **LOW, new** | `--forwarded-allow-ips "*"` in the Dockerfile `dev` target. |
+
+**Overall posture: no Critical open. The BLOCKED verdict of §0 is lifted.** The finale stack
+is cleared for deployment on the egress axis, and the strong claim is approved with the two
+bindings in §12.4. SEC-R1 and SEC-R2 are required to keep it that way; without them the
+control that closed the Critical has nothing watching it.
+
+**PR #91: APPROVED.** Its `infrastructure/` half is the best security work in the repository so
+far — the topology fix, the separate `api`/`edge` split I did not ask for, D-036 with a test
+that survives a negative control, and an evidence script honest enough to carry its own control
+case. SEC-04, SEC-05, SEC-08 and SEC-14 are in its files and are all Medium or Low; they are
+follow-ups, not merge blockers.
