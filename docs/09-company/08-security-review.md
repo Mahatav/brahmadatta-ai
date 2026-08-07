@@ -1310,3 +1310,34 @@ and is not blocked.**
 *This review edits no other role's files, does not touch `.project/decisions.md`, and changes
 no code. Every command quoted was executed in this session against the trees named in the
 header, and the output is verbatim. Sections not executed are listed in §7.*
+
+---
+
+## 11. Addendum — 2026-08-07 07:45Z, after the infra branch committed
+
+The infra agent committed while this review was being written. Re-checked, not assumed:
+
+**Every file I filed a finding against is byte-identical to what I reviewed.** Verified by
+`diff` of `feat/infra-nginx-compose` against my 07:25Z snapshot for
+`docker-compose.finale.yml`, `nginx/nginx.conf`, `conf.d.finale/brahmadatta.conf`,
+`profile/admin-allow.conf` and the root `.gitignore`. **SEC-01, SEC-04, SEC-05, SEC-06 and
+SEC-08 stand unchanged.**
+
+**One correction to §3.** §3 states there are no workflows in the repository. That was true of
+`main` at `180bd6f`, which is what it says — but `.github/workflows/ci.yml` has since landed
+on `feat/infra-nginx-compose` (commit `a987616`) and I had not seen it. Re-read:
+
+- It has a **`secrets-guard` job** asserting no environment file, key or certificate is
+  tracked, and no private key material sits inside a tracked file. That is good work and it
+  independently enforces §4's result. Credit where due.
+- It has **no dependency audit job.** `pip-audit` and `npm audit` appear nowhere.
+
+**SEC-P3 therefore remains not met**, for the narrower reason that the workflow exists and
+does not audit dependencies — not because no CI exists. The requirement stands: `pip-audit -r
+requirements-dev.txt` and, once `apps/command-center/` exists, `npm audit --omit=dev`, both
+failing the build on any advisory of High or above. Both are a five-line job in a file that
+now exists.
+
+The rest of that commit — `finale-up.sh`, `astro-check.mjs`, `certbot-webroot/`, the ingress
+contract doc, and the remaining workflow jobs — landed after my snapshot and is **not
+reviewed**. Add it to §7.
