@@ -352,7 +352,7 @@
 
      This token exists to be greppable. Delete it when the CTO rules.
      ======================================================================== */
-  --bd-phase-order-status: "BLOCKED-ON-CTO";
+  --bd-phase-order-status: "RESOLVED-D-038";
 }
 
 /* ==========================================================================
