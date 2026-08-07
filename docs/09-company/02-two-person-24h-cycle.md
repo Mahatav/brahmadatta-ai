@@ -13,7 +13,7 @@ no idea why.
 
 ## The clock
 
-| | Kelowna (PDT, UTC−7) | India (IST, UTC+5:30) |
+| | Mahatav — Kelowna (PDT, UTC−7) | Raunak — India (IST, UTC+5:30) |
 |---|---|---|
 | Shift start | 09:00 | 09:00 |
 | Shift end | 18:00 | 18:00 |
@@ -23,12 +23,15 @@ The shifts do not overlap. India's working day happens during Kelowna's night, a
 finishes about three and a half hours before Kelowna starts. That is the good case — it means
 handoffs are fresh, not stale.
 
+One shared timeline, read against whichever clock is yours. Each band is that person's
+09:00–18:00 on their own row.
+
 ```
-PDT   06 ─ 09 ─ 12 ─ 15 ─ 18 ─ 21 ─ 00 ─ 03 ─ 06
-      ░░░░│███ KELOWNA ███│░░░░│███ INDIA ███│░░
-IST   18 ─ 21 ─ 00 ─ 03 ─ 06 ─ 09 ─ 12 ─ 15 ─ 18
-              ▲                      ▲
-        handoff → India        handoff → Kelowna
+Kelowna (PDT)   06    09    12    15    18    21    00    03    06
+                      ├──── MAHATAV ────┤     ├──── RAUNAK ─────┤
+India   (IST)   18    21    00    03    06    09    12    15    18
+                                        ▲                       ▲
+                              handoff → Raunak    handoff → Mahatav
 ```
 
 **Daily sync, if you want a live one:** India 09:00–09:30 IST = Kelowna 20:30–21:00 PDT.
@@ -51,7 +54,7 @@ Next step: <the one thing you'd do first tomorrow>
 Running: <any long job left executing, and where its output lands>
 ```
 
-Then relabel: `handoff:to-india` or `handoff:to-kelowna`.
+Then relabel: `handoff:to-raunak` or `handoff:to-mahatav`.
 
 Starting your shift: read every issue carrying a handoff label pointed at you, before opening
 an editor.
@@ -66,8 +69,8 @@ agreement.
 
 | | Owns |
 |---|---|
-| **Kelowna** | Command Center UI, control API surface, evidence records and reports, competition materials |
-| **India** | Orchestrator state machine, sandbox, C/C++ toolchain adapter, fuzzing, model gateway |
+| **Mahatav** (Kelowna) | Command Center UI, control API surface, evidence records and reports, competition materials |
+| **Raunak** (India) | Orchestrator state machine, sandbox, C/C++ toolchain adapter, fuzzing, model gateway |
 
 This is a starting assumption, not a verdict — it was assigned from the architecture's
 dependency seam, not from either person's actual strengths. If it is wrong, swap the
@@ -84,7 +87,7 @@ regression sweep, a GPU spike.
 
 The pattern worth building the habit around: end your shift by *starting* one of those and
 writing down where the output lands. The other person reads the result at the top of theirs.
-Issues where this applies carry `handoff:to-india` / `handoff:to-kelowna` from the moment they
+Issues where this applies carry `handoff:to-raunak` / `handoff:to-mahatav` from the moment they
 are created, not as an afterthought.
 
 ## Rules that keep this from going wrong
