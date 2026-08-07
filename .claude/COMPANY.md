@@ -148,6 +148,17 @@ push access. Agent work goes through the same PR and review chain as theirs.
   Skip it for a formed yes/no approval gate.
 - **UI work always goes through `ui-ux-pro-max`,** and asks the CEO for visual inspiration
   when the design docs don't already cover the surface being built.
+- **A property is described as enforced only when a named test demonstrates it.** Not "structurally
+  impossible", not "cannot", not "denied" — unless you can point at the test. This is a standing
+  rule because it has already gone wrong four times, across four different seats, in a single day:
+  "the system cannot reach the internet" (D-028), "signed-by-hash" when a hash is not a signature
+  (D-025), a `[ SESSION SECURE ]` chip over plain HTTP (D-039), and "structurally impossible"
+  provenance that QA violated on its first attempt (D-049). Four is a habit, not a coincidence.
+  It is also the single most dangerous habit available to a team whose entire pitch is that it
+  does not overstate what the tools proved. Until the test exists, describe what is *intended*.
+- **Defaults point at the humbler claim.** A field that defaults to "live inference" or
+  "tool execution" produces an overclaim by omission the first time someone forgets to set it.
+  Make the weaker claim the one you get for free.
 - **Never report a test, build, or scan as run** unless the executing agent's handoff shows
   real command output. "Should pass" is reported as "not verified".
 - **Security work comes first** when it competes with a feature for the same slot.
