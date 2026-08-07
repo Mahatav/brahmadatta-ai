@@ -1,3 +1,15 @@
+/* ============================================================================
+ * DELIBERATELY VULNERABLE - Brahmadatta AI controlled demo target.
+ *
+ * This file is part of `pktcfg`, a fixture authored for Brahmadatta AI's own
+ * testing. It contains a SEEDED heap-buffer-overflow on purpose. It is not a
+ * library, it is not maintained, and it must never be vendored, packaged, or
+ * copied into anything that parses real input.
+ *
+ * The defect, its location and its bug class are documented in
+ * demo/repositories/pktcfg/README.md.
+ * ============================================================================
+ */
 /* Escape decoding for entries carrying PKT_FLAG_ESCAPED.
  *
  * Rule under test: `\n` `\r` `\0` `\\` decode to one byte; `\xHH` inserts one
