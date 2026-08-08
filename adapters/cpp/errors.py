@@ -19,7 +19,6 @@ from enum import StrEnum
 __all__ = [
     "AdapterError",
     "BuildStep",
-    "JailEscape",
     "StepFailure",
     "ToolchainError",
     "UnpinnedToolchain",
@@ -42,13 +41,6 @@ class BuildStep(StrEnum):
 
 class AdapterError(Exception):
     """Base for everything this package raises deliberately."""
-
-
-class JailEscape(AdapterError):
-    """A path or working directory resolved outside the jail root.
-
-    Raised before anything is executed. See `adapters/cpp/jail.py`.
-    """
 
 
 class ToolchainError(AdapterError):

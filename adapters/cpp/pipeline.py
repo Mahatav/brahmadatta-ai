@@ -13,6 +13,34 @@ sanitizer confirmation #27 asks for comes from replaying the committed reproduce
 (`crash/crash-literal-tab.bin`) through the sanitized binary directly, which is a distinct
 step from CTest and is never wired into it — doing so would violate #41's standing
 prohibition against adding a test to the target that fails on the unpatched build.
+
+Callers MUST keep the `Jail` open (inside its `with Jail.create(...) as jail:` block) for
+the full `run_variant`/`run_reproducer` sequence
+--------------------------------------------------------------------------------------
+
+`packages.sandbox.Jail` deletes its whole scratch directory — including `build_dir` and
+everything CTest wrote into it — the moment its `with` block exits (D-053/D-054). There is
+no persistent log path or build tree to come back to afterwards, unlike this package's own
+retired `jail.py`, which kept a caller-owned workspace alive across calls. Concretely:
+
+    with Jail.create(policy) as jail:
+        result = run_variant(source, jail, Variant.ASAN_UBSAN)      # ok: jail is open
+        repro = run_reproducer(jail, result.build_dir / "x", (...), spec=spec)  # still open
+    # jail.root and everything under it, including result.build_dir, no longer exist here.
+    # Only already-extracted data survives: result.ctest, result.toolchain, repro.findings.
+
+This also means there is no durable on-disk log artifact for a `StepFailure` to point at —
+`captured_stdout`/`captured_stderr` on the failure/result types carry whatever
+`JailResult` captured (subject to its own output cap), and it is the caller's job (e.g.
+`workers/baseline/run.py`) to persist that text into its own evidence store *before* the
+`with` block closes, if it wants to keep it past this call. This package does not own
+evidence persistence — see `docs/09-company/06-architecture-spec.md` §5, the
+evidence-builder service's territory.
+
+There is also no per-step timeout anymore. `packages.sandbox.JailPolicy.wall_clock_seconds`
+is set once, for the whole `Jail`, and applies to every command run inside it — configure,
+build, and ctest share one budget rather than each getting their own. Size the policy for
+the whole sequence (the D3 gate's own 15-minute ceiling is exactly that shape already).
 """
 
 from __future__ import annotations
@@ -22,10 +50,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from packages.sandbox import Jail, JailResult, LimitKind
+
 from .ctest_report import CTestSummary, run_ctest
 from .detect import BuildSystem, DetectedTarget, detect
 from .errors import BuildStep, StepFailure, ToolchainError, first_error_line
-from .jail import Jail, JailResult
 from .sanitizer import SanitizerFinding, parse_sanitizer_output
 from .toolchain import ToolchainRecord, probe_build_tools, read_compiler_identity
 from .variants import Variant, VariantSpec, spec_for
@@ -35,7 +64,12 @@ __all__ = ["BuildResult", "ReproducerResult", "run_reproducer", "run_variant"]
 
 @dataclass(frozen=True, slots=True)
 class BuildResult:
-    """Everything #16 and #17 need out of one configure/build/ctest pass."""
+    """Everything #16 and #17 need out of one configure/build/ctest pass.
+
+    :attr:`build_dir` is only valid while the `Jail` that produced it is still open — see
+    the module docstring. Extract what you need (:attr:`ctest`, :attr:`toolchain`) before
+    the `with` block closes.
+    """
 
     variant: Variant
     detected: DetectedTarget
@@ -76,7 +110,8 @@ class ReproducerResult:
     duration_seconds: float
     findings: tuple[SanitizerFinding, ...]
     timed_out: bool
-    raw_output_path: str
+    captured_stdout: str
+    captured_stderr: str
 
     @property
     def crashed(self) -> bool:
@@ -89,7 +124,6 @@ class ReproducerResult:
             "duration_seconds": self.duration_seconds,
             "findings": [f.as_dict() for f in self.findings],
             "timed_out": self.timed_out,
-            "raw_output_path": self.raw_output_path,
         }
 
 
@@ -119,15 +153,14 @@ def _configure_argv(
 
 
 def run_variant(
-    source_dir: Path | str,
-    jail: Jail,
-    variant: Variant = Variant.BASELINE,
-    *,
-    configure_timeout: float | None = None,
-    build_timeout: float | None = None,
-    ctest_timeout: float | None = None,
+    source_dir: Path | str, jail: Jail, variant: Variant = Variant.BASELINE
 ) -> BuildResult:
     """Configure, build, and CTest ``source_dir`` under ``variant``, entirely inside ``jail``.
+
+    ``jail`` must be an already-open `packages.sandbox.Jail` (inside its `with` block) and
+    must stay open until you are done reading `BuildResult.build_dir` — see the module
+    docstring. Its `JailPolicy.wall_clock_seconds` covers the whole configure+build+ctest
+    sequence, not each step individually.
 
     Raises :class:`StepFailure` (never returns a partial result) when configure or build
     does not succeed, or when CTest itself could not produce a trustworthy report. A red
@@ -157,9 +190,7 @@ def run_variant(
     build_dir.mkdir(parents=True, exist_ok=True)
 
     configure_argv = _configure_argv(cmake_path, detected, build_dir, spec)
-    configure_result = jail.run(
-        configure_argv, cwd=jail.root, label="configure", timeout_seconds=configure_timeout
-    )
+    configure_result = jail.run(configure_argv, cwd=jail.root)
     if not configure_result.ok:
         raise StepFailure(
             step=BuildStep.CONFIGURE,
@@ -167,12 +198,12 @@ def run_variant(
             command=configure_result.argv,
             exit_code=configure_result.exit_code,
             first_error=first_error_line(configure_result.stderr, configure_result.stdout),
-            log_path=configure_result.stderr_path,
-            timed_out=configure_result.timed_out,
+            timed_out=configure_result.limit_hit is LimitKind.WALL_CLOCK,
+            detail=configure_result.stderr[-2000:] if configure_result.stderr else "",
         )
 
     build_argv = [cmake_path, "--build", str(build_dir), "--parallel"]
-    build_result = jail.run(build_argv, cwd=jail.root, label="build", timeout_seconds=build_timeout)
+    build_result = jail.run(build_argv, cwd=jail.root)
     if not build_result.ok:
         raise StepFailure(
             step=BuildStep.BUILD,
@@ -180,8 +211,8 @@ def run_variant(
             command=build_result.argv,
             exit_code=build_result.exit_code,
             first_error=first_error_line(build_result.stderr, build_result.stdout),
-            log_path=build_result.stderr_path,
-            timed_out=build_result.timed_out,
+            timed_out=build_result.limit_hit is LimitKind.WALL_CLOCK,
+            detail=build_result.stderr[-2000:] if build_result.stderr else "",
         )
 
     compiler_id, compiler_version, compiler_path, generator = read_compiler_identity(build_dir)
@@ -193,7 +224,7 @@ def run_variant(
         generator=generator,
     )
 
-    ctest_summary = run_ctest(build_dir, jail, ctest_path, timeout_seconds=ctest_timeout)
+    ctest_summary = run_ctest(build_dir, jail, ctest_path)
 
     return BuildResult(
         variant=variant,
@@ -213,32 +244,29 @@ def run_reproducer(
     args: tuple[str, ...],
     *,
     spec: VariantSpec,
-    label: str = "reproducer",
-    timeout_seconds: float | None = 60.0,
 ) -> ReproducerResult:
     """Replay a fixed input through a built binary and structurally parse any sanitizer
     finding out of its combined output.
 
+    ``jail`` must still be open — ``binary_path`` almost always points inside a
+    `BuildResult.build_dir` from a `run_variant` call made against this same jail.
+
     Sanitizer runtime options (`spec.runtime_env` — `ASAN_OPTIONS`/`UBSAN_OPTIONS`) are
     supplied here because the jail scrubs the environment down to an allowlist
-    (`adapters/cpp/jail.py`): if the variant does not carry them, nothing does, and a
-    caller cannot accidentally inherit whatever the host shell happens to export.
+    (`packages/sandbox/policy.py`'s `DEFAULT_ENV_ALLOWLIST`): if the variant does not
+    carry them, nothing does, and a caller cannot accidentally inherit whatever the host
+    shell happens to export.
     """
-    resolved_binary = jail.resolve_inside(binary_path)
+    resolved_binary = jail.resolve(binary_path)
     argv = (str(resolved_binary), *args)
-    result = jail.run(
-        list(argv),
-        cwd=jail.root,
-        env=spec.runtime_env,
-        label=label,
-        timeout_seconds=timeout_seconds,
-    )
+    result = jail.run(list(argv), cwd=jail.root, extra_env=dict(spec.runtime_env))
     findings = parse_sanitizer_output(result.stdout + "\n" + result.stderr)
     return ReproducerResult(
         argv=argv,
         exit_code=result.exit_code,
-        duration_seconds=result.duration_seconds,
+        duration_seconds=result.wall_seconds,
         findings=findings,
-        timed_out=result.timed_out,
-        raw_output_path=result.stderr_path,
+        timed_out=result.limit_hit is LimitKind.WALL_CLOCK,
+        captured_stdout=result.stdout,
+        captured_stderr=result.stderr,
     )

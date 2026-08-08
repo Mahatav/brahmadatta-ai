@@ -26,10 +26,25 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from packages.sandbox import ISOLATION_MODE, Jail
+
 from .errors import BuildStep, StepFailure, ToolchainError, UnpinnedToolchain, first_error_line
-from .jail import ISOLATION_MODE, ISOLATION_UNPROTECTED_AGAINST, Jail
+
+#: `packages/sandbox` is a subprocess jail (#81), not a container — see
+#: `packages/sandbox/jail.py`'s module docstring for the full list of what it does and
+#: does not protect against. Carried here under our own name so a `ToolchainRecord`
+#: doesn't have to import that module just to cite the caveat.
+ISOLATION_UNPROTECTED_AGAINST: tuple[str, ...] = (
+    "network egress from the target's build and test processes",
+    "filesystem reads outside the jail root",
+    "a hostile target: no seccomp, no user namespace, no capability drop",
+    "memory exhaustion on a kernel that refuses RLIMIT_AS — see JailResult.limits_applied "
+    "for whether it took effect on this run, never assumed from the platform name",
+    "toolchain reproducibility: the host toolchain is whatever the host has",
+)
 
 __all__ = [
+    "ISOLATION_UNPROTECTED_AGAINST",
     "ToolVersion",
     "ToolchainRecord",
     "probe_build_tools",
@@ -135,16 +150,18 @@ def probe_build_tools(
 
     Raises :class:`ToolchainError` when a tool is absent and :class:`StepFailure` when it is
     present but will not report a version — those are different problems for the operator.
+
+    ``jail`` must still be open (inside its ``with`` block) — `packages.sandbox.Jail`
+    tears its scratch directory down on `__exit__`, and there is no persistent log path
+    to fall back on afterwards (see `pipeline.py`'s module docstring for why callers keep
+    the whole configure/build/test sequence inside one `with Jail.create(...)` block).
     """
     probed: list[ToolVersion] = []
     for name in names:
         path = shutil.which(name)
         if path is None:
-            raise ToolchainError(
-                f"required tool not found on PATH: {name}. "
-                f"PATH as seen by the jail: {jail.child_env().get('PATH', '')}"
-            )
-        result = jail.run([path, "--version"], label=f"version-{name}")
+            raise ToolchainError(f"required tool not found on PATH: {name}")
+        result = jail.run([path, "--version"])
         if not result.ok:
             raise StepFailure(
                 step=BuildStep.PROBE_TOOLCHAIN,
@@ -152,8 +169,7 @@ def probe_build_tools(
                 command=result.argv,
                 exit_code=result.exit_code,
                 first_error=first_error_line(result.stderr, result.stdout),
-                log_path=result.stderr_path,
-                timed_out=result.timed_out,
+                timed_out=result.limit_hit.value == "WALL_CLOCK",
             )
         version = _banner_version(result.stdout) or _banner_version(result.stderr)
         if version is None:
@@ -163,7 +179,6 @@ def probe_build_tools(
                 command=result.argv,
                 exit_code=result.exit_code,
                 first_error=first_error_line(result.stdout, result.stderr),
-                log_path=result.stdout_path,
                 detail=f"could not read a version out of {name} --version output",
             )
         probed.append(ToolVersion(name=name, version=version, path=path))

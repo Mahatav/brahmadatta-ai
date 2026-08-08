@@ -43,10 +43,11 @@ from typing import Any
 
 from adapters.cpp.detect import BuildSystem, detect
 from adapters.cpp.errors import AdapterError, BuildStep, StepFailure, ToolchainError
-from adapters.cpp.jail import ISOLATION_MODE, ISOLATION_UNPROTECTED_AGAINST, Jail, JailLimits
 from adapters.cpp.pipeline import BuildResult, run_variant
 from adapters.cpp.snapshot import SnapshotInfo, hash_source_tree
+from adapters.cpp.toolchain import ISOLATION_UNPROTECTED_AGAINST
 from adapters.cpp.variants import Variant
+from packages.sandbox import ISOLATION_MODE, Jail, JailPolicy
 
 __all__ = ["BaselineFailureDetail", "BaselineOutcome", "emit_baseline_events", "run_baseline_stage"]
 
@@ -63,14 +64,21 @@ _MISSION_STAGE_BASELINE = "BASELINE"
 
 @dataclass(frozen=True, slots=True)
 class BaselineFailureDetail:
-    """Present when the stage could not complete. Never present alongside a pass."""
+    """Present when the stage could not complete. Never present alongside a pass.
+
+    `detail` (a tail of captured stderr) stands in for the on-disk log artifact this
+    field used to reference: `packages.sandbox.Jail` deletes its whole scratch directory,
+    including anything a failed configure/build step wrote, the moment its `with` block
+    exits (D-053/D-054) — there is no persistent path left to hand back once
+    `run_baseline_stage` returns. See `adapters/cpp/pipeline.py`'s module docstring.
+    """
 
     step: str
     target: str
     command: tuple[str, ...]
     exit_code: int
     first_error: str
-    log_path: str | None
+    detail: str
     timed_out: bool
 
     def as_dict(self) -> dict[str, Any]:
@@ -80,7 +88,7 @@ class BaselineFailureDetail:
             "command": list(self.command),
             "exit_code": self.exit_code,
             "first_error": self.first_error,
-            "log_path": self.log_path,
+            "detail": self.detail,
             "timed_out": self.timed_out,
         }
 
@@ -144,7 +152,7 @@ def _failure_from_step_failure(exc: StepFailure) -> BaselineFailureDetail:
         command=exc.command,
         exit_code=exc.exit_code,
         first_error=exc.first_error,
-        log_path=exc.log_path,
+        detail=exc.detail,
         timed_out=exc.timed_out,
     )
 
@@ -162,7 +170,7 @@ def _failure_from_adapter_error(
         command=(),
         exit_code=-1,
         first_error=message,
-        log_path=None,
+        detail="",
         timed_out=False,
     )
 
@@ -172,12 +180,19 @@ def run_baseline_stage(
     source_dir: Path | str,
     workspace_root: Path | str,
     *,
-    jail_limits: JailLimits | None = None,
+    jail_policy: JailPolicy | None = None,
 ) -> BaselineOutcome:
     """Run the baseline stage for one mission. Never raises on a red or broken build —
     every failure mode this module knows about is converted into a `BaselineOutcome` with
     `passed=False` and `failure` populated. Only a programming error (a bug in this
     module) escapes as an unhandled exception.
+
+    Opens exactly one `packages.sandbox.Jail` for the whole configure+build+ctest
+    sequence and closes it before returning — its scratch directory, including
+    `BuildResult.build_dir`, does not survive past this call (D-053/D-054). The one
+    artifact worth keeping — the CTest JUnit report — is copied out to `workspace_root`
+    (which is NOT inside the jail and is not deleted) while the jail is still open, and
+    `BaselineOutcome.log_ref` points at that durable copy, not the ephemeral original.
     """
     started = time.monotonic()
     mission_id_str = str(mission_id)
@@ -190,22 +205,31 @@ def run_baseline_stage(
 
     workspace = Path(workspace_root).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    jail = Jail(workspace, limits=jail_limits or JailLimits())
 
     build_result: BuildResult | None = None
     failure: BaselineFailureDetail | None = None
     adapter_name = "UNKNOWN"
+    log_ref: str | None = None
 
-    try:
-        build_result = run_variant(source, jail, Variant.BASELINE)
-        adapter_name = build_result.detected.build_system.value
-    except StepFailure as exc:
-        failure = _failure_from_step_failure(exc)
-        adapter_name = _adapter_name_or_unknown(source)
-    except (ToolchainError, AdapterError) as exc:
-        step = BuildStep.PROBE_TOOLCHAIN if isinstance(exc, ToolchainError) else BuildStep.DETECT
-        failure = _failure_from_adapter_error(exc, step, str(source))
-        adapter_name = _adapter_name_or_unknown(source)
+    with Jail.create(jail_policy, parent=workspace) as jail:
+        try:
+            build_result = run_variant(source, jail, Variant.BASELINE)
+            adapter_name = build_result.detected.build_system.value
+            # Copy the one artifact worth keeping out of the jail before it tears down.
+            # Everything else in BaselineOutcome is already-extracted data
+            # (CTestSummary's counts), not a path into the jail.
+            durable_junit = workspace / f"{mission_id_str}-baseline-ctest-junit.xml"
+            durable_junit.write_bytes(Path(build_result.ctest.junit_path).read_bytes())
+            log_ref = str(durable_junit)
+        except StepFailure as exc:
+            failure = _failure_from_step_failure(exc)
+            adapter_name = _adapter_name_or_unknown(source)
+        except (ToolchainError, AdapterError) as exc:
+            step = (
+                BuildStep.PROBE_TOOLCHAIN if isinstance(exc, ToolchainError) else BuildStep.DETECT
+            )
+            failure = _failure_from_adapter_error(exc, step, str(source))
+            adapter_name = _adapter_name_or_unknown(source)
 
     duration = time.monotonic() - started
 
@@ -221,7 +245,7 @@ def run_baseline_stage(
             adapter=adapter_name,
             recorded_at=recorded_at,
             snapshot=snapshot,
-            log_ref=build_result.ctest.junit_path,
+            log_ref=log_ref,
         )
 
     # Configure, build, or toolchain probing did not complete. Recorded as a red baseline
@@ -247,7 +271,7 @@ def run_baseline_stage(
         adapter=adapter_name,
         recorded_at=recorded_at,
         snapshot=snapshot,
-        log_ref=failure.log_path,
+        log_ref=None,  # no durable artifact for a configure/build failure — see `failure.detail`
         failure=failure,
     )
 

@@ -54,8 +54,9 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+from packages.sandbox import Jail
+
 from .errors import BuildStep, StepFailure, ToolchainError, first_error_line
-from .jail import Jail
 
 __all__ = [
     "CTestSummary",
@@ -165,9 +166,10 @@ def enumerate_tests(build_dir: Path, jail: Jail, ctest_path: str) -> tuple[str, 
     """The test names CMake registered, from ``ctest --show-only=json-v1``.
 
     Used only to cross-check the JUnit file's completeness; the pass/fail verdict never
-    comes from here.
+    comes from here. ``build_dir`` is passed as a jail-relative ``cwd`` — it must resolve
+    inside ``jail.root``, which is true for anything `pipeline.run_variant` created.
     """
-    result = jail.run([ctest_path, "--show-only=json-v1"], cwd=build_dir, label="ctest-show-only")
+    result = jail.run([ctest_path, "--show-only=json-v1"], cwd=build_dir)
     if not result.ok:
         raise StepFailure(
             step=BuildStep.TEST_ENUMERATE,
@@ -175,8 +177,7 @@ def enumerate_tests(build_dir: Path, jail: Jail, ctest_path: str) -> tuple[str, 
             command=result.argv,
             exit_code=result.exit_code,
             first_error=first_error_line(result.stderr, result.stdout),
-            log_path=result.stderr_path,
-            timed_out=result.timed_out,
+            timed_out=result.limit_hit.value == "WALL_CLOCK",
         )
     try:
         payload = json.loads(result.stdout)
@@ -271,7 +272,6 @@ def run_ctest(
     ctest_path: str,
     *,
     junit_name: str = "ctest-junit.xml",
-    timeout_seconds: float | None = None,
 ) -> CTestSummary:
     """Enumerate, run, and structurally parse — the one function the baseline stage calls.
 
@@ -280,27 +280,26 @@ def run_ctest(
     itself could not be made to produce a trustworthy report (crash, timeout, malformed
     output) — a genuinely different failure mode from "the code under test is broken,"
     which is exactly the distinction #16's acceptance criteria draw.
+
+    There is no per-call timeout parameter: `packages.sandbox.Jail`'s wall clock is set
+    once, on the `JailPolicy` passed to `Jail.create()`, and applies to every command run
+    inside that jail. Give the caller of `pipeline.run_variant` a `JailPolicy` sized for
+    "configure + build + ctest, once," not per-step.
     """
     expected = enumerate_tests(build_dir, jail, ctest_path)
     junit_path = build_dir / junit_name
-    result = jail.run(
-        [ctest_path, "--output-junit", str(junit_path)],
-        cwd=build_dir,
-        label="ctest-run",
-        timeout_seconds=timeout_seconds,
-    )
+    result = jail.run([ctest_path, "--output-junit", str(junit_path)], cwd=build_dir)
     # A non-zero exit here means "at least one test failed," which CTest signals the same
     # way whether one test failed or the whole binary would not launch. That distinction is
     # exactly what the JUnit file resolves, so exit code is not treated as the verdict —
     # only a timeout (nothing to parse) is.
-    if result.timed_out:
+    if result.limit_hit.value == "WALL_CLOCK":
         raise StepFailure(
             step=BuildStep.TEST_RUN,
             target=str(build_dir),
             command=result.argv,
             exit_code=result.exit_code,
             first_error=first_error_line(result.stderr, result.stdout),
-            log_path=result.stderr_path,
             timed_out=True,
         )
     return parse_ctest_junit(junit_path, expected_tests=expected)

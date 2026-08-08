@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from adapters.cpp.jail import Jail
 from adapters.cpp.pipeline import run_reproducer, run_variant
 from adapters.cpp.sanitizer import parse_sanitizer_output
 from adapters.cpp.variants import Variant, spec_for
+from packages.sandbox import Jail
 
 # Captured verbatim from `./build-asan/pktcfg_replay crash/crash-literal-tab.bin 5` during
 # development (AppleClang 21 / macOS arm64). Frame addresses vary by run; the grammar this
@@ -86,17 +86,19 @@ def test_the_seeded_defect_is_confirmed_end_to_end(tmp_path: Path, pktcfg_source
     """The full pipeline, real cmake/clang, real crash file: builds ASAN_UBSAN, replays
     the committed reproducer, and confirms the exact finding documented in
     demo/repositories/pktcfg/README.md's defect table."""
-    jail = Jail(tmp_path)
-    result = run_variant(pktcfg_source, jail, Variant.ASAN_UBSAN)
-    # #27's other half: the baseline must stay green under sanitizers — no ctest case
-    # trips the defect on its own.
-    assert result.ctest.all_passed is True
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(pktcfg_source, jail, Variant.ASAN_UBSAN)
+        # #27's other half: the baseline must stay green under sanitizers — no ctest
+        # case trips the defect on its own.
+        assert result.ctest.all_passed is True
 
-    crash_file = pktcfg_source / "crash" / "crash-literal-tab.bin"
-    spec = spec_for(Variant.ASAN_UBSAN)
-    repro = run_reproducer(
-        jail, result.build_dir / "pktcfg_replay", (str(crash_file), "5"), spec=spec
-    )
+        crash_file = pktcfg_source / "crash" / "crash-literal-tab.bin"
+        spec = spec_for(Variant.ASAN_UBSAN)
+        # run_reproducer needs result.build_dir, which only exists while `jail` is open —
+        # both calls stay inside this `with` block. See pipeline.py's module docstring.
+        repro = run_reproducer(
+            jail, result.build_dir / "pktcfg_replay", (str(crash_file), "5"), spec=spec
+        )
     assert repro.crashed is True
     assert len(repro.findings) == 1
     finding = repro.findings[0]
@@ -111,14 +113,14 @@ def test_the_seeded_defect_is_confirmed_end_to_end(tmp_path: Path, pktcfg_source
 def test_the_corrected_patch_produces_no_crash(tmp_path: Path, candidate_a_source: Path) -> None:
     """Injected-violation check on the fix itself: replaying the same crash input through
     the correctly patched binary must produce zero findings."""
-    jail = Jail(tmp_path)
-    result = run_variant(candidate_a_source, jail, Variant.ASAN_UBSAN)
-    assert result.ctest.all_passed is True
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(candidate_a_source, jail, Variant.ASAN_UBSAN)
+        assert result.ctest.all_passed is True
 
-    crash_file = candidate_a_source / "crash" / "crash-literal-tab.bin"
-    spec = spec_for(Variant.ASAN_UBSAN)
-    repro = run_reproducer(
-        jail, result.build_dir / "pktcfg_replay", (str(crash_file), "5"), spec=spec
-    )
+        crash_file = candidate_a_source / "crash" / "crash-literal-tab.bin"
+        spec = spec_for(Variant.ASAN_UBSAN)
+        repro = run_reproducer(
+            jail, result.build_dir / "pktcfg_replay", (str(crash_file), "5"), spec=spec
+        )
     assert repro.crashed is False
     assert repro.findings == ()

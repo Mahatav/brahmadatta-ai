@@ -10,9 +10,9 @@ import pytest
 
 from adapters.cpp.ctest_report import parse_ctest_junit
 from adapters.cpp.errors import ToolchainError
-from adapters.cpp.jail import Jail
 from adapters.cpp.pipeline import run_variant
 from adapters.cpp.variants import Variant
+from packages.sandbox import Jail
 
 # A real `ctest --output-junit` fixture for a build that was configured but never
 # compiled — every test is `status="notrun"` with a `<skipped>` child. This is the exact
@@ -126,8 +126,8 @@ def test_a_short_junit_file_is_rejected_against_the_enumeration(tmp_path: Path) 
 @pytest.mark.slow
 def test_pktcfg_baseline_is_really_eight_of_eight(tmp_path: Path, pktcfg_source: Path) -> None:
     """End-to-end: real cmake configure + build + ctest against the real target."""
-    jail = Jail(tmp_path)
-    result = run_variant(pktcfg_source, jail, Variant.BASELINE)
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(pktcfg_source, jail, Variant.BASELINE)
     assert result.ctest.total == 8
     assert result.ctest.passed == 8
     assert result.ctest.failed == 0
@@ -154,8 +154,8 @@ def test_candidate_b_produces_the_documented_seven_of_eight(
     proves the structural parser reports that drop — not the target's own build, which is
     proven by `demo/repositories/pktcfg`'s own CTest suite and is out of scope for this
     adapter's tests (standing prohibition, #41: never make the target's baseline red)."""
-    jail = Jail(tmp_path)
-    result = run_variant(candidate_b_source, jail, Variant.BASELINE)
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(candidate_b_source, jail, Variant.BASELINE)
     assert result.ctest.total == 8
     assert result.ctest.passed == 7
     assert result.ctest.failed == 1
@@ -166,8 +166,8 @@ def test_candidate_b_produces_the_documented_seven_of_eight(
 @pytest.mark.slow
 def test_candidate_a_preserves_all_eight(tmp_path: Path, candidate_a_source: Path) -> None:
     """The correct fix: crash gone, all 8 tests still pass."""
-    jail = Jail(tmp_path)
-    result = run_variant(candidate_a_source, jail, Variant.BASELINE)
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(candidate_a_source, jail, Variant.BASELINE)
     assert result.ctest.total == 8
     assert result.ctest.passed == 8
     assert result.ctest.failed == 0

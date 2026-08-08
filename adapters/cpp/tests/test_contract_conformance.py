@@ -52,7 +52,7 @@ def test_build_system_matches_language_adapter() -> None:
 
 
 def test_isolation_mode_matches_contract() -> None:
-    from adapters.cpp.jail import ISOLATION_MODE
+    from packages.sandbox import ISOLATION_MODE
 
     contract_values = set(_enum_values("IsolationMode").values())
     assert ISOLATION_MODE in contract_values

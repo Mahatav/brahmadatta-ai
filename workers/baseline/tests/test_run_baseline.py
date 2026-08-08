@@ -27,6 +27,17 @@ def test_green_baseline_reaches_baseline_passed_with_real_counts(
     assert outcome.failure is None
     assert outcome.snapshot.snapshot_sha256
 
+    # packages.sandbox.Jail deletes its own scratch directory (and everything CTest wrote
+    # into it) the moment run_baseline_stage's `with Jail.create(...)` block closes —
+    # which has already happened by the time run_baseline_stage returns. This is the
+    # regression test for that: log_ref must point at a real, readable file *after* the
+    # call returns, not at a path that quietly no longer exists. Proves the durable-copy
+    # step actually ran, rather than trusting the source read.
+    assert outcome.log_ref is not None
+    log_path = Path(outcome.log_ref)
+    assert log_path.is_file(), f"log_ref does not exist on disk: {log_path}"
+    assert "<testsuite" in log_path.read_text()
+
     events = emit_baseline_events(outcome)
     assert [e["type"] for e in events] == ["BASELINE_RECORDED", "BASELINE_PASSED"]
     assert events[1]["payload"]["report"]["tests_passed"] == 8

@@ -5,15 +5,15 @@ from pathlib import Path
 import pytest
 
 from adapters.cpp.errors import ToolchainError, UnpinnedToolchain
-from adapters.cpp.jail import Jail
 from adapters.cpp.pipeline import run_variant
 from adapters.cpp.toolchain import probe_build_tools, read_compiler_identity, require_pinned
 from adapters.cpp.variants import Variant
+from packages.sandbox import Jail
 
 
 def test_probe_build_tools_returns_real_versions(tmp_path: Path) -> None:
-    jail = Jail(tmp_path)
-    tools = probe_build_tools(jail)
+    with Jail.create(parent=tmp_path) as jail:
+        tools = probe_build_tools(jail)
     names = {t.name for t in tools}
     assert names == {"cmake", "ctest"}
     for tool in tools:
@@ -27,17 +27,17 @@ def test_probe_build_tools_raises_on_missing_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Injected violation: ask for a tool that does not exist on PATH."""
-    jail = Jail(tmp_path)
-    with pytest.raises(ToolchainError, match="not found"):
-        probe_build_tools(jail, names=("this-tool-does-not-exist-anywhere",))
+    with Jail.create(parent=tmp_path) as jail:
+        with pytest.raises(ToolchainError, match="not found"):
+            probe_build_tools(jail, names=("this-tool-does-not-exist-anywhere",))
 
 
 def test_read_compiler_identity_matches_a_real_build(tmp_path: Path, pktcfg_source: Path) -> None:
-    jail = Jail(tmp_path)
-    result = run_variant(pktcfg_source, jail, Variant.BASELINE)
-    compiler_id, compiler_version, compiler_path, generator = read_compiler_identity(
-        result.build_dir
-    )
+    with Jail.create(parent=tmp_path) as jail:
+        result = run_variant(pktcfg_source, jail, Variant.BASELINE)
+        compiler_id, compiler_version, compiler_path, generator = read_compiler_identity(
+            result.build_dir
+        )
     assert compiler_id in ("GNU", "Clang", "AppleClang")
     assert compiler_version[0].isdigit()
     assert Path(compiler_path).is_file() or compiler_path  # absolute path recorded
