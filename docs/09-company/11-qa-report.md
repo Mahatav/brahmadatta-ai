@@ -1,15 +1,941 @@
-# QA report — PR #87, `feat/control-api-scaffold`
+# QA report — the control API and the mission state machine
 
 **Author of this report:** `qa` agent
-**Date:** 2026-08-07 (D1)
-**Under test:** PR #87 — Django + django-ninja control API and the frozen mission contract
-**Round 1 tested at:** `origin/feat/control-api-scaffold` (`a853e80`) merged with `origin/main`
-(`ff0a11e`), merge commit `1eeb176`.
-**Round 2 (re-review) tested at:** `origin/feat/control-api-scaffold` (`743ffa9`), already
-containing `origin/main` (`81e7657`) — no merge needed.
-Both in throwaway detached worktrees. Nothing was pushed to either branch.
-**Issues in scope:** #6, #9 (Django half), #77, #78, #80, #103, and the CTO's nine conditions
-C1–C9 (review comment on **#79** — see §0).
+**Rounds 1 and 2:** PR #87 `feat/control-api-scaffold` — 2026-08-07 (D1)
+**Round 3:** PR #110 `feat/state-machine` — 2026-08-08 (D2)
+
+| Round | Under test | Tested at | Verdict |
+|---|---|---|---|
+| 1 | PR #87 — Django + django-ninja control API and the frozen mission contract | `a853e80` merged with `origin/main` `ff0a11e`, merge commit `1eeb176` | **REJECTED** (§156) |
+| 2 | PR #87, after the mechanical fixes | `743ffa9`, already containing `origin/main` `81e7657` | **APPROVED WITH KNOWN ISSUES** (§0.4) |
+| 3 | PR #110 — persistent state machine, models, migrations; D-045 … D-049 | `4db0212`, merge-base `origin/main` `00f1afc` | **REJECTED** (§R3.9) |
+
+All three in throwaway detached worktrees. Nothing was pushed to any branch under test.
+
+**Issues in scope:** #6, #9 (Django half), #12, #14, #77, #78, #80, #103, the CTO's nine
+conditions C1–C9 (review comment on **#79** — see §0), and CTO rulings **D-045 … D-049**.
+
+**Reading order.** Round 3 is first because it is current. §0 is Round 2 and everything from
+§1 down is Round 1's evidence, preserved rather than rewritten — see the standing note at the
+end of this file.
+
+---
+
+## R3. Round 3 — PR #110, `feat/state-machine` — the PostgreSQL gap, closed
+
+**Date:** 2026-08-08
+**Under test:** PR #110 `feat/state-machine` at `4db0212c940d1b074a307c88e3447be171e1827e`,
+merge-base `origin/main` `00f1afc`. Detached worktree, nothing pushed to the branch.
+**Closes:** #12, #14, #77, #80, #103, under CTO rulings D-045 … D-049.
+**Trigger:** §14's "before #12 merges" re-check list. #12 has landed, so all seven items are
+re-checked below, plus the PostgreSQL gap the author declared themselves.
+
+**Verdict: REJECTED.** One blocker, §R3.6 BUG-019. Everything else in this section is good
+news, and I want that on the record before the blocker: **the two properties the author
+marked *intended, not demonstrated* both hold under a real lock, and I have the output.**
+
+---
+
+### R3.0 What I ran, and on what
+
+| | |
+|---|---|
+| Host | macOS 26.5.2, arm64 |
+| Python | 3.12.13 and 3.13.12, separate venvs, `requirements-dev.txt` installed into both |
+| Django / django-ninja / pydantic | 5.2.17 / 1.6.2 / 2.13.4 |
+| ruff | 0.16.1 — the version pinned in `requirements-dev.txt` |
+| **PostgreSQL** | **16.13**, disposable `postgres:16-alpine` container `qa3-pg` on **port 55432**, destroyed after the run |
+| Harnesses | six throwaway scripts, not committed; each is reproduced by name below |
+
+Round 1 ran PostgreSQL for connect-and-migrate only, because no models existed. This round
+is the first time any lock-dependent behaviour in this system has been executed against a
+database that implements `SELECT … FOR UPDATE`.
+
+---
+
+### R3.1 The author's own numbers — verified, not relayed
+
+Every line below is from my session, not from the PR body.
+
+```
+$ apps/control-api $ pytest                                    # Python 3.12
+231 passed in 1.29s
+EXIT=0
+
+$ apps/control-api $ pytest                                    # Python 3.13
+231 passed in 1.42s
+EXIT=0
+
+$ pytest tests/ -q                                             # architecture, 3.12
+36 passed in 0.48s
+
+$ pytest tests/ -q                                             # architecture, 3.13
+36 passed in 0.85s
+
+$ manage.py check
+System check identified no issues (0 silenced).
+
+$ manage.py makemigrations --check --dry-run
+No changes detected
+EXIT=0
+```
+
+Migrations from empty, **on PostgreSQL 16.13** rather than on SQLite:
+
+```
+  Applying missions.0001_initial... OK
+migrate exit=0
+
+$ manage.py showmigrations missions
+missions
+ [X] 0001_initial
+
+public tables: artifact authorization baseline_report export finding fuzzing_report
+ job mission mission_event patch_candidate reproducer resource_sample snapshot
+ verification_record
+```
+
+Fourteen mission tables, matching architecture spec §5.1. And the whole suite against that
+database rather than against in-memory SQLite:
+
+```
+$ DATABASE_URL=postgresql://…@127.0.0.1:55432/brahmadatta_qa3 pytest
+231 passed in 4.87s
+
+$ python -c "print(settings.DATABASES['default'])"
+{'ENGINE': 'django.db.backends.postgresql', 'NAME': 'brahmadatta_qa3', … 'PORT': '55432', …}
+```
+
+The 3.6× wall-clock increase over the SQLite run is the round trips; I checked the engine
+explicitly rather than trusting the environment variable to have taken.
+
+**#103, the specific claim — byte-identical dumps on both interpreters:**
+
+```
+34ee2c1b8fbc6c91c0bb7c2f29251635144ad71bfcccfdc2fcb9bfdeeaaae876  qa3-dump-312.json
+34ee2c1b8fbc6c91c0bb7c2f29251635144ad71bfcccfdc2fcb9bfdeeaaae876  qa3-dump-313.json
+34ee2c1b8fbc6c91c0bb7c2f29251635144ad71bfcccfdc2fcb9bfdeeaaae876  packages/schemas/openapi.json
+
+$ cmp qa3-dump-312.json qa3-dump-313.json         -> IDENTICAL
+$ cmp qa3-dump-312.json packages/schemas/…json    -> IDENTICAL TO COMMITTED
+```
+
+Same SHA-256 from both interpreters and from the committed file. The RFC 9110 names landed:
+
+```
+422 'Unprocessable Content' x23      (3.12 used to emit 'Unprocessable Entity')
+409 'Conflict' x23    401 'Unauthorized' x23    501 'Not Implemented' x23
+```
+
+**The drift gate, four ways.** This is BUG-002's shape, so I check the exit code, not the
+message — a gate that prints a failure and exits 0 is not a gate:
+
+```
+3.12 with injected drift : exit=1   (diff names injected_drift_field)
+3.13 with injected drift : exit=1   (diff names injected_drift_field)
+3.12 clean               : exit=0
+3.13 clean               : exit=0
+$ git status --short      (empty — the check did not mutate the artifact it polices)
+```
+
+**The frontend seam, same treatment:**
+
+```
+STALE types  -> exit=1     (main's schema.d.ts against this branch's dump)
+CURRENT types-> exit=0
+$ npm run check            Result (12 files): 0 errors, 0 warnings, 0 hints
+```
+
+Everything the author reported reproduces. **TC-R3-1 … TC-R3-9: PASS.**
+
+---
+
+### R3.2 The gap that mattered — PostgreSQL, and whether the locks are real
+
+The author wrote that gap-free `sequence` under two writers and the candidate-set freeze
+under an interleaved insert are **intended, not demonstrated**, because SQLite compiles
+`SELECT … FOR UPDATE` away. That was the honest position. Here is what it looks like closed.
+
+Every arm below has a **negative control**. A concurrency test with no negative control is
+indistinguishable from a test that never raced, and I am not willing to report a green from
+one.
+
+#### TC-P0 — is the lock a lock? **PASS**
+
+Two threads, two connections. A holds `select_for_update` on the mission row for 2 s; B
+tries `select_for_update(nowait=True)` on the same row.
+
+```
+############ POSTGRES 16 ############
+backend: postgresql / django.db.backends.postgresql
+contender while the row was locked: REFUSED: OperationalError: could not obtain lock on row
+                                    in relation "mission"  (0.020s)
+TC-P0: PASS — FOR UPDATE is a real lock
+
+############ SQLITE (reference) ############
+backend: sqlite / django.db.backends.sqlite3
+contender while the row was locked: ACQUIRED  (0.002s)
+TC-P0: SQLite reference — outcome above is what 'no-op' looks like
+```
+
+That is the whole reason this section exists, in six lines.
+
+#### TC-P1 — gap-free `sequence` under concurrent writers. **PASS**
+
+8 threads × 25 events, each on its own connection, through the real `orchestrator.events.emit`
+under the protocol its docstring specifies. Arm 2 is identical but with `select_for_update`
+replaced by a plain `.get()` — what a refactor that "tidied away" the lock would produce.
+
+```
+backend: postgresql   writers=8 x 25 events   stagger=0.0s
+--- ARM 1: LOCKED (the shipped protocol) ---
+  rows written 200  (target 200)
+  distinct seq 200   range 1..200
+  gap-free 1..n True
+  write errors 0
+--- ARM 2: UNLOCKED (negative control — MUST fail) ---
+  rows written 53  (target 200)
+  write errors 147
+    IntegrityError: duplicate key value violates unique constraint "mission_event_sequence_unique"
+
+TC-P1 locked arm      : PASS
+TC-P1 negative control: fired (harness is sensitive)
+```
+
+Re-run with the read-to-insert window deliberately widened by 5 ms, identically in both arms:
+
+```
+backend: postgresql   writers=12 x 15 events   stagger=0.005s
+--- ARM 1: LOCKED --- rows 180/180, gap-free 1..n True, write errors 0
+--- ARM 2: UNLOCKED --- rows 26/180, write errors 154
+```
+
+**CTO C3 is met.** Worth recording precisely, because it changes what the backstop buys you:
+without the lock you do not get *gaps*, you get **lost events** — `unique_together(mission,
+sequence)` converts the collision into an `IntegrityError`, so 147 of 200 writes are refused
+and the surviving ordinals are still 1..53. For the Command Center's gap detector that is
+the better failure (a client cannot silently miss an event it never learns about), but a
+reviewer should not read "the constraint protects us" as "the lock is optional". It is not:
+73% of the writes were destroyed.
+
+#### TC-P2 — the candidate set freezes under an interleaved insert. **PASS**
+
+The verifier thread signals from inside `record_verification`'s locked section (from
+`derive_verdict`, which runs after the lock and before the freeze timestamp is written).
+The inserter waits for that signal and then calls `record_patch_candidate`. So an ACCEPTED
+insert is unambiguously an insert into a mission whose verification run had already begun —
+which is the rule D-046 states.
+
+```
+backend: postgresql  trials=25  window=0.05s
+--- ARM 1: LOCKED (the shipped code) ---
+  trial  1  verify=ok  insert=REFUSED (CandidateSetFrozenError)  candidates=1  -> ok
+  trial  2  verify=ok  insert=REFUSED (CandidateSetFrozenError)  candidates=1  -> ok
+  trial  3  verify=ok  insert=REFUSED (CandidateSetFrozenError)  candidates=1  -> ok
+  trial  4  verify=ok  insert=REFUSED (CandidateSetFrozenError)  candidates=1  -> ok
+  25 trials, forbidden outcomes: 0
+--- ARM 2: NO-LOCK (negative control — MUST breach) ---
+  trial  1  verify=ok  insert=ACCEPTED  candidates=2  -> FORBIDDEN
+  … 25 of 25 …
+  25 trials, forbidden outcomes: 25
+
+TC-P2 locked arm      : PASS
+TC-P2 negative control: fired (harness is sensitive)
+```
+
+**25 / 25 clean under a real lock; 25 / 25 breached without one.** D-046's enforcement is
+real, and it is the lock that makes it real — not the column on its own.
+
+**A correction I owe the record.** My first detector for this keyed on event-sequence order
+(candidate event after verification event). It reported 0 breaches in *both* arms, and I
+nearly had a clean result that proved nothing. It was wrong because `record_verification`
+emits its event at the *end* of its transaction, so a candidate smuggled into the middle of
+the window still lands with a *lower* sequence. The detector above keys on the rule itself
+instead. Consequence worth knowing for #38 and the export: **the event rail is not a
+reliable audit of what happened first** — it records commit order of the emit, not the order
+in which the locked sections were entered.
+
+#### TC-P2b — what the SQLite-only evidence would have missed
+
+The same script, same shipped code, against file-backed SQLite:
+
+```
+--- ARM 1: LOCKED (the shipped code) ---
+  trial 1  verify=OperationalError: database is locked  insert=ACCEPTED  candidates=2  -> FORBIDDEN
+  … 6 of 6 …
+  6 trials, forbidden outcomes: 6
+```
+
+On SQLite the shipped code **breaches 6 / 6**: the verification write is lost to "database is
+locked" and the late candidate is accepted. Single-threaded, SQLite is fine and the suite is
+green. Concurrent, the D-046 enforcement is not merely untested there — it is absent. The
+product runs on PostgreSQL so this is not a defect in the code; it is the measurement of
+exactly how much the CI signal is worth on this property, and it is the argument for
+BUG-022.
+
+#### TC-P3 — two operators, two buttons, one mission. **PASS**
+
+`BASELINE → TRIAGE` and `BASELINE → PAUSED` fired simultaneously, 30 trials.
+
+```
+assertion sensitivity probe: ['chain-break check fires', 'gap-free check fires']
+backend: postgresql   30 trials
+  x15  [('paused','WON'), ('triage','WON')]
+       raced part of chain=[('BASELINE','TRIAGE'), ('TRIAGE','PAUSED')] state=PAUSED paused_from=TRIAGE
+  x15  [('paused','WON'), ('triage','refused (InvalidStateTransitionError)')]
+       raced part of chain=[('BASELINE','PAUSED')] state=PAUSED paused_from=BASELINE
+
+TC-P3: PASS — every serialised outcome is a legal chain
+```
+
+**A second correction I owe the record.** I first asserted "exactly one winner" and reported
+10 / 20 failures. That assertion was wrong: `BASELINE → TRIAGE → PAUSED` is a legal chain and
+both calls succeeding in that order is a *correct* outcome, not a lost update. I then broke
+the check while fixing it and produced a **vacuous PASS** — the `bad` counter was never
+incremented. The output above is from the third version, which carries a sensitivity probe
+proving the assertions can fire. The real invariants — the persisted event trail is a legal
+chain, the mission's state equals its last event's `to_state`, `sequence` is gap-free, and
+`paused_from` names the state the pause event actually came from — hold 30 / 30.
+
+---
+
+### R3.3 The seven §14 items, one at a time
+
+| # | §14 item | Round 3 result |
+|---|---|---|
+| 1 | **BUG-003 / C6** — `CandidateVerdict` satisfying the guard | **CLOSED** — refused, and by refusal not `AttributeError` |
+| 2 | **BUG-004 / C1** — cross-mission records; `test_cannot_add_candidate_after_verification_starts` by name | **CLOSED in the two halves it can be** — see below and §R3.6 |
+| 3 | **BUG-005** — the seven-step `PAUSED → EXPORTING → VERIFIED` walk | **CLOSED**, both directions |
+| 4 | **BUG-007 / BUG-008** — provenance defaults | BUG-007 **CLOSED**; **BUG-008 still open**, as the PR states |
+| 5 | **#103** — both interpreters, same result | **CLOSED** — byte-identical, §R3.1 |
+| 6 | **BUG-010** — the DSN table now that models exist | **CLOSED** |
+| 7 | **BUG-018 / C3** — a recommended-candidate field | **CLOSED**, with BUG-024 |
+
+**The CTO-named tests exist, by name, and pass — on PostgreSQL:**
+
+```
+$ pytest -v <15 tests named individually>
+orchestrator/tests/test_candidate_freeze.py .
+orchestrator/tests/test_pause_resume.py ...
+orchestrator/tests/test_verdict_completeness.py ....
+contracts/tests/test_state_machine.py ......
+contracts/tests/test_openapi_dump.py .
+15 passed in 2.14s
+```
+
+Then I tried to defeat them. 28 cases; **26 behaved as the PR claims.**
+
+**D-045 — the guard (A1–A6):**
+
+```
+### A1 (BUG-003) — a duck-typed lookalike with .verdict must be refused
+    REFUSED  VerificationRequiredError: element 0 of the verification set is a Lookalike,
+             not a VerificationRecord. Only a record carrying a gate matrix can justify a verdict.
+### A2 — a CandidateVerdict must not stand in for a VerificationRecord
+    REFUSED  VerificationRequiredError: element 0 … is a CandidateVerdict, not a VerificationRecord.
+### A3 (BUG-004 C6d) — another mission's VERIFIED record
+    REFUSED  VerificationRequiredError: verification c7aae3d5… belongs to mission e3f20d86…,
+             not f1dbda7b…. Another mission's evidence does not justify this mission's verdict.
+### A4 — the same VERIFIED record 3× must not outvote one HUMAN_REVIEW
+    REFUSED  VerificationRequiredError: the mission's 2 verification run(s) derive
+             HUMAN_REVIEW_REQUIRED, which does not justify that state.
+### A5 — the guard cannot be run without naming a mission
+    REFUSED  TypeError: assert_verdict_is_evidenced() missing 1 required keyword-only argument: 'mission_id'
+### A6 — nor can assert_transition
+    REFUSED  TypeError: assert_transition() missing 1 required keyword-only argument: 'mission_id'
+```
+
+**A correction to my own case design.** A4 and A10 first came back as breaches because I
+expected `[VERIFIED, REJECTED]` to refuse `VERIFIED`. It does not, and it is right not to:
+`derive_mission_verdict` documents *"at least one `VERIFIED` → `VERIFIED`"* — the mission's
+question is "does a repair that holds exist". `HUMAN_REVIEW_REQUIRED` is the verdict that
+outranks, so it is the one a drop or a duplication argument has to beat, and that is what the
+cases above use. **This matters beyond my harness — see BUG-023.**
+
+**D-045's load-bearing half — the call site (A7–A10):** the CTO's position is that no
+in-function validation can catch a dropped record, so the defence has to be that the guard is
+only called from a transaction-scoped path that loaded the records itself. I checked that
+claim three ways rather than reading the diff:
+
+```
+### A7 — transition() must take no verification argument from its caller
+    OK  signature = ['mission_id', 'now', 'reason', 'target', 'trace_id']
+        (no verifications parameter exists)
+### A8 — the loader must query by mission with no filter/exclude/slice
+    OK  loader query: ['rows = VerificationRecord.objects.filter(mission_id=mission_id).order_by(']
+### A9 — the call site carries the comment naming the test that guards it
+    OK  comment present, names orchestrator/tests/test_verdict_completeness.py
+### A10 — a dropped outranking record cannot reach VERIFIED, end to end
+    REFUSED  VerificationRequiredError: the mission's 2 verification run(s) derive
+             HUMAN_REVIEW_REQUIRED, which does not justify that state.
+             loaded 2 records: ['HUMAN_REVIEW_REQUIRED', 'VERIFIED']
+```
+
+**The comment the CTO asked for exists and is accurate.** The sanctioned path is closed. What
+that does *not* establish is that the sanctioned path is the only path — see BUG-021.
+
+**D-046 — the freeze (B1–B3):**
+
+```
+### B1 — the recorder refuses a candidate after verification starts
+    REFUSED  CandidateSetFrozenError: Verification has already started for this mission;
+             the candidate set is closed.
+             verification_started_at = 2026-08-07 12:00:00+00:00
+### B2 — a refused insert must not move the freeze timestamp
+    OK  freeze unmoved after 3 refused inserts: 2026-08-07 12:00:00+00:00
+### B3 — does the ORM itself stop a direct create after the freeze?
+    BREACH  PatchCandidate.objects.create() bypassed the freeze;
+            mission now has 2 candidates
+```
+
+B3 is BUG-025 (and `cybersecurity`'s SEC-17). I confirmed by grep that the only production
+writer is the recorder, so nothing in the tree does this today:
+
+```
+orchestrator/candidates.py:105:        row = PatchCandidate.objects.create(
+orchestrator/candidates.py:171:        row = VerificationRecord.objects.create(
+```
+
+**D-047 — `paused_from`, both directions (C1–C6). All six pass.**
+
+```
+### C1 — pause in VERIFY must not resume forward into EXPORTING
+    REFUSED  paused_from=VERIFY
+             InvalidStateTransitionError: A paused mission resumes only into the state it
+             paused from. This one paused in VERIFY and tried to resume into EXPORTING.
+### C2 (the CTO's case) — pause in VERIFY must not resume BACKWARD into BASELINE
+    REFUSED  paused_from=VERIFY
+             InvalidStateTransitionError: … paused in VERIFY and tried to resume into BASELINE.
+### C3 — pause in BASELINE must not resume forward into VERIFY
+    REFUSED  paused_from=BASELINE
+             InvalidStateTransitionError: … paused in BASELINE and tried to resume into VERIFY.
+### C4 — the legitimate resume VERIFY -> PAUSED -> VERIFY still works
+    OK  state=VERIFY, paused_from cleared on resume
+### C5 — a PAUSED mission whose origin I erased can only abort
+    REFUSED  InvalidStateTransitionError: Cannot resume into VERIFY: this mission has no
+             recorded paused_from, so there is no state it is known to have paused in.
+### C6 — a second BaselineReport for one mission
+    REFUSED  IntegrityError: duplicate key value violates unique constraint
+             "baseline_report_mission_id_key"
+```
+
+C2 is the exact scenario the CTO raised: a mission paused in `VERIFY` resuming into
+`BASELINE` and writing a second `BaselineReport` for the same snapshot. It is closed twice —
+by the guard, and by a `OneToOneField` that makes the second report a database error even if
+the guard were bypassed. C5 is the fail-closed case, and I produced it by tampering
+`paused_from` to `NULL` directly in the table, which is how a bad migration would.
+
+**D-049 — the humbler claim (D1–D9). All nine as specified.**
+
+```
+### D1 — GateResult must not have an evidence_source default
+    REFUSED  ('evidence_source',): Field required
+### D2 — a NOT_RUN gate may not claim TOOL_EXECUTION
+    REFUSED  Value error, gate COMPILE is NOT_RUN and cannot also claim TOOL_EXECUTION;
+             a gate that did not run had no tool execution to source from.
+### D3 — GateResult.not_run() states the weaker source
+    OK  evidence_source=REPLAYED_ARTIFACT
+### D4 (BUG-007 D1) — silence must no longer read as live inference
+    REFUSED  ('inference_mode',): Field required
+### D5 — a partially declared replay
+    REFUSED  Value error, REPLAYED_TRANSCRIPT must name the transcript it was replayed from,
+             when it was captured, and its digest …
+### D6 — a live claim carrying replay fields
+    REFUSED  Value error, a response carrying replay provenance cannot declare itself LIVE_INFERENCE.
+### D7 — EvidenceBundle.isolation_mode
+    OK  required, no default
+### D8 (BUG-008) — prompt_sha256 for MODEL_GENERATED
+    BREACH  MODEL_GENERATED accepted with prompt_sha256=None — still open, as the PR states
+### D9  IsolationMode = ['ROOTLESS_CONTAINER', 'SUBPROCESS_JAIL']
+```
+
+**The direction is right, and this is the part of D-049 that matters.** A forgotten field is
+now a `ValidationError`, not a silent strong claim: forget `evidence_source` and the gate does
+not construct; forget `inference_mode` and the provenance does not construct; forget
+`isolation_mode` and the bundle does not construct. Nothing understates *by defaulting*
+because nothing defaults — which is D-049's second branch and the stronger version of it.
+The one place a default survives is `GateResult.not_run()`, and it points at
+`REPLAYED_ARTIFACT`, the weaker of the two members (DR-BE-3). I have no objection; a third
+member `NONE` would be exact and the CTO owns whether it is worth a contract window.
+
+D1/D4 were both initially passing for the *wrong reason* in my harness — I was omitting other
+required fields too. The output above is from the corrected version, where the field under
+test is the only one missing.
+
+---
+
+### R3.4 #14 — the four rules architecture spec §5.1 hands the schema
+
+**`gates` is `jsonb`, and the read-side re-derivation is real.** Confirmed against the live
+Postgres schema:
+
+```
+$ \d verification_record
+ gates           | jsonb                    | not null
+Indexes:
+    "verification_record_patch_id_key" UNIQUE CONSTRAINT, btree (patch_id)
+    "verification_verdict_idx" btree (mission_id, verdict)
+```
+
+I tampered a stored verdict so it disagreed with its stored gates, bypassing every guard:
+
+```
+picked row 9ccfa56c… stored verdict REJECTED
+tampered REJECTED -> VERIFIED directly in the table
+REFUSED at load: ValidationError
+    Value error, verdict VERIFIED does not follow from the gate matrix (deterministic
+    derivation gives REJECTED). A verdict may only be derived from gate results.
+```
+
+That property is strong and it is exactly as advertised. **The "on write" half of the same
+claim is not** — see BUG-020.
+
+**`unique_together(mission, sequence)` exists as a real constraint:**
+
+```
+$ \d mission_event
+Indexes:
+    "mission_event_sequence_unique" UNIQUE CONSTRAINT, btree (mission_id, sequence)
+    "event_mission_seq_idx" btree (mission_id, sequence)
+Check constraints:
+    "mission_event_sequence_check" CHECK (sequence >= 0)
+```
+
+TC-P1's negative control is the proof it does its job.
+
+**Append-only.** `Authorization`, `Snapshot` and `MissionEvent` each override `save()`.
+`Mission`, `PatchCandidate` and `VerificationRecord` do not — BUG-021 and BUG-025.
+
+---
+
+### R3.5 BUG-010, BUG-012 and the two items the author flagged for someone else
+
+**BUG-010 — CLOSED.** The DSN table, live, now that models make it bite:
+
+```
+  sqlite://                        -> NAME=':memory:'
+  sqlite://:memory:                -> NAME=':memory:'
+  sqlite:///:memory:               -> NAME=':memory:'
+  sqlite:///ci.sqlite3             -> NAME='ci.sqlite3'      (was '/ci.sqlite3')
+  sqlite:///relative/x.db          -> NAME='relative/x.db'
+  sqlite:////tmp/absolute.db       -> NAME='/tmp/absolute.db'
+
+$ pytest api/tests/test_settings_profiles.py::test_sqlite_dsn_spellings
+6 passed in 0.02s
+```
+
+**BUG-012 — still open, reproduced.** I paused the Postgres container and hit health:
+
+```
+{"status": "degraded", … "dependencies": [{"name": "database", "reachable": false,
+ "detail": "OperationalError"}] …}
+  HTTP 200
+```
+
+The PR says it does not address this and that is fine, but it is worth restating that this
+bug got *more* expensive in this PR: before #14 there was no database dependency to be
+degraded about. A compose healthcheck reading the status code sees a healthy container.
+
+**`EvidenceBundle.isolation_mode` — noted, not ruled.** The author flipped it to
+required-with-no-default under D-049's general rule and flagged that D-049 did not name it.
+I confirmed the flip landed (D7) and that it behaves as the rest of D-049 does. **Whether it
+should have been flipped is the CTO's call, not mine.** I record only that `IsolationMode` has
+exactly two members and `ROOTLESS_CONTAINER` was the stronger of them, so as a matter of fact
+the old default overclaimed. `cybersecurity` has separately endorsed the flip on the record.
+
+**The HTTP layer — confirmed still 501, and I checked it against a running server**, not by
+reading the router:
+
+```
+GET  /api/v1/system/health                          200   {"status":"ok", database reachable:true}
+GET  /api/v1/missions          (no token)           401
+GET  /api/v1/missions          (operator token)     501
+     {"error":{"code":"NOT_IMPLEMENTED","message":"Not implemented yet; tracked by
+      #12 (orchestrator state machine)."}}
+POST /api/v1/missions/{id}/transitions              404   (no such route)
+
+$ grep -rn "orchestrator" api/       -> only in a comment and a tracking string
+```
+
+So the state machine this PR builds is reachable from tests and **not** from the API. That is
+what the author said, it is deliberate, and it is the single largest reason BUG-019 is not
+rated Critical today. It is also why fixing BUG-019 now is far cheaper than after the routers
+are wired.
+
+---
+
+### R3.6 New findings
+
+#### BUG-019 · **blocker** · a mission reaches `VERIFIED` on a diff that is not one of its candidates
+
+`record_verification` takes `patch_id` as a parameter and never compares
+`PatchCandidate.mission_id` to the mission being verified. D-046 freezes the set of candidates
+a mission may *hold*; it does not constrain the set of candidates that may be *verified into*
+it.
+
+**`cybersecurity` found this first (SEC-15, HIGH). Their rating is theirs and I defer to it.
+The severity below is the QA rating against the acceptance criterion, which is mine.** I
+reproduced it independently against PostgreSQL, using only the sanctioned orchestrator API —
+no direct ORM writes, no convention broken:
+
+```
+  mission A frozen at 2026-08-07 12:00:00+00:00
+  A's own candidates: 1, verdicts on A: ['REJECTED']
+
+  control: can we add another candidate to A through the recorder?
+    [BLOCKED] CandidateSetFrozenError
+
+  the attack: verify mission B's candidate INTO mission A
+    [REACHED] record_verification accepted, record 564bee50-9cd0-42dc-a8b7-928501f63dc8
+      record.mission_id        = 7b0125fa-729c-4383-9d50-ac9729a6b8ce
+      record.patch.mission_id  = ae8e0946-dd2a-4470-a6ac-c32cb97fa8f4
+      differ: True
+
+  verdicts now on A: ['VERIFIED', 'REJECTED']
+    [REACHED] mission A terminal state = VERIFIED, verdict = VERIFIED
+    A's own candidates: 1 (the verified diff is not among them)
+```
+
+Mission A proposed exactly one repair. It failed. A is frozen and the recorder correctly
+refuses to add another. A is nonetheless `VERIFIED`, and the diff that earned that verdict is
+not in A's candidate set at all.
+
+**Why this is a blocker and not a major.** Every guard in the chain behaves as designed —
+`assert_verdict_is_evidenced` sees a real `VerificationRecord` whose `mission_id` is A's,
+because the row genuinely was written against A. The mission-binding check added by D-045 is
+not forged past, it is *satisfied*, because the attacker sets the column it reads. The result
+is that the product's central claim — "this repair holds, and here is the evidence" — can be
+attached to a diff the mission never proposed, through the API this PR sanctions, on a green
+suite. That is the acceptance criterion of D-046 defeated in substance while met in letter,
+and it is the exact failure mode `orchestrator/candidates.py`'s own module docstring opens by
+saying the file exists to prevent.
+
+It is also small. Inside the existing `transaction.atomic()`, under the lock already held:
+
+```python
+patch = PatchCandidate.objects.get(pk=patch_id)
+if patch.mission_id != mission.id:
+    raise InvalidStateTransitionError(...)
+```
+
+plus the named test `cybersecurity` specified —
+`test_a_candidate_from_another_mission_cannot_be_verified_into_this_one`. **Owner:**
+backend-developer. This is the whole of my rejection.
+
+#### BUG-020 · **major** · "`gates` validated on write" is not true, and a malformed row wedges the abort path
+
+The PR body and two docstrings say `gates` is *"validated against the frozen `GateMatrix` on
+write and on read"*. The read half is real (§R3.4). The write half is not, at the model layer
+— and the consequence is worse than a missing check:
+
+```
+--- WRITE: a malformed gates blob straight into the model ---
+    ACCEPTED — row ac3f4e3a… written with gates={'this': 'is not a gate matrix'} verdict='VERIFIED'
+--- READ: can that row be loaded back? ---
+    REFUSED at load: ValidationError   (gates.compile)
+--- consequence: is the mission now unable to transition at all? ---
+    ABORT PATH BLOCKED TOO: ValidationError: 4 validation errors for VerificationRecord
+```
+
+`transitions.transition` loads every verification record unconditionally, so one unloadable
+row means the mission cannot be moved **anywhere** — including to `FAILED` or `CANCELLING`.
+A mission in that state cannot be cleaned up, which on D6 is a mission that stays on the
+screen. The sanctioned recorder does validate through the pydantic schema before writing, so
+this needs a non-sanctioned write to reach; that is what keeps it major rather than blocker.
+Same finding as `cybersecurity`'s SEC-20. **Two fixes are needed and they are separable:**
+make the claim true (validate in `VerificationRecord.save()`), and make the abort path
+independent of the evidence load. **Owner:** backend-developer.
+
+#### BUG-021 · **major** · the completeness guarantee is one call site, not a mechanism
+
+I verified the call site does exactly what the CTO required (A7–A9) and I could not defeat
+either of the two tests guarding it. What neither guards is the public `assert_transition`,
+whose `verifications` parameter still accepts whatever a caller assembles:
+
+```
+  records on disk: ['VERIFIED', 'HUMAN_REVIEW_REQUIRED']
+  control 1 — the sanctioned path:            [BLOCKED] VerificationRequiredError
+  control 2 — the public guard, fed honestly: [BLOCKED] VerificationRequiredError
+  the attack — the same guard, one record withheld:
+    [REACHED] assert_transition(pruned=['VERIFIED']) permitted VERIFIED
+    [REACHED] Mission.save() wrote state=VERIFIED verdict=VERIFIED
+    ...with 2 records on disk, one of them ['HUMAN_REVIEW_REQUIRED']
+```
+
+Both controls refuse, so this is not a vacuous result. In the PR's favour, and I checked
+rather than assumed, there is exactly one writer of `Mission.state` in the tree:
+
+```
+orchestrator/transitions.py:150:    mission.state = str(target)
+```
+
+So the convention holds **today**. The finding is that nothing makes it keep holding, and
+`missions/models.py` already contains the refusing-`save()` idiom three times — just not on
+the model carrying the two rulings. `cybersecurity` filed this as SEC-16 (HIGH) with two
+acceptable fixes, the cheaper being an architecture test asserting that `mission.state =` and
+`assert_transition(` each appear in exactly one non-test file. That is the same
+structural-read technique `test_the_records_are_loaded_by_mission_with_no_filter` already
+uses, one level up, and `tests/architecture/` is now a CI step. **Owner:** CTO to choose the
+mechanism, then backend-developer.
+
+#### BUG-022 · **major** · CI cannot detect a regression in any of the three properties proved above
+
+`.github/workflows/ci.yml` runs the suite on `DATABASE_URL: "sqlite:///ci.sqlite3"` and has no
+`services:` block at all:
+
+```
+$ grep -n "services:\|postgres\|POSTGRES" .github/workflows/ci.yml
+  NONE
+```
+
+TC-P0 shows `FOR UPDATE` is a no-op there. TC-P2b shows the shipped D-046 enforcement
+breaching 6 / 6 on SQLite under concurrency. So the three properties I demonstrated today —
+gap-free `sequence`, the freeze, and serialised transitions — are demonstrated *by me, once*,
+and are unguarded from here on. The comment in `ci.yml` is honest about this ("anything
+depending on Postgres-specific behaviour needs an integration job with a service container,
+which is D2 work") and D2 has now arrived.
+
+This is not a defect in #110 and it does not contribute to my rejection. It is the thing that
+makes today's green decay quietly. The fix is a `postgres:16-alpine` service on the existing
+`pytest` job plus the three harnesses from this section promoted into
+`orchestrator/tests/`, marked so they only run when the backend is PostgreSQL. **Owner:**
+devops + backend-developer, routed by engineering-manager.
+
+#### BUG-023 · **minor** · `test_a_dropped_rejection_cannot_reach_verified` is misnamed, and the PR body propagates the error
+
+I hit this from the other direction: my own attack A10 first reported a breach because I
+expected a dropped `REJECTED` record to matter. It cannot — under *any-VERIFIED-wins*,
+removing a `REJECTED` record from `[VERIFIED, REJECTED]` changes nothing, so a test of that
+name would be vacuous. The test's *body* is right: it uses a `HUMAN_REVIEW_REQUIRED` record,
+which is the verdict that outranks and therefore the one a drop would change. Only the label
+is wrong, and the PR body's D-045 table repeats it as *"BUG-004(c) — dropping a `REJECTED`
+record"*.
+
+That matters more than a rename because the standing rule is about descriptions matching
+demonstrations, and this is a description that does not. Rename to
+`test_a_dropped_human_review_record_cannot_reach_verified` and correct the table.
+`cybersecurity` filed the same thing as SEC-23(c). **Owner:** backend-developer.
+
+#### BUG-024 · **minor** · `recommended_patch_id`'s description names a failure its validator permits
+
+The field description says a bundle *"showing two verified patches without naming one invites
+a judge to pick the wrong one"*. That bundle is accepted:
+
+```
+E1  exactly one verified, no recommendation   REFUSED  (exactly one candidate verified, so
+                                                        recommended_patch_id must name it …)
+E2  one verified, recommendation names it     ACCEPTED
+E3  recommendation names the REJECTED one     REFUSED  (… names a candidate with no VERIFIED
+                                                        verification record …)
+E4  recommendation names a patch not in `patches`  REFUSED
+E5  TWO verified, NO recommendation           ACCEPTED   <-- the case the description calls the failure
+E6  zero verified, no recommendation          ACCEPTED
+```
+
+The demo shape is one-verified-one-rejected, which is E1/E2 and fully enforced, so this does
+not touch D6. Either enforce E5 or soften the description. BUG-018 / CTO C3 closes on the
+strength of E1–E4. **Owner:** backend-developer.
+
+#### BUG-025 · **minor** · `PatchCandidate` has no model-level freeze backstop
+
+Attack B3, above. `PatchCandidate.objects.create()` on a frozen mission succeeds;
+`Authorization`, `Snapshot` and `MissionEvent` all refuse the equivalent. No production code
+does this today. `cybersecurity` rated it SEC-17 / MEDIUM and I agree with the shape of their
+fix. **Owner:** backend-developer.
+
+#### BUG-026 · **trivial** · the ruff numbers in the PR body do not reproduce
+
+The PR says the tree went from 56 findings on `origin/main` to 31. On ruff **0.16.1**, the
+version pinned in `requirements-dev.txt`:
+
+```
+origin/main   : Found 30 errors.
+PR head       : Found 32 errors.
+new packages  : $ ruff check apps/control-api/missions apps/control-api/orchestrator
+                All checks passed!
+```
+
+The substantive claim — the new packages are clean — reproduces exactly. The tree count does
+not; it is two worse, both `UP037 quoted-annotation` in `contracts/schemas/evidence.py`,
+matching the surrounding file's existing style. ruff is not a CI gate (`ci.yml` says "run
+locally"), so nothing is red. This is the same class as BUG-015 and it is on the list for the
+same reason: numbers in a PR body get quoted later. **Owner:** backend-developer.
+
+#### BUG-027 · **trivial** · `check --deploy` reports five warnings, not four
+
+```
+$ manage.py check --deploy
+security.W004 (HSTS)  security.W008 (SSL redirect)  security.W009 (SECRET_KEY)
+security.W012 (session cookie)  security.W016 (CSRF cookie)
+System check identified 5 issues (0 silenced).
+```
+
+W009 fires on the test profile's short key and is not named in the PR's list of four. All
+five are pre-existing and test-profile artefacts; TLS terminates at nginx. Recorded for
+accuracy only. **Owner:** none required.
+
+---
+
+### R3.7 Bug register — round 3 delta
+
+| ID | Sev | Status | Summary | Owner |
+|---|---|---|---|---|
+| BUG-003 | major | **CLOSED** R3.3 | Guard duck-typed on `.verdict`. `isinstance` check added; lookalike and `CandidateVerdict` both refused by execution | backend-developer |
+| BUG-004 | major | **CLOSED in part** R3.3 | Mission-binding, de-duplication and required `mission_id` all closed by execution. The completeness half is closed *at the sanctioned call site* only — carried forward as BUG-021 | backend-developer |
+| BUG-005 | major | **CLOSED** R3.3 | `paused_from` closes both directions; six cases refused, including the CTO's `VERIFY → BASELINE` | backend-developer |
+| BUG-007 | major | **CLOSED** R3.3 | Every provenance and evidence-source field is now required-with-no-default; a forgotten field raises rather than claiming | backend-developer |
+| BUG-010 | major | **CLOSED** R3.5 | Six spellings, correct, pinned by a test | backend-developer |
+| BUG-018 | minor | **CLOSED** R3.6 | `recommended_patch_id` exists, derived and validated (E1–E4). Caveat filed as BUG-024 | backend-developer |
+| #103 | — | **CLOSED** R3.1 | Byte-identical dumps on 3.12 and 3.13; drift red on both | backend-developer |
+| CTO C3 | — | **CLOSED** R3.2 | Gap-free `sequence` under 8 and 12 concurrent writers on PostgreSQL, with a firing negative control | backend-developer |
+| BUG-008 | major | open, unchanged | `prompt_sha256` still optional for `MODEL_GENERATED` (D8). PR states it is out of scope | backend-developer |
+| BUG-012 | minor | open, unchanged | health 200 while `degraded`; reproduced against a paused database | backend-developer + devops |
+| BUG-009, BUG-014, BUG-015, BUG-017 | minor/trivial | open, **not re-tested** | Not in this PR's files | as before |
+| BUG-006, BUG-011, BUG-013 | *cybersecurity's* | see their §13 | BUG-011 now rated SEC-18/HIGH by `cybersecurity` | cybersecurity |
+| **BUG-019** | **blocker** | **NEW** | A mission reaches `VERIFIED` on another mission's patch through the sanctioned API (= SEC-15) | backend-developer |
+| BUG-020 | major | NEW | "`gates` validated on write" is false; a malformed row blocks even the abort path (= SEC-20) | backend-developer |
+| BUG-021 | major | NEW | Public `assert_transition` accepts a pruned set; `Mission.state` has no writer guard (= SEC-16) | CTO, then backend-developer |
+| BUG-022 | major | NEW | No PostgreSQL job in CI; every lock-dependent property is unguarded against regression | devops + backend-developer |
+| BUG-023 | minor | NEW | `test_a_dropped_rejection_cannot_reach_verified` is misnamed; PR body repeats it (= SEC-23c) | backend-developer |
+| BUG-024 | minor | NEW | `recommended_patch_id` description names a case its validator permits | backend-developer |
+| BUG-025 | minor | NEW | `PatchCandidate` has no model-level freeze backstop (= SEC-17) | backend-developer |
+| BUG-026 | trivial | NEW | PR body's ruff counts do not reproduce on the pinned ruff | backend-developer |
+| BUG-027 | trivial | NEW | `check --deploy` reports 5 warnings, not 4 | — |
+
+`cybersecurity` reviewed this branch before me and filed SEC-15 … SEC-23. **I reproduced
+SEC-15, SEC-16, SEC-17 and SEC-20 independently in this session rather than relaying them**,
+because a QA verdict that inherits another role's unverified output is not a QA verdict.
+Their security ratings stand as theirs; the severities in my column are QA severities against
+the acceptance criteria. Where we found the same thing independently (SEC-23c / BUG-023,
+SEC-17 / B3) I have said so.
+
+---
+
+### R3.8 Explicitly NOT RUN — round 3
+
+| Area | Status | Why |
+|---|---|---|
+| The toolchain — compile, ctest, libFuzzer, ASan, any model | **NOT RUN** | Nothing in this PR invokes it; the fan-out test supplies its gate matrices and says so in its own docstring. This remains the largest untested surface in the product |
+| SSE through nginx (`proxy_buffering off`) | **NOT RUN** | Unchanged from §12. The compose stack was not brought up. Still the failure that is invisible until the demo |
+| CTO C1 — thread-pool exhaustion under held SSE streams | **NOT RUN** | The stream still emits nothing real; the routers are 501 |
+| The HTTP surface end to end against the state machine | **NOT RUN — not possible** | Routers return 501; the orchestrator is not imported by `api/`. Confirmed against a running server, §R3.5 |
+| mypy | **NOT RUN** | The author states they did not run it either. Not a CI gate |
+| Semgrep / bandit / dependency audit | **NOT RUN** | `cybersecurity`'s scope; they executed `pip-audit` on this branch |
+| Accessibility, UI, load, soak | **NOT RUN** | No UI and no reachable endpoint in this PR |
+| SEC-18 through SEC-22 | **NOT RE-RUN** | `cybersecurity`'s findings outside my acceptance criteria. I reproduced only 15, 16, 17 and 20 because those four bear directly on D-045/D-046 and on #14's stated rules |
+| The 231 tests on PostgreSQL **on 3.13** | **NOT RUN** | I ran the suite on Postgres/3.12 and on SQLite/3.13. The 3.13 × Postgres cell is untested; I judged the interpreter and the backend independent here, but I am recording it rather than implying coverage |
+| `EvidenceBundle.isolation_mode` — whether the flip was correct | **NOT RULED** | Verified it landed and behaves; the ruling is the CTO's |
+| Behaviour under `DEBUG=False` with an unhandled 500 | **NOT RUN** | Unchanged from §12 |
+
+---
+
+### R3.9 Verdict — Round 3
+
+# REJECTED
+
+On **BUG-019**, and on nothing else.
+
+A mission whose only proposed repair was `REJECTED` reaches terminal `VERIFIED` on a diff
+from a different mission, through the sanctioned orchestrator API, with every guard behaving
+as designed and the suite green. The evidence bundle would then carry a `VERIFIED` verdict
+for a patch that is not among that mission's candidates. That is the product's central claim
+attached to the wrong artefact, and "a patch is never accepted on model confidence alone"
+loses most of its force if a patch can be accepted on *another mission's* verification.
+
+Per my role: a blocker means REJECTED. The CEO and `product-manager` may ship over this
+jointly and in writing in `.project/decisions.md`; I would not advise it, because the fix is
+five lines and one named test, and it is 6 days to the demo rather than 6 hours.
+
+**Everything else about this PR is good, and the rejection should not be read as a judgement
+on it.** Five of my seven carried-forward items closed by execution. CTO C3 closed. #103
+closed byte-for-byte. D-047 closed in both directions with the second-`BaselineReport` case
+shut twice over. D-049 turned every provenance default into a required statement. And the
+author's declared gap — the one that made this round worth running — closed **in their
+favour** on all three properties, with negative controls proving the harnesses could see a
+failure. The PR body's "NOT RUN / NOT DEMONSTRATED" section is the reason I knew where to
+point a Postgres container, and it is the standard I would like every PR held to.
+
+**What closes the rejection:**
+
+1. **BUG-019** — the mission check in `record_verification`, plus
+   `test_a_candidate_from_another_mission_cannot_be_verified_into_this_one`. Blocking.
+2. **BUG-023** — rename the misnamed test and fix the PR body's table. Two minutes, and it is
+   the standing rule applied to the PR that invoked it.
+
+**What I want decided but will not block on:** BUG-021 (CTO — mechanism or architecture
+test), BUG-020 and BUG-022 (engineering-manager to route), and the CTO's confirm-or-revert on
+`EvidenceBundle.isolation_mode`.
+
+---
+
+### R3.10 Decision record
+
+#### DR-QA-3 — rejecting #110 on a single blocker rather than approving with known issues
+
+**Decision.** REJECT PR #110 on BUG-019, rather than approving with known issues and filing
+it as a follow-up.
+
+**Options considered.**
+(a) **REJECTED** on BUG-019 alone, with the other eight new findings documented and owned.
+(b) **APPROVED WITH KNOWN ISSUES** — merge, file BUG-019 as a P0 follow-up. This is what I
+did in Round 2 and it worked.
+(c) **APPROVED** — not defensible.
+
+**Pros and cons.**
+(a) costs a few hours: the fix is a mission-id comparison inside a transaction that already
+holds the lock, plus one test whose name `cybersecurity` has already written down. The
+argument for paying it now is that the routers are 501 *today* — the moment a route passes a
+request-supplied `patch_id` into `record_verification`, this stops being an in-process defect
+and becomes a network-reachable one, and that is the next PR. Con: it delays #14's schema for
+everyone downstream, and the schema is otherwise sound.
+(b) is tempting for exactly the Round 2 reasons and I nearly took it. I rejected it on a
+difference I think is real: in Round 2 the open items were *contract-shape questions awaiting
+a CTO ruling*, which QA blocking would not have accelerated and which were not mine to decide.
+BUG-019 is not a question. It is a defect against a ruling that has already been made, with a
+known fix, in code that is being merged specifically to enforce that ruling. Merging the
+enforcement of D-046 with a live bypass of D-046 in the same commit is the kind of thing that
+is discovered in December.
+(c) invalid; nine new findings, one of them terminal-state-affecting.
+
+**Cost implications.** Rejection costs roughly half a day of one developer, most of it the
+test. Option (b) costs whatever a wrong `VERIFIED` costs when found — and the realistic
+discovery point is a judge reading an evidence bundle on D6, which is the most expensive
+possible moment.
+
+**Security implications.** BUG-019 is `cybersecurity`'s SEC-15 and they rated it HIGH, rising
+to Critical the moment a route supplies `patch_id`. **Their rating governs; mine is an
+acceptance-criteria severity, not a security one.** Nothing in my rejection overrides or
+re-rates their work — where we overlap I reproduced their cases independently rather than
+citing them.
+
+**Scalability implications.** None from this decision. Positively: the lock behaviour that
+scalability depends on is now measured rather than assumed, and BUG-022 names the job that
+keeps it measured.
+
+**Recommendation.** (a) REJECTED, with BUG-019 and BUG-023 as the only conditions. Re-review
+is narrow — I re-run the two-mission harness and the named test, not the whole round.
+
+**Final approval authority.** CTO for the technical rejection and for BUG-021's mechanism;
+CEO + `product-manager` jointly, in writing in `.project/decisions.md`, if they choose to ship
+over it. My rejection is not a veto on the schedule — it is a statement of what was executed
+and what it showed.
+
+---
+
+### R3.11 What I re-check next
+
+**Trigger: on the fix commit for BUG-019.** The two-mission harness, `record_verification`'s
+signature and body, and the named test — by name. Nothing else; the rest of this round stands.
+
+**Trigger: when the routers are wired to the orchestrator (the next PR).** Everything in R3.8
+that is currently "not possible": the transition endpoints, the full envelope and role matrix
+against real state, SSE carrying real `MissionEvent`s with `Last-Event-ID` replay, and CTO C1's
+thread-pool question against genuinely held streams.
+
+**Trigger: before D6.** SSE through nginx via `smoke-sse.sh`, and — if BUG-022 has not been
+done by then — a manual re-run of TC-P0 through TC-P3 against the finale compose stack's
+PostgreSQL, because the properties in §R3.2 are the ones that make invariant B real and they
+are currently proved by one QA session and nothing else.
 
 ---
 
