@@ -90,6 +90,52 @@ class CandidateSetFrozenError(ContractError):
     )
 
 
+class CrossMissionEvidenceError(ContractError):
+    """Evidence from one mission was offered as evidence for another (SEC-15).
+
+    D-046 freezes a mission's *candidate set*. On its own it does not freeze the set of
+    candidates that can be verified *into* that mission — so a frozen mission whose only
+    candidate was `REJECTED` could reach terminal `VERIFIED` by verifying a second
+    mission's candidate into it, through the sanctioned writer, with no forged record
+    and no direct database write.
+
+    The mission-binding check in `contracts.state_machine` cannot catch this: it reads
+    `VerificationRecord.mission_id`, and the row genuinely carries the right mission id
+    because the writer set it. The check has to happen at the moment that column is
+    written, which is `orchestrator.candidates.record_verification`.
+
+    Reuses `ErrorCode.CONFLICT` for the reason given on `CandidateSetFrozenError`.
+    """
+
+    code = ErrorCode.CONFLICT
+    http_status = 409
+    default_message = (
+        "That patch candidate belongs to a different mission. Evidence is only "
+        "evidence for the mission whose candidate set it came from."
+    )
+
+
+class MissionStateWriteError(ContractError):
+    """`Mission` was written outside the orchestrator's transition path (SEC-16).
+
+    `orchestrator.transitions.transition` is the only sanctioned writer of
+    `Mission.state`, because it is the only place that loads the mission's *complete*
+    verification set under the row lock before deciding. A write from anywhere else
+    reaches a terminal verdict past guards that were never run — which a reviewer
+    reproduced in four lines through a public function, with no test failing.
+
+    Raised by `Mission.save()` and by the mission queryset's `update()`.
+    """
+
+    code = ErrorCode.INTERNAL_ERROR
+    http_status = 500
+    default_message = (
+        "Mission lifecycle fields are written only by "
+        "orchestrator.transitions.transition, which holds the row lock and has loaded "
+        "the mission's complete evidence set."
+    )
+
+
 class ExternalInferenceBlockedError(ContractError):
     """An inference endpoint pointed outside the trust boundary.
 

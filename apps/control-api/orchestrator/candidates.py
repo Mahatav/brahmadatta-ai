@@ -33,13 +33,25 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
-from contracts.enums import EventType, PatchProvenance, Severity, Verdict
-from contracts.errors import CandidateSetFrozenError
+from contracts.enums import (
+    EventType,
+    MissionStage,
+    MissionState,
+    PatchProvenance,
+    Severity,
+    Verdict,
+)
+from contracts.errors import (
+    CandidateSetFrozenError,
+    CrossMissionEvidenceError,
+    InvalidStateTransitionError,
+)
 from contracts.schemas.evidence import ModelProvenance
 from contracts.schemas.evidence import PatchCandidate as PatchCandidateSchema
 from contracts.schemas.evidence import VerificationRecord as VerificationSchema
-from contracts.state_machine import assert_candidate_set_open
+from contracts.state_machine import assert_candidate_set_open, assert_stage_can_run
 from contracts.verdict import GateMatrix, derive_verdict
+from missions.lifecycle import lifecycle_write
 from missions.models import Mission, PatchCandidate, VerificationRecord
 from orchestrator import events, repository
 
@@ -148,11 +160,65 @@ def record_verification(
     The verdict is **not** a parameter. It is derived from `gates` by `derive_verdict`
     and nothing else — there is no argument a caller could pass to influence it, which
     is the same shape the contract uses (`derive_verdict` takes one argument).
+
+    Three things are checked under the mission row lock before anything is written, and
+    none of them is optional:
+
+    * **The candidate belongs to this mission** (SEC-15). Without this, D-046 freezes a
+      mission's *candidate set* but not the set of candidates that can be verified
+      *into* it — so a frozen mission whose only candidate was `REJECTED` reaches
+      terminal `VERIFIED` by verifying a second mission's candidate into it. That
+      needs no forged record and no direct database write: the row genuinely carries
+      this mission's id, because the writer got to set it. Generate-until-pass with one
+      extra step.
+    * **An active authorization covers the VERIFY stage** (SEC-21). P0-1 says no stage
+      runs without one, and a verification record is what the `VERIFY` stage produces.
+    * **The mission is actually in `VERIFY`** (SEC-21). The freeze is a *side effect* of
+      this function, so an unguarded call on a mission in `CREATED` permanently closes
+      its candidate set before `PATCH` has run — a denial of service on the mission's
+      own purpose.
     """
     now = now or timezone.now()
 
     with transaction.atomic():
         mission = Mission.objects.select_for_update().get(pk=mission_id)
+
+        # SEC-15. The check the mission-binding guard in `contracts/state_machine.py`
+        # cannot make for itself: that guard reads `record.mission_id`, and this is the
+        # only place that column is set. A check downstream of the writer can only
+        # confirm the label the writer chose.
+        patch = PatchCandidate.objects.select_related(None).get(pk=patch_id)
+        if patch.mission_id != mission.id:
+            raise CrossMissionEvidenceError(
+                f"Patch candidate {patch.id} belongs to mission {patch.mission_id}, "
+                f"not {mission.id}. A candidate outside this mission's own frozen "
+                f"candidate set cannot be verified into it.",
+                details={
+                    "mission_id": str(mission.id),
+                    "patch_id": str(patch.id),
+                    "patch_mission_id": str(patch.mission_id),
+                },
+            )
+
+        # SEC-21. Authorization and stage, under the lock we already hold.
+        authorization = repository.load_active_authorization(mission, now)
+        assert_stage_can_run(
+            MissionStage.VERIFY,
+            authorization,
+            now,
+            repository.latest_snapshot_sha256(mission),
+        )
+        if mission.state_enum is not MissionState.VERIFY:
+            raise InvalidStateTransitionError(
+                f"A verification can only be recorded while the mission is in VERIFY; "
+                f"this one is in {mission.state_enum}. Recording one now would close "
+                f"the candidate set before PATCH had produced it.",
+                details={
+                    "mission_id": str(mission.id),
+                    "current_state": str(mission.state_enum),
+                    "required_state": str(MissionState.VERIFY),
+                },
+            )
 
         verdict = derive_verdict(gates)
 
@@ -185,9 +251,17 @@ def record_verification(
         )
 
         # D-046: the freeze goes on with the first record, under the same lock.
+        #
+        # `lifecycle_write()` is claimed for exactly this one column and for the width
+        # of this one statement. `verification_started_at` is the only lifecycle field
+        # this module may move; `state`, `paused_from` and `verdict` belong to
+        # `orchestrator.transitions.transition` and are not written here (SEC-16).
         if mission.verification_started_at is None:
             mission.verification_started_at = now
-            mission.save(update_fields=["verification_started_at", "updated_at"])
+            with lifecycle_write():
+                mission.save(
+                    update_fields=["verification_started_at", "updated_at"]
+                )
 
         events.emit(
             mission,

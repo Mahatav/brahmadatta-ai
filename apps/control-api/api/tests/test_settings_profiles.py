@@ -136,3 +136,116 @@ def test_sqlite_dsn_spellings(dsn: str, expected: str):
     from config.env import database_from_url
 
     assert database_from_url(dsn)["NAME"] == expected
+
+
+# --- SEC-18: the DSN stops silently discarding its own security configuration ------
+
+
+@pytest.mark.parametrize(
+    ("dsn", "expected_sslmode"),
+    [
+        ("postgresql://u:p@db:5432/brahmadatta?sslmode=require", "require"),
+        ("postgresql://u:p@db:5432/brahmadatta?sslmode=verify-full", "verify-full"),
+        ("postgresql://u:p@db:5432/brahmadatta?sslmode=disable", "disable"),
+    ],
+)
+def test_sslmode_reaches_the_driver(dsn: str, expected_sslmode: str):
+    """All four DSN spellings — including no query string at all — used to produce
+    byte-identical configuration. The operator's strongest possible TLS statement and
+    their explicit opt-out were the same string to this system, and libpq then applied
+    its own default of `prefer`: attempt TLS, fall back to plaintext without error, and
+    never validate the certificate either way.
+    """
+    from config.env import database_from_url
+
+    assert database_from_url(dsn)["OPTIONS"]["sslmode"] == expected_sslmode
+
+
+def test_the_tls_material_reaches_the_driver_too():
+    """A `verify-full` with no CA path is not verify-anything."""
+    from config.env import database_from_url
+
+    options = database_from_url(
+        "postgresql://u:p@db:5432/brahmadatta"
+        "?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem"
+    )["OPTIONS"]
+    assert options["sslmode"] == "verify-full"
+    assert options["sslrootcert"] == "/etc/ssl/ca.pem"
+
+
+def test_a_dsn_with_no_query_string_still_works():
+    """The fix must not make the ordinary case ceremony."""
+    from config.env import database_from_url
+
+    options = database_from_url("postgresql://u:p@db:5432/brahmadatta")["OPTIONS"]
+    assert options == {"connect_timeout": 5}
+
+
+def test_an_unknown_dsn_parameter_refuses_to_boot():
+    """Fail closed, not best-effort.
+
+    Mapping the parameters we know and dropping the rest fixes today's symptom and
+    preserves the mechanism that caused it: the next security-relevant parameter is
+    dropped just as silently. A control that accepts a setting and discards it is worse
+    than one that rejects it, because the operator now believes something false and
+    there is nothing to observe.
+    """
+    from config.env import ImproperlyConfigured, database_from_url
+
+    with pytest.raises(ImproperlyConfigured) as excinfo:
+        database_from_url(
+            "postgresql://u:p@db:5432/brahmadatta?sslmode=require&application_name=x"
+        )
+    assert "application_name" in str(excinfo.value)
+
+
+def test_an_undefined_sslmode_value_refuses_to_boot():
+    """`sslmode=verify` is not a libpq value. Accepting it would read as verification
+    while doing none."""
+    from config.env import ImproperlyConfigured, database_from_url
+
+    with pytest.raises(ImproperlyConfigured):
+        database_from_url("postgresql://u:p@db:5432/brahmadatta?sslmode=verify")
+
+
+def test_the_dsn_error_never_echoes_the_password():
+    """The DSN carries a credential; its error messages must not."""
+    from config.env import ImproperlyConfigured, database_from_url
+
+    with pytest.raises(ImproperlyConfigured) as excinfo:
+        database_from_url("postgresql://u:sup3rsecret@db:5432/b?unknown=1")
+    assert "sup3rsecret" not in str(excinfo.value)
+
+
+def test_the_finale_refuses_to_start_without_database_tls():
+    """SEC-18 part 3. Forwarding `sslmode` closes the silence; it does not make anyone
+    set the parameter. libpq's default is `prefer`, which falls back to plaintext."""
+    from django.core.checks import Error
+
+    from contracts.checks import check_database_tls_in_finale
+
+    postgres = {
+        "ENGINE": "django.db.backends.postgresql",
+        "OPTIONS": {"connect_timeout": 5},
+    }
+
+    with override_settings(APP_ENV="finale", DATABASES={"default": postgres}):
+        messages = check_database_tls_in_finale(None)
+    assert len(messages) == 1
+    assert isinstance(messages[0], Error)
+    assert "prefer" in messages[0].msg
+
+    verified = {
+        "ENGINE": "django.db.backends.postgresql",
+        "OPTIONS": {"connect_timeout": 5, "sslmode": "verify-full"},
+    }
+    with override_settings(APP_ENV="finale", DATABASES={"default": verified}):
+        assert check_database_tls_in_finale(None) == []
+
+
+def test_the_database_tls_check_is_scoped_to_the_finale():
+    """Development and the test suite run on SQLite without ceremony."""
+    from contracts.checks import check_database_tls_in_finale
+
+    with override_settings(APP_ENV="development"):
+        assert check_database_tls_in_finale(None) == []

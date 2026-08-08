@@ -5,7 +5,8 @@ implemented here rather than left to the caller:
 
 * **`gates` is `jsonb`, not five foreign-key rows.** `GateMatrix` is the frozen
   contract; a relational copy of it is a second source of truth that will drift. It is
-  validated on write with the pydantic schema instead — see `VerificationRecord.clean`.
+  validated against that schema on write instead — `VerificationRecord.clean()`, called
+  from `save()`. Test: `missions/tests/test_models.py::test_a_malformed_gate_matrix_is_refused_on_write`.
 * **`MissionEvent.sequence` is gap-free per mission.** Allocation lives in
   `orchestrator.events`, inside the transaction that holds `SELECT … FOR UPDATE` on the
   mission row. Not a database sequence (those gap on rollback) and not `max()+1` without
@@ -24,9 +25,22 @@ bookkeeping. See their field comments, and the guards in `orchestrator/`.
 ## What is stored as JSON, and why that is not laziness
 
 `policy`, `gates`, `model_provenance`, `resource_usage` and `payload` are all frozen
-pydantic schemas already. Storing them as JSON and validating against the schema on
-write keeps exactly one definition of each shape. Every one of them has a `clean()` that
-runs the real validator, so a malformed blob fails on write rather than on read at 3am.
+pydantic schemas already. Storing them as JSON and validating against the schema keeps
+exactly one definition of each shape.
+
+**Which of them are validated on write, precisely** — because an earlier version of this
+docstring claimed all of them and implemented none, which a security review caught and
+which is the standing rule's exact subject:
+
+| Column | On write | On read |
+|---|---|---|
+| `VerificationRecord.gates` + `verdict` | ✅ `clean()`, from `save()` | ✅ `repository.load_verifications` re-derives |
+| `PatchCandidate.model_provenance` | ✅ `clean()`, from `save()` | via the schema when loaded |
+| `Mission.policy`, `MissionEvent.payload`, `Job.payload/result` | ❌ not validated | — |
+
+The two that are validated are the two on the evidence→verdict path. The others are
+descriptive and a malformed one cannot produce a false verdict; they are listed as
+unvalidated rather than quietly implied to be safe.
 """
 
 from __future__ import annotations
@@ -37,6 +51,7 @@ from typing import Any
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from contracts.errors import MissionStateWriteError
 from contracts.enums import (
     AnalyzerTool,
     DiscoveryMethod,
@@ -53,6 +68,7 @@ from contracts.enums import (
     Severity,
     Verdict,
 )
+from missions.lifecycle import LIFECYCLE_FIELDS, lifecycle_write_permitted
 
 
 def _choices(enum_cls: type) -> list[tuple[str, str]]:
@@ -95,8 +111,37 @@ class AppendOnlyModel(models.Model):
         super().save(*args, **kwargs)
 
 
+class MissionQuerySet(models.QuerySet):
+    """Refuses a bulk update of a lifecycle field (SEC-16).
+
+    `Mission.objects.filter(...).update(state=...)` never calls `save()`, so the model
+    guard below does not see it. A reviewer walked `CREATED → VERIFIED` that way in one
+    statement. Both doors have to be shut or neither is.
+    """
+
+    def update(self, **kwargs: Any) -> int:
+        touched = LIFECYCLE_FIELDS & set(kwargs)
+        if touched and not lifecycle_write_permitted():
+            raise MissionStateWriteError(
+                f"Bulk update of mission lifecycle field(s) {sorted(touched)} outside "
+                f"orchestrator.transitions.transition.",
+                details={"fields": sorted(touched)},
+            )
+        return super().update(**kwargs)
+
+
 class Mission(TimestampedModel):
-    """The mission row. The orchestrator is the only writer of `state`."""
+    """The mission row.
+
+    `orchestrator.transitions.transition` is the **only** sanctioned writer of `state`,
+    `paused_from` and `verdict`, and `orchestrator.candidates.record_verification` is
+    the only sanctioned writer of `verification_started_at`. That is enforced here
+    rather than asserted: see `missions/lifecycle.py` for why the convention alone was
+    not enough, and `tests/architecture/test_mission_state_single_writer.py` for the
+    review-time half of the same guarantee.
+    """
+
+    objects = MissionQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
@@ -153,6 +198,34 @@ class Mission(TimestampedModel):
 
     def __str__(self) -> str:  # pragma: no cover - admin/debug convenience
         return f"{self.name} ({self.state})"
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        """Refuse a lifecycle write from outside the orchestrator (SEC-16).
+
+        A new mission is exempt: creating one in `CREATED` writes `state` by definition,
+        and `CREATED` is not a state any guard would have prevented. Everything after
+        that goes through `transition`.
+
+        `update_fields` is honoured when given, so a save that does not name a lifecycle
+        field is not refused for merely having those attributes loaded on the instance.
+        Without `update_fields`, Django writes every column, so the write is treated as
+        touching them.
+        """
+        if not self._state.adding and not lifecycle_write_permitted():
+            update_fields = kwargs.get("update_fields")
+            touched = (
+                LIFECYCLE_FIELDS & set(update_fields)
+                if update_fields is not None
+                else LIFECYCLE_FIELDS
+            )
+            if touched:
+                raise MissionStateWriteError(
+                    f"Write to mission lifecycle field(s) {sorted(touched)} outside "
+                    f"orchestrator.transitions.transition. If this is an ordinary data "
+                    f"edit, pass update_fields naming only the columns it touches.",
+                    details={"mission_id": str(self.pk), "fields": sorted(touched)},
+                )
+        super().save(*args, **kwargs)
 
     @property
     def state_enum(self) -> MissionState:
@@ -491,6 +564,62 @@ class PatchCandidate(models.Model):
         db_table = "patch_candidate"
         ordering = ["created_at"]
 
+    def clean(self) -> None:
+        """Validate the candidate against the frozen schema, and honour the freeze.
+
+        Two properties, both of which used to live only in
+        `orchestrator.candidates.record_patch_candidate`:
+
+        * **The D-046 freeze (SEC-17).** This class's own docstring said "inserting one
+          is not a plain `save()`" — which is a comment, not a mechanism, and
+          `PatchCandidate.objects.create()` on a frozen mission was reachable. The three
+          other models in this file that need a write rule enforce it in `save()`; this
+          one now does too.
+        * **Provenance (D-008).** `MODEL_GENERATED` must carry `ModelProvenance` and
+          `OPERATOR_SUPPLIED` must not. The schema already refuses both; running it here
+          means the ORM cannot write what the contract would reject.
+        """
+        from contracts.schemas.evidence import PatchCandidate as PatchCandidateSchema
+
+        if self._state.adding:
+            frozen_at = (
+                Mission.objects.filter(pk=self.mission_id)
+                .values_list("verification_started_at", flat=True)
+                .first()
+            )
+            if frozen_at is not None:
+                raise ValidationError(
+                    f"Mission {self.mission_id} froze its candidate set at "
+                    f"{frozen_at.isoformat()}; a candidate added now could only be an "
+                    f"attempt to generate until something passes (D-046)."
+                )
+
+        try:
+            PatchCandidateSchema(
+                id=self.id,
+                mission_id=self.mission_id,
+                finding_id=self.finding_id,
+                provenance=self.provenance,
+                model=self.model_provenance,
+                diff=self.diff,
+                files_changed=self.files_changed,
+                lines_changed=self.lines_changed,
+                policy_status=self.policy_status,
+                policy_detail=self.policy_detail,
+                rationale=self.rationale,
+                created_at=self.created_at,
+            )
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError(
+                f"PatchCandidate does not satisfy the frozen contract: {exc}"
+            ) from exc
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
 
 class VerificationRecord(models.Model):
     """A verdict and the deterministic gates that produced it.
@@ -524,6 +653,41 @@ class VerificationRecord(models.Model):
         indexes = [
             models.Index(fields=["mission", "verdict"], name="verification_verdict_idx"),
         ]
+
+    def clean(self) -> None:
+        """Validate `gates` and `verdict` against the frozen schema (SEC-20).
+
+        `repository.load_verifications` already re-derives the verdict on read, so a row
+        that disagrees with itself cannot be *used*. That was not enough: a malformed
+        blob written directly then made every transition raise on load — including
+        `→ CANCELLING` and `→ FAILED`, which exist precisely so that getting out safely
+        is never blocked by the bookkeeping. One bad row wedged the mission.
+
+        Refusing on write is the first half. `orchestrator.transitions.transition`
+        tolerating an unreadable set on the abort paths is the second.
+        """
+        from contracts.schemas.evidence import VerificationRecord as VerificationSchema
+
+        try:
+            VerificationSchema(
+                id=self.id,
+                mission_id=self.mission_id,
+                patch_id=self.patch_id,
+                gates=self.gates,
+                verdict=self.verdict,
+                started_at=self.started_at,
+                finished_at=self.finished_at,
+                worktree_sha256=self.worktree_sha256,
+                resource_usage=self.resource_usage,
+            )
+        except Exception as exc:
+            raise ValidationError(
+                f"VerificationRecord does not satisfy the frozen contract: {exc}"
+            ) from exc
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
 
 
 class ResourceSample(models.Model):

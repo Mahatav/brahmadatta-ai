@@ -10,12 +10,21 @@ exactly where the database says it is and never half-moved.
 `contracts.state_machine.assert_verdict_is_evidenced` is a pure function over the
 records it is handed. It checks that each record is a real `VerificationRecord`, belongs
 to this mission, and derives the verdict being claimed. It cannot check that it was
-shown **all** of them — dropping a `REJECTED` record before the call is invisible from
-inside a function given only what it was given (D-045, and BUG-004(c) which QA
-reproduced by execution).
+shown **all** of them — withholding a record before the call is invisible from inside a
+function given only what it was given (D-045, BUG-004(c)).
 
-No validation in `contracts/` closes that. The completeness guarantee lives at the
-database boundary because that is the only place it can live. See the call site below.
+**Which record matters, corrected.** D-045 and this module's first draft both said "a
+dropped `REJECTED` record". That is wrong, and the round-2 security review §13.1 showed
+why by execution: `derive_mission_verdict` is any-VERIFIED-wins, so
+`[VERIFIED, REJECTED]` and `[VERIFIED]` both derive `VERIFIED` and dropping a rejection
+changes nothing. The record whose removal reaches `VERIFIED` is a
+**`HUMAN_REVIEW_REQUIRED`** one, because that outranks everything.
+
+No validation in `contracts/` closes it either way. The completeness guarantee lives at
+the database boundary because that is the only place it can live — and, since the review
+defeated the convention that used to protect the write itself, `Mission`'s lifecycle
+fields now refuse a write from outside this function (`missions/lifecycle.py`, SEC-16).
+See the call site below.
 """
 
 from __future__ import annotations
@@ -42,8 +51,38 @@ from contracts.state_machine import (
     assert_transition,
     is_terminal,
 )
+from missions.lifecycle import lifecycle_write
 from missions.models import Mission
 from orchestrator import events, repository
+
+#: The two targets that must remain reachable when the mission's own bookkeeping is
+#: unreadable. Mirrors `contracts.state_machine._ABORTS`; imported rather than retyped
+#: would be neater, but that name is private and this list is the *policy*, which is
+#: this module's to state.
+_ABORT_TARGETS: frozenset[MissionState] = frozenset(
+    {MissionState.CANCELLING, MissionState.FAILED}
+)
+
+
+def _tolerate_if_aborting(aborting: bool, fallback, loader, *args):
+    """Run `loader`, substituting `fallback` if it raises *and* we are aborting.
+
+    Deliberately narrow, and deliberately not a `try` around the whole transition. The
+    tolerance applies to **reading the mission's own bookkeeping**, only when the
+    destination is `CANCELLING` or `FAILED`, and only for values an abort does not
+    consult. Anything else — the guards, the state write, the event append — still
+    raises, because an abort that silently half-succeeded would be worse than one that
+    failed loudly.
+
+    It is a helper rather than three inline `try` blocks so that "which reads are
+    tolerant" is one list in one place, visible to the next person who adds a fourth.
+    """
+    try:
+        return loader(*args)
+    except Exception:
+        if not aborting:
+            raise
+        return fallback
 
 
 @dataclass(frozen=True)
@@ -71,14 +110,34 @@ def transition(
     target = MissionState(target)
     now = now or timezone.now()
 
-    with transaction.atomic():
+    with transaction.atomic(), lifecycle_write():
         # The lock. Everything below reads and writes under it, which is what makes
         # the sequence allocation gap-free and the evidence load complete.
+        #
+        # `lifecycle_write()` is what permits the write at the end. It is entered here
+        # and nowhere else, so `Mission.state` cannot be moved by code that did not go
+        # through this function — the convention that used to protect that was defeated
+        # in four lines by a security review (SEC-16). See `missions/lifecycle.py`.
         mission = Mission.objects.select_for_update().get(pk=mission_id)
         current = mission.state_enum
+        aborting = target in _ABORT_TARGETS
 
-        authorization = repository.load_active_authorization(mission, now)
-        snapshot_sha256 = repository.latest_snapshot_sha256(mission)
+        # BUG-020 / SEC-20. On the abort path, *every* read of the mission's own
+        # bookkeeping is tolerant of a row it cannot parse. An abort is authorization-
+        # exempt by the transition table already (`_AUTHORIZATION_EXEMPT_TARGETS`), so a
+        # malformed `Authorization` row is not merely survivable here, it is irrelevant
+        # — and letting it raise would wedge the mission for a value nothing downstream
+        # was going to read.
+        #
+        # The failure this prevents is specific and it happens in front of judges: a
+        # mission stuck on the Command Center on D6 with no way to clear it, because
+        # the thing blocking the exit is the data the exit exists to escape.
+        authorization = _tolerate_if_aborting(
+            aborting, None, repository.load_active_authorization, mission, now
+        )
+        snapshot_sha256 = _tolerate_if_aborting(
+            aborting, None, repository.latest_snapshot_sha256, mission
+        )
 
         # ---------------------------------------------------------------------
         # D-045, the load-bearing part. `verifications` is loaded HERE, by mission
@@ -87,17 +146,34 @@ def transition(
         #
         # `assert_verdict_is_evidenced` can prove every record it is shown is real,
         # belongs to this mission and derives the claimed verdict. It CANNOT prove it
-        # was shown all of them: a caller that quietly drops the REJECTED record
-        # reaches VERIFIED and nothing inside a pure function can tell. That is why
-        # the load lives at the database boundary and not in `contracts/`.
+        # was shown all of them: a caller that withholds one reaches a verdict the
+        # full set would not support, and nothing inside a pure function can tell.
+        # (The record whose removal reaches VERIFIED is a HUMAN_REVIEW_REQUIRED one,
+        # not a REJECTED one — `derive_mission_verdict` is any-VERIFIED-wins, so
+        # dropping a REJECTED record is a no-op. The original D-045 framing had this
+        # backwards; corrected by the round-2 security review §13.1.)
         #
         # If a future refactor moves this load out of the transaction, or lets a
         # caller pass the records in, invariant B ("no verdict against the evidence")
         # silently becomes "no verdict without *some* evidence" — which is a
         # different and much weaker claim, with no test failure to announce it.
         # `orchestrator/tests/test_verdict_completeness.py` is the test that fails.
+        #
+        # It is loaded UNCONDITIONALLY and must stay that way. Making the load
+        # conditional on the target state would reopen exactly this hole. The abort
+        # path below therefore tolerates an *unreadable* set rather than skipping the
+        # load — a distinction that matters, because the first is about a corrupted
+        # row and the second would be about trusting the caller's destination.
         # ---------------------------------------------------------------------
-        verifications = repository.load_verifications(mission.id)
+        #
+        # Aborts do not consult evidence: `assert_verdict_is_evidenced` returns
+        # immediately for any target that is not a verdict state, so an empty list on
+        # the abort path changes no decision it would otherwise make. For every other
+        # target the failure propagates, because a verdict must never be derived from a
+        # set we could not read.
+        verifications = _tolerate_if_aborting(
+            aborting, [], repository.load_verifications, mission.id
+        )
 
         assert_transition(
             current,
