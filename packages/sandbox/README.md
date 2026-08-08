@@ -42,6 +42,8 @@ pytest packages/sandbox/tests -q
 | A CPU budget stops a spinner, reported as `CPU` not as a bare signal | `test_cpu_limit_stops_a_spinner` |
 | A wall-clock timeout fires and is reported, not hung | `test_wall_clock_timeout_is_reported_not_hung` |
 | The timeout kills grandchildren — no orphans | `test_timeout_kills_grandchildren_leaving_no_orphans` |
+| The timeout kills a grandchild that detached via `setsid()` (SEC-33, Linux) | `test_timeout_kills_a_grandchild_that_detaches_via_setsid` |
+| A file-size limit is reported as `FILE_SIZE`, not `NONE` (SEC-35) | `test_file_size_limit_is_reported_as_file_size_not_none` |
 | Output is capped rather than buffered without limit | `test_output_is_capped` |
 | Cleanup runs on success, on failure, and on cancel | `test_cleanup_on_success`, `test_cleanup_on_failure`, `test_cleanup_on_cancel` |
 | Cancel from another thread stops a running command | `test_cancel_stops_a_running_command_from_another_thread` |
@@ -75,6 +77,62 @@ the per-run, after-the-fact record of whether the `setrlimit` call itself succee
 *this* command. They ask different questions and `test_limits_applied_agrees_with_probe_limits_on_memory`
 checks that, on this kernel, they agree.
 
+### A detached grandchild does not escape the timeout (SEC-33)
+
+`killpg()` only reaches processes still in the child's process group. A process that
+calls `os.setsid()` — deliberately, to survive its parent, or as a side effect of a
+daemonizing library a fuzz target happens to link against — starts a **new** session and
+process group and is invisible to `killpg()` from that instant on, while remaining, in
+every other sense the kernel tracks, this process's descendant.
+
+`cybersecurity`'s review of this package found it, reproduced it directly (a detached
+grandchild confirmed alive, still running, after full teardown), and it mattered more
+than an ordinary finding: the CTO's D-053 ruling cited `test_timeout_kills_grandchildren_leaving_no_orphans`
+— "no orphans" — as the decisive reason this implementation won over a rival one, and
+that test covered only the cooperative case.
+
+The fix does not need process groups at all. `setsid()` changes a process's session and
+process group id; it cannot and does not change its **parent** process id — that is
+fixed by the kernel at fork time and survives detachment intact. So `_kill_group`:
+
+1. Walks `/proc` by parent id and **snapshots** every descendant of the jailed process
+   *before* touching anything. This ordering is load-bearing, not incidental: once the
+   direct child dies and is reaped, a detached grandchild's parent-id link is gone too
+   — the kernel reparents it to init (or whatever subreaper owns the pid namespace) the
+   moment its recorded parent exits, and walking `/proc` *after* that finds nothing,
+   because there is nothing left to find by that link.
+2. Runs the ordinary `killpg()`-based SIGTERM-then-SIGKILL sequence, which still handles
+   everything still in the process group — the common case, and cheaper than a full
+   `/proc` walk for it.
+3. Sweeps the pre-kill snapshot (plus a fresh walk, to catch anything forked during the
+   grace period) and `SIGKILL`s each surviving pid directly, by pid, independent of
+   whatever group or session it has put itself in.
+
+This sweep is **Linux-only** (`/proc/*/stat`). That is the platform it is tested on and
+the platform it needs to hold on — #81 exists for the D3 gate, which runs on the finale's
+Linux stack. On another platform `_kill_group` is the process-group kill alone, and that
+gap is stated here rather than narrowed silently.
+
+**What it still does not catch:** a process that double-forks to reparent itself under
+init directly, rather than merely calling `setsid()`. That changes the parent id itself,
+not just the group — the exact link this fix depends on — and is a harder problem this
+package does not claim to solve. It would need something closer to `PR_SET_CHILD_SUBREAPER`
+on the orchestrator process itself, or a pid namespace, which starts to look like the
+container boundary #15 exists for rather than a subprocess jail's job.
+
+**A residual, deliberately accepted gap in verification, not in the kill itself:** a
+`SIGKILL`ed descendant that has already reparented away from this jail becomes a zombie
+— a process-table entry awaiting `waitpid()` by whichever process now owns it — until
+that process reaps it. This jail is not that process and cannot reap it; it can only
+confirm the `SIGKILL` was delivered and the target is no longer *running* (checked via
+`/proc/<pid>/stat`'s state field, which distinguishes a zombie from something still
+consuming CPU or memory). A machine with a proper init or subreaper (`docker run --init`,
+systemd, a normal shell) reaps it immediately and it disappears entirely, which is what
+the production deployment gets. A bare process run directly as a container's PID 1 with
+no reaper — the shape of the minimal test harness this bug was reproduced in — leaves it
+as a zombie indefinitely. That is a process-table slot, not CPU or memory, and it is a
+materially different failure than the one this fix closes.
+
 ### Memory is enforced on Linux and not on macOS
 
 `RLIMIT_AS` is set, and on Linux it works: `test_memory_limit_stops_an_allocator` passes
@@ -102,6 +160,11 @@ developer on a Mac does not, and should know it.
   child its own budget. The wall clock is the only limit here that covers the whole group.
 - **`RLIMIT_NPROC` is per user on most kernels**, so it is shared with everything else the
   operator is running. It is a brake on a fork bomb, not a defence against one.
+- **`RLIMIT_FSIZE` bounds one file, not aggregate disk usage (SEC-36).** Twenty files at
+  400 MiB each all individually stay under a 512 MiB `max_file_bytes` policy and still
+  fill a disk this jail does not otherwise guard. Nothing here sums file sizes across a
+  run. `test_file_size_limit_bounds_one_file_not_aggregate_usage` demonstrates the gap
+  directly rather than leaving it as an unverified claim.
 - **`PATH` is inherited**, because a build needs a compiler. It is the largest hole in the
   environment scrubbing and it is deliberate.
 

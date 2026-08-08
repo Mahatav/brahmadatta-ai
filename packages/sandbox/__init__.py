@@ -13,6 +13,7 @@ for anything.
 from packages.sandbox.errors import (
     CancelledError,
     CpuExceededError,
+    FileSizeExceededError,
     JailError,
     JailUnavailableError,
     LimitExceededError,
@@ -28,6 +29,7 @@ __all__ = [
     "ISOLATION_MODE",
     "CancelledError",
     "CpuExceededError",
+    "FileSizeExceededError",
     "Jail",
     "JailError",
     "JailPolicy",

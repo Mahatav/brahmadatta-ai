@@ -89,6 +89,24 @@ class MemoryExceededError(LimitExceededError):
         )
 
 
+class FileSizeExceededError(LimitExceededError):
+    """A single file the command wrote grew past `RLIMIT_FSIZE` (SEC-35).
+
+    Bounds one file, not the jail's aggregate disk usage — several files that each stay
+    under the limit are not caught by this, or by anything else here. See
+    `JailPolicy.max_file_bytes` and `packages/sandbox/README.md`.
+    """
+
+    error_code = "SANDBOX_POLICY_VIOLATION"
+
+    def __init__(self, limit_bytes: int) -> None:
+        super().__init__(
+            LimitKind.FILE_SIZE,
+            f"command tried to write a file past its {limit_bytes // (1024 * 1024)} "
+            f"MiB per-file limit (RLIMIT_FSIZE, SIGXFSZ)",
+        )
+
+
 class CancelledError(JailError):
     """`Jail.cancel()` was called, or the context exited while a command was running."""
 

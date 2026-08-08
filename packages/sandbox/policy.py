@@ -57,8 +57,16 @@ class JailPolicy:
     """How much stdout/stderr is kept. Output beyond this is dropped, not buffered."""
 
     max_file_bytes: int = 512 * MIB
-    """RLIMIT_FSIZE. Stops a runaway log or a pathological build product filling the
-    disk. Sized to leave a normal build's object files well clear."""
+    """RLIMIT_FSIZE. Bounds the size any *single* file the command writes may grow to —
+    a runaway log or one pathological build product. Sized to leave a normal build's
+    object files well clear.
+
+    SEC-36: this is not aggregate disk protection. Twenty files at 400 MiB each would
+    all individually stay under this limit and still fill a disk this jail leaves
+    entirely unguarded against; nothing here sums file sizes across a run. See
+    `packages/sandbox/README.md` and
+    `test_file_size_limit_bounds_one_file_not_aggregate_usage`.
+    """
 
     max_processes: int = 512
     """RLIMIT_NPROC. A brake on fork bombs, not a defence against one — the limit is

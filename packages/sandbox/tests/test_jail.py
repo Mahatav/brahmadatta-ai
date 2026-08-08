@@ -33,6 +33,7 @@ from packages.sandbox import (
 )
 from packages.sandbox.errors import (
     CpuExceededError,
+    FileSizeExceededError,
     JailUnavailableError,
     WallClockExceededError,
 )
@@ -236,6 +237,61 @@ def test_output_is_capped(jail) -> None:
     assert len(result.stdout) <= 4096
 
 
+def test_file_size_limit_is_reported_as_file_size_not_none(jail) -> None:
+    """SEC-35 (cybersecurity review of #113, Medium). `LimitKind.FILE_SIZE` was defined
+    and never produced: `_classify` had no branch for `SIGXFSZ`, the signal
+    `RLIMIT_FSIZE` delivers, so a run genuinely stopped by the per-file limit reported
+    `limit_hit == NONE` — indistinguishable from an unrelated failure, and silently wrong
+    for exactly the property this field exists to name.
+
+    Unlike `RLIMIT_AS`, `RLIMIT_FSIZE` is reliably enforced on both platforms this
+    project runs on — no Darwin skip needed here.
+    """
+    policy = JailPolicy(cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=1 * MIB)
+    with Jail.create(policy) as jail_:
+        result = jail_.run(
+            ["/bin/dd", "if=/dev/zero", "of=toolarge.bin", "bs=1M", "count=50"]
+        )
+    assert result.limit_hit is LimitKind.FILE_SIZE, result.summary()
+    assert result.signal_number == signal.SIGXFSZ
+
+
+def test_file_size_limit_can_be_raised_as_a_specific_error() -> None:
+    policy = JailPolicy(cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=1 * MIB)
+    with Jail.create(policy) as jail_:
+        with pytest.raises(FileSizeExceededError) as excinfo:
+            jail_.run(
+                ["/bin/dd", "if=/dev/zero", "of=toolarge.bin", "bs=1M", "count=50"],
+                raise_on_limit=True,
+            )
+    assert excinfo.value.kind is LimitKind.FILE_SIZE
+    assert "per-file limit" in str(excinfo.value)
+
+
+def test_file_size_limit_bounds_one_file_not_aggregate_usage(jail) -> None:
+    """SEC-36 (cybersecurity review of #113, Low). The docstring on `max_file_bytes`
+    said this stops "a pathological build product filling the disk" — an overclaim.
+    `RLIMIT_FSIZE` bounds the size any *single* file may grow to; several files that
+    each stay under the limit are not caught by it, or by anything else this jail
+    enforces. This test is the demonstration the corrected docstring points at.
+    """
+    policy = JailPolicy(cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=2 * MIB)
+    with Jail.create(policy) as jail_:
+        result = jail_.run(
+            python(
+                """
+                for i in range(20):
+                    with open(f"file-{i}.bin", "wb") as fh:
+                        fh.write(b"x" * 1024 * 1024)  # 1 MiB, under the 2 MiB cap
+                print("wrote 20 files, 20 MiB total, no single file over the limit")
+                """
+            )
+        )
+    assert result.ok, result.summary()
+    assert result.limit_hit is LimitKind.NONE
+    assert "wrote 20 files" in result.stdout
+
+
 # --- no orphans -------------------------------------------------------------------
 
 
@@ -288,6 +344,69 @@ def test_timeout_kills_grandchildren_leaving_no_orphans(tmp_path: Path) -> None:
         f"grandchildren {survivors} outlived the mission. Killing the process group is "
         f"the only thing standing between a timeout and a machine full of orphaned "
         f"compilers."
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the SEC-33 sweep is Linux-only (/proc-based); see _proc_descendants in jail.py",
+)
+def test_timeout_kills_a_grandchild_that_detaches_via_setsid(tmp_path: Path) -> None:
+    """SEC-33 (cybersecurity review of #113, HIGH). `killpg()` only reaches processes
+    still in the child's process group. A process that calls `os.setsid()` — deliberately
+    to survive its parent, or as a side effect of a daemonizing library a fuzz target
+    links against — starts a new session and process group and is invisible to
+    `killpg()` from that instant, while remaining this process's descendant in every
+    other sense the kernel tracks.
+
+    Reproduced directly before the fix: the ordinary-grandchild test above passed while
+    this one failed — the detached process was confirmed alive, still running, after
+    full teardown. This is the test that would have caught it, and the reason the CTO's
+    D-053 ruling — which cited "no orphans" as the decisive reason this implementation
+    won — is now backed by a claim that covers the case a hostile or merely
+    poorly-behaved target can actually reach for, not only the cooperative one.
+    """
+    pidfile = tmp_path / "detached-pid"
+    policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=2.0, kill_grace_seconds=0.5)
+
+    with Jail.create(policy) as jail:
+        result = jail.run(
+            python(
+                f"""
+                import os, sys, time
+                pid = os.fork()
+                if pid == 0:
+                    os.setsid()  # detach into a brand new session and process group
+                    with open({str(pidfile)!r}, "w") as fh:
+                        fh.write(str(os.getpid()))
+                        fh.flush()
+                    time.sleep(600)
+                    sys.exit(0)
+                time.sleep(600)
+                """
+            )
+        )
+
+    assert result.limit_hit is LimitKind.WALL_CLOCK, result.summary()
+
+    for _ in range(50):
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+        time.sleep(0.1)
+    detached_pid = int(pidfile.read_text().strip())
+
+    deadline = time.monotonic() + 10
+    still_alive = True
+    while time.monotonic() < deadline:
+        still_alive = _alive(detached_pid)
+        if not still_alive:
+            break
+        time.sleep(0.2)
+
+    assert not still_alive, (
+        f"the detached descendant (pid {detached_pid}) outlived the mission by escaping "
+        f"the process group. killpg() was never going to reach it; only a parent-id-based "
+        f"sweep, independent of process group membership, can."
     )
 
 

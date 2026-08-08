@@ -70,6 +70,7 @@ from types import TracebackType
 from packages.sandbox.errors import (
     CancelledError,
     CpuExceededError,
+    FileSizeExceededError,
     JailUnavailableError,
     LimitKind,
     MemoryExceededError,
@@ -88,6 +89,101 @@ ISOLATION_MODE = "SUBPROCESS_JAIL"
 _MEASURE_LOCK = threading.Lock()
 
 _MIB = 1024 * 1024
+
+
+def _proc_descendants(root_pid: int) -> set[int]:
+    """Every process still descended from `root_pid`, found by walking `/proc`'s
+    parent-id links rather than by process group or session membership.
+
+    This is what makes the SEC-33 fix work: `os.setsid()` gives a process a new process
+    group and session, escaping `killpg()`, but it cannot and does not change the
+    process's parent id — that is fixed by the kernel at fork time. Walking by ppid finds
+    a detached process anyway.
+
+    Linux only (`/proc/*/stat`). Returns an empty set on any other platform or if `/proc`
+    is unreadable, rather than raising — a caller that cannot do the sweep needs to know
+    that as "found nothing", the same shape as "there was nothing to find", not as a
+    crash in a cleanup path that is often running during error handling already.
+
+    Does not catch a process that double-forks to reparent itself under init — that
+    changes the parent id itself, not just the group, and is a harder problem this
+    function does not claim to solve. See `packages/sandbox/README.md`.
+    """
+    if sys.platform != "linux":
+        return set()
+
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return set()
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            # Gone between listdir() and read() — a race inherent to /proc, not an
+            # error. It simply is not a descendant anymore.
+            continue
+        # `comm` (the second field) is wrapped in parens and can itself contain spaces
+        # or parens, so the reliable split point is the *last* ')' in the line, not the
+        # first whitespace. Everything after it is space-separated, and ppid is field 4
+        # overall, i.e. the second field after that split.
+        after_comm = stat.rpartition(")")[2].split()
+        if len(after_comm) < 2:
+            continue
+        try:
+            ppid = int(after_comm[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+
+    found: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        pid = frontier.pop()
+        for child in children.get(pid, ()):
+            if child not in found:
+                found.add(child)
+                frontier.append(child)
+    return found
+
+
+def _pid_running(pid: int) -> bool:
+    """Is this pid still doing something — running, not exited-but-unreaped?
+
+    A zombie (`/proc/<pid>/stat` state `Z`) has already terminated; the entry left
+    behind is bookkeeping for whichever process now owns it to collect with
+    `waitpid()`. `_sweep_detached_descendants` only ever reaches a pid after this jail's
+    own direct child — its original parent — is already dead, so whatever it reparented
+    to (the pid namespace's init, or an ancestor with `PR_SET_CHILD_SUBREAPER` set) is
+    not this jail and never was. SIGKILL already reached a zombie; it holds no CPU, no
+    memory beyond the process-table slot itself, and does nothing further. Reporting one
+    as a surviving orphan would be reporting a property this code cannot affect and does
+    not need to — see `packages/sandbox/README.md` for the residual "zombie slot, not a
+    running process" gap this leaves, and why it is not the same failure as SEC-33.
+
+    Falls back to a plain existence check off Linux, or if `/proc` cannot be read, which
+    is the more conservative answer where the zombie/running distinction is unavailable.
+    """
+    if sys.platform == "linux":
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return False  # no /proc entry at all: not a zombie, just gone
+        state = stat.rpartition(")")[2].split()
+        if state and state[0] == "Z":
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - exists, owned elsewhere
+        return True
+    return True
 
 
 @dataclass
@@ -478,42 +574,76 @@ class Jail:
             os.close(read_fd)
 
     def _kill_group(self, proc: subprocess.Popen[bytes]) -> None:
-        """SIGTERM the group, give it a grace period, then SIGKILL the group.
+        """SIGTERM the group, give it a grace period, SIGKILL the group — then sweep
+        for descendants that detached from the group entirely (SEC-33).
 
-        Killing the *group* rather than the process is the whole point. `cmake --build`
+        Killing the *group* rather than the process is most of the point. `cmake --build`
         is a process that spawns compilers; killing only the parent leaves the compilers
         running and the build directory being written to by a mission that has ended.
+
+        It is not the whole point, and treating it as such was a real gap. A process that
+        calls `os.setsid()` — deliberately, to survive its parent, or as an incidental
+        side effect of a daemonizing library a fuzz target links against — starts a *new*
+        session and process group and becomes invisible to `killpg()` from that instant.
+        This was found by review, reproduced directly (a detached grandchild confirmed
+        alive after full teardown), and is exactly the shape a hostile or just
+        poorly-behaved target can take — which is the whole reason this method exists.
+
+        The fix does not need process groups at all: `setsid()` changes the process
+        group and session id, but it does not and cannot change the parent process id —
+        that is fixed at fork time by the kernel. So after the group-based kill, a second
+        sweep walks `/proc` by parent id, finds every descendant of `proc.pid` regardless
+        of which group or session it has put itself in, and kills each one directly.
+
+        This sweep is Linux-only. That is where it is tested and where it matters — #81
+        exists for the D3 gate, which runs on the finale's Linux stack, not for a
+        developer's Mac. On another platform this call is the group-kill only, and that
+        gap is documented here and in the README rather than silently narrowed.
+
+        Ordering matters and cost a debugging pass to get right: the snapshot below has
+        to happen *before* the group is killed, not after. Once the direct child dies and
+        is reaped, a detached grandchild's parent-id link — the only thing the sweep has
+        to go on — is gone too: the kernel reparents it to init (or whatever subreaper
+        owns this pid namespace) the moment its recorded parent exits, and at that point
+        walking `/proc` for descendants of `proc.pid` finds nothing, because there no
+        longer are any. Snapshotting first, while the tree is still intact, is what makes
+        the sweep able to find a process the group-kill was never going to reach anyway.
         """
+        known_descendants = _proc_descendants(proc.pid)
+
         try:
             pgid = os.getpgid(proc.pid)
         except ProcessLookupError:
-            return
+            pgid = None
 
-        for sig, wait_for in (
-            (signal.SIGTERM, self._policy.kill_grace_seconds),
-            (signal.SIGKILL, 5.0),
-        ):
-            try:
-                os.killpg(pgid, sig)
-            except ProcessLookupError:
-                return
-            except OSError as exc:  # pragma: no cover - defensive
-                if exc.errno != errno.ESRCH:
-                    raise
-                return
-            try:
-                proc.wait(timeout=wait_for)
-            except subprocess.TimeoutExpired:
-                continue
-            # The direct child is reaped, but a grandchild can outlive it. Keep signalling
-            # until the group is genuinely empty.
-            if not self._group_alive(pgid):
-                return
-        # Last resort: one more SIGKILL, then report what is left rather than pretending.
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+        if pgid is not None:
+            for sig, wait_for in (
+                (signal.SIGTERM, self._policy.kill_grace_seconds),
+                (signal.SIGKILL, 5.0),
+            ):
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    break
+                except OSError as exc:  # pragma: no cover - defensive
+                    if exc.errno != errno.ESRCH:
+                        raise
+                    break
+                try:
+                    proc.wait(timeout=wait_for)
+                except subprocess.TimeoutExpired:
+                    continue
+                if not self._group_alive(pgid):
+                    break
+            else:
+                # Last resort inside the group: one more SIGKILL before moving on to the
+                # sweep below, rather than giving up on the ordinary case.
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+        self._sweep_detached_descendants(proc.pid, known_descendants)
 
     @staticmethod
     def _group_alive(pgid: int) -> bool:
@@ -525,6 +655,50 @@ class Jail:
         except PermissionError:  # pragma: no cover - group exists, owned elsewhere
             return True
         return True
+
+    def _sweep_detached_descendants(self, root_pid: int, known: set[int]) -> None:
+        """Kill every process still descended from `root_pid`, independent of process
+        group or session. See `_kill_group` for why this exists (SEC-33) and why `known`
+        — a snapshot taken before the group was touched — is required rather than
+        optional: a fresh `/proc` walk *after* the direct child is dead finds nothing,
+        because a detached descendant has by then reparented away from `root_pid`.
+
+        Two sources are combined on every pass, not just `known`: a currently-linked walk
+        also runs, to catch anything that forked *after* the snapshot was taken (during
+        the grace period, for instance) and is still attached to `root_pid` at that
+        moment. Between the two, a straggler has to actively evade both a point-in-time
+        snapshot and continuous re-observation to survive — which is a materially
+        different claim than "was in the process group when we checked".
+        """
+        if sys.platform != "linux":
+            return
+
+        pending = set(known)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            pending |= _proc_descendants(root_pid)
+            pending.discard(root_pid)
+            alive = {pid for pid in pending if _pid_running(pid)}
+            if not alive:
+                return
+            for pid in alive:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
+            pending = alive
+            time.sleep(0.1)
+
+        # One last check so a caller inspecting the outcome (a test, an evidence record)
+        # sees the true state rather than an assumption that the loop above succeeded.
+        pending |= _proc_descendants(root_pid)
+        remaining = {pid for pid in pending if pid != root_pid and _pid_running(pid)}
+        if remaining:  # pragma: no cover - only reachable if SIGKILL itself is refused
+            raise JailUnavailableError(
+                f"could not clear detached descendant(s) {sorted(remaining)} of pid "
+                f"{root_pid} after the timeout sweep; refusing to report a clean "
+                f"teardown that did not happen"
+            )
 
     def _read_capped(self, path: Path) -> tuple[str, bool]:
         try:
@@ -560,6 +734,12 @@ class Jail:
             return LimitKind.WALL_CLOCK
         if signal_number == signal.SIGXCPU:
             return LimitKind.CPU
+        if signal_number == signal.SIGXFSZ:
+            # SEC-35: RLIMIT_FSIZE's soft and hard limits are set to the same value
+            # (unlike RLIMIT_CPU's staged soft-then-hard), so exceeding it always raises
+            # this signal directly rather than going through an intermediate warning
+            # stage. Nothing else in this process sends SIGXFSZ, so it is unambiguous.
+            return LimitKind.FILE_SIZE
         if signal_number == signal.SIGKILL:
             # RLIMIT_CPU's hard limit lands one second after the soft one and arrives as
             # SIGKILL. Nothing else here sends one.
@@ -597,6 +777,13 @@ class Jail:
                 self._policy.memory_bytes,
                 f"peak {result.peak_memory_mb:.0f} MB, exit {result.exit_code}",
             )
+        if kind is LimitKind.FILE_SIZE:
+            return FileSizeExceededError(self._policy.max_file_bytes)
+        # LimitKind.OUTPUT has no dedicated exception type: it is not a resource the
+        # command was stopped from consuming, it is our own cap on what we kept from
+        # what it already produced — the command itself may have run to completion.
+        # `raise_on_limit` on an OUTPUT-classified result falls back here rather than
+        # inventing a claim ("timed out") that would be actively wrong.
         return WallClockExceededError(self._policy.wall_clock_seconds)
 
 
