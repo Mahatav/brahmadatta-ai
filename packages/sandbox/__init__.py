@@ -10,7 +10,7 @@ Two backends are planned. This package currently ships one:
 for anything.
 """
 
-from services.sandbox.errors import (
+from packages.sandbox.errors import (
     CancelledError,
     CpuExceededError,
     JailError,
@@ -21,8 +21,8 @@ from services.sandbox.errors import (
     PathEscapeError,
     WallClockExceededError,
 )
-from services.sandbox.jail import ISOLATION_MODE, Jail, JailResult, probe_limits
-from services.sandbox.policy import JailPolicy
+from packages.sandbox.jail import ISOLATION_MODE, Jail, JailResult, probe_limits
+from packages.sandbox.policy import JailPolicy
 
 __all__ = [
     "ISOLATION_MODE",

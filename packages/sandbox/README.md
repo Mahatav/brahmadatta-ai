@@ -1,4 +1,4 @@
-# services/sandbox — subprocess jail (#81)
+# packages/sandbox — subprocess jail (#81)
 
 A working-directory jail, resource limits, and a hard timeout that kills the whole
 process group. Enough to build and test the demo target for the D3 gate.
@@ -30,7 +30,7 @@ fuzz campaign in it.
 Every row is claimed because a named test demonstrates it. Run them:
 
 ```sh
-pytest services/sandbox/tests -q
+pytest packages/sandbox/tests -q
 ```
 
 | Property | Demonstrated by |
@@ -49,6 +49,31 @@ pytest services/sandbox/tests -q
 | The environment is scrubbed to an allowlist | `test_environment_is_scrubbed_to_the_allowlist` |
 | A jailed run reports `SUBPROCESS_JAIL`, never the container mode | `test_result_reports_the_isolation_mode_honestly` |
 | The real demo target configures, builds and passes 8/8 ctest inside it | `test_demo_target_configures_builds_and_tests_inside_the_jail` |
+| `limits_applied` is a real per-run measurement, not a platform guess | `test_limits_applied_is_a_real_per_run_measurement` |
+| `limits_applied` agrees with `probe_limits()` on this kernel | `test_limits_applied_agrees_with_probe_limits_on_memory` |
+| `limits_applied` is captured even for a command killed immediately | `test_limits_applied_survives_a_command_that_is_immediately_killed` |
+
+### `limits_applied` — a per-run record, not a platform guess (D-054)
+
+`JailResult.limits_applied` answers "did *this run* have the protection it claims to
+have", for the two limits that can be silently refused: `memory_bytes` (`RLIMIT_AS`) and
+`max_processes` (`RLIMIT_NPROC`). It is populated from the real outcome of each
+`setrlimit()` call made inside the child, before it execs — never inferred from
+`sys.platform`.
+
+The mechanism, because it crosses a fork: a pipe is opened before the child forks; inside
+`preexec_fn` — which runs after `fork()` but before `exec()`, the only window where Python
+code in the child still exists — each `setrlimit()` call is wrapped in its own
+`try`/`except`, the outcome recorded, and the resulting `{"memory_bytes": bool,
+"max_processes": bool}` written to the pipe and the write end closed before `exec()`
+replaces the process image. The parent reads it back once `Popen()` returns.
+
+This is deliberately not the same thing as `probe_limits()`. That function is a
+standalone, ahead-of-any-mission diagnostic: it runs synthetic programs that try to
+*exceed* each limit and observes whether behaviour actually changed. `limits_applied` is
+the per-run, after-the-fact record of whether the `setrlimit` call itself succeeded for
+*this* command. They ask different questions and `test_limits_applied_agrees_with_probe_limits_on_memory`
+checks that, on this kernel, they agree.
 
 ### Memory is enforced on Linux and not on macOS
 
@@ -63,7 +88,7 @@ than deleted.
 Do not take either on trust:
 
 ```python
-from services.sandbox import probe_limits
+from packages.sandbox import probe_limits
 probe_limits()   # {'cpu_seconds': True, 'memory_bytes': ..., 'wall_clock_seconds': True}
 ```
 
@@ -83,7 +108,7 @@ developer on a Mac does not, and should know it.
 ## Using it
 
 ```python
-from services.sandbox import Jail, JailPolicy
+from packages.sandbox import Jail, JailPolicy
 
 with Jail.create(JailPolicy(wall_clock_seconds=900)) as jail:
     shutil.copytree(source, jail.root / "src")
@@ -100,7 +125,9 @@ with Jail.create(JailPolicy(wall_clock_seconds=900)) as jail:
 `JailResult` carries measured `wall_seconds`, `cpu_seconds` and `peak_memory_mb` — the
 numbers `ResourceUsage` in the evidence bundle wants, and the ones the Core's resource
 rail displays. They are measurements; there is nothing here that produces a plausible
-number when it cannot produce a real one.
+number when it cannot produce a real one. `limits_applied` belongs in the evidence bundle
+too, next to `isolation_mode`: a `SUBPROCESS_JAIL` run that could not actually set its
+memory ceiling on this kernel should say so in the record, not just in a README.
 
 `run(..., raise_on_limit=True)` turns a limit into `CpuExceededError`,
 `WallClockExceededError` or `MemoryExceededError` instead of a result to branch on. Each

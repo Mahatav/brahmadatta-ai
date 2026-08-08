@@ -1,7 +1,7 @@
 """What the subprocess jail actually enforces.
 
 The rule this file exists to satisfy: a property is described as enforced only when a
-named test demonstrates it. Every claim in `services/sandbox/README.md` points at a test
+named test demonstrates it. Every claim in `packages/sandbox/README.md` points at a test
 here. Where a property could not be demonstrated on this platform, the test says so out
 loud with `skipif` and a reason, rather than being quietly dropped.
 
@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from services.sandbox import (
+from packages.sandbox import (
     CancelledError,
     Jail,
     JailPolicy,
@@ -31,7 +31,7 @@ from services.sandbox import (
     PathEscapeError,
     probe_limits,
 )
-from services.sandbox.errors import (
+from packages.sandbox.errors import (
     CpuExceededError,
     JailUnavailableError,
     WallClockExceededError,
@@ -137,6 +137,63 @@ def test_memory_limit_stops_an_allocator() -> None:
         )
     assert result.limit_hit is LimitKind.MEMORY, result.summary()
     assert "allocated" not in result.stdout
+    # D-054: the per-run record has to agree with what was just observed to happen.
+    # `setrlimit` succeeding is what let the allocator get stopped at all.
+    assert result.limits_applied.get("memory_bytes") is True, result.limits_applied
+
+
+# --- D-054: limits_applied is measured per run, never guessed from the platform ---
+
+
+def test_limits_applied_is_a_real_per_run_measurement(jail) -> None:
+    """The field exists precisely because a name is not a measurement (D-054). Every
+    key is populated from the real outcome of a `setrlimit()` call made in this run's
+    own child process, carried back across the fork boundary — not computed from
+    `sys.platform` before any such call is attempted.
+    """
+    result = jail.run(["/bin/echo", "hello"])
+    assert result.ok, result.summary()
+    assert set(result.limits_applied) == {"memory_bytes", "max_processes"}
+    assert all(isinstance(value, bool) for value in result.limits_applied.values())
+
+
+@pytest.mark.skipif(
+    not IS_DARWIN,
+    reason="this is the Darwin-specific half of the memory_bytes measurement; Linux is "
+    "covered by test_memory_limit_stops_an_allocator asserting the same field",
+)
+def test_limits_applied_matches_measured_darwin_behaviour(jail) -> None:
+    """Pin the actual value observed on this platform, so a future macOS release that
+    starts honouring RLIMIT_AS is discovered by a failing assertion — not silently, and
+    not by trusting a comment that could go stale the day it changes."""
+    result = jail.run(["/bin/echo", "hello"])
+    assert result.limits_applied["memory_bytes"] is False, (
+        "if this is now True, Darwin has started enforcing RLIMIT_AS: remove the skip "
+        "on test_memory_limit_stops_an_allocator and update the README's platform table"
+    )
+
+
+def test_limits_applied_agrees_with_probe_limits_on_memory(jail) -> None:
+    """Two independent measurements of the same kernel property — one per-run
+    (`limits_applied`, from a real `setrlimit()` call), one a standalone diagnostic
+    (`probe_limits()`, from actually exceeding the limit and observing the result).
+    They ask different questions ("did the call succeed" vs "did behaviour change") but
+    on this kernel they had better agree, or one of them is measuring the wrong thing.
+    """
+    result = jail.run(["/bin/echo", "hello"])
+    findings = probe_limits()
+    assert result.limits_applied["memory_bytes"] == findings["memory_bytes"]
+
+
+def test_limits_applied_survives_a_command_that_is_immediately_killed() -> None:
+    """The measurement is taken before the wall-clock timeout can possibly fire — a
+    command that gets killed the instant it starts must still report what its own
+    setrlimit calls did, because those ran before the kill, not after."""
+    policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=0.2, kill_grace_seconds=0.2)
+    with Jail.create(policy) as jail:
+        result = jail.run(python("import time; time.sleep(30)"))
+    assert result.limit_hit is LimitKind.WALL_CLOCK
+    assert set(result.limits_applied) == {"memory_bytes", "max_processes"}
 
 
 def test_probe_limits_reports_what_this_kernel_does() -> None:

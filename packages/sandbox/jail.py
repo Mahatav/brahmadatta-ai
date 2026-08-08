@@ -28,7 +28,7 @@ What "enforced" means here
 --------------------------
 
 Every property below is claimed only where a named test demonstrates it, and the tests
-live in `services/sandbox/tests/test_jail.py`:
+live in `packages/sandbox/tests/test_jail.py`:
 
 | Property | Test |
 |---|---|
@@ -41,6 +41,7 @@ live in `services/sandbox/tests/test_jail.py`:
 | output is capped, not buffered | `test_output_is_capped` |
 | cleanup on success / failure / cancel | `test_cleanup_*` |
 | the environment is scrubbed | `test_environment_is_scrubbed_to_the_allowlist` |
+| `limits_applied` is measured per run, not guessed from the platform (D-054) | `test_limits_applied_is_a_real_per_run_measurement` |
 
 Anything not in that table is *intended*, not enforced. In particular this module does
 **not** prevent a running process from reading outside the jail, opening a network
@@ -50,8 +51,10 @@ socket, or exhausting a limit the kernel applies per-user rather than per-proces
 from __future__ import annotations
 
 import errno
+import json
 import os
 import resource
+import select
 import shutil
 import signal
 import subprocess
@@ -64,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 
-from services.sandbox.errors import (
+from packages.sandbox.errors import (
     CancelledError,
     CpuExceededError,
     JailUnavailableError,
@@ -73,7 +76,7 @@ from services.sandbox.errors import (
     PathEscapeError,
     WallClockExceededError,
 )
-from services.sandbox.policy import JailPolicy
+from packages.sandbox.policy import JailPolicy
 
 #: Reported into the evidence bundle. Mirrors `contracts.enums.IsolationMode`, as a
 #: string so this package stays importable without Django.
@@ -104,6 +107,20 @@ class JailResult:
     cpu_seconds: float
     peak_memory_mb: float
     limit_hit: LimitKind
+    limits_applied: dict[str, bool] = field(default_factory=dict)
+    """Which resource limits actually took effect in *this* run — `{"memory_bytes":
+    True, "max_processes": False}` and so on. Measured, not inferred: the child records
+    the real outcome of each `setrlimit()` call before it execs, and that outcome is
+    carried back across the fork boundary on the same pipe the exit status already
+    crosses (D-054). Never derived from the platform name — a locked-down CI runner can
+    refuse a limit for reasons that have nothing to do with the OS, and a name is not a
+    measurement.
+
+    Empty means the measurement itself could not be recovered (the child never reached
+    that point), not that nothing was applied. `probe_limits()` is the pre-flight,
+    ahead-of-any-mission version of the same question; this is the per-run,
+    after-the-fact record — they answer different questions and both are worth having.
+    """
     isolation_mode: str = ISOLATION_MODE
     tool_versions: dict[str, str] = field(default_factory=dict)
 
@@ -273,7 +290,9 @@ class Jail:
         started = time.monotonic()
         with _MEASURE_LOCK:
             before = resource.getrusage(resource.RUSAGE_CHILDREN)
-            proc, timed_out = self._spawn_and_wait(argv, workdir, env, out_path, err_path)
+            proc, timed_out, limits_applied = self._spawn_and_wait(
+                argv, workdir, env, out_path, err_path
+            )
             after = resource.getrusage(resource.RUSAGE_CHILDREN)
         wall = time.monotonic() - started
 
@@ -306,6 +325,7 @@ class Jail:
             cpu_seconds=round(max(0.0, cpu), 3),
             peak_memory_mb=round(peak_mb, 1),
             limit_hit=limit,
+            limits_applied=limits_applied,
         )
 
         if raise_on_limit and limit is not LimitKind.NONE:
@@ -323,8 +343,18 @@ class Jail:
         env: dict[str, str],
         out_path: Path,
         err_path: Path,
-    ) -> tuple[subprocess.Popen[bytes], bool]:
+    ) -> tuple[subprocess.Popen[bytes], bool, dict[str, bool]]:
         policy = self._policy
+
+        # D-054: report which limits actually took effect in *this* run, from the real
+        # outcome of each setrlimit() call — never from the platform name. `preexec_fn`
+        # runs in the forked child, after fork() but before exec(), and exec() replaces
+        # the process image, so nothing computed here survives past this function
+        # returning except what is written out before that happens. This pipe is the
+        # only channel, and it is created before the fork so both ends exist on both
+        # sides of it.
+        limits_r, limits_w = os.pipe()
+        os.set_inheritable(limits_w, True)
 
         def apply_limits() -> None:  # pragma: no cover - runs in the forked child
             # New session, so the child is a process-group leader and `killpg` reaches
@@ -339,21 +369,32 @@ class Jail:
             )
             resource.setrlimit(resource.RLIMIT_FSIZE, (policy.max_file_bytes,) * 2)
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            for limit_name, value in (
-                ("RLIMIT_AS", policy.memory_bytes),
-                ("RLIMIT_NPROC", policy.max_processes),
+
+            applied: dict[str, bool] = {}
+            for limit_name, key, value in (
+                ("RLIMIT_AS", "memory_bytes", policy.memory_bytes),
+                ("RLIMIT_NPROC", "max_processes", policy.max_processes),
             ):
                 limit = getattr(resource, limit_name, None)
                 if limit is None:
+                    applied[key] = False
                     continue
                 try:
                     resource.setrlimit(limit, (value, value))
+                    applied[key] = True
                 except (ValueError, OSError):
                     # Some kernels refuse to lower these for an unprivileged process, or
                     # do not honour them at all. Failing the whole run over it would be
-                    # worse than proceeding: the wall clock still applies, and
-                    # `probe_limits()` is how a caller finds out what this kernel does.
-                    pass
+                    # worse than proceeding: the wall clock still applies regardless, and
+                    # this is exactly the outcome `applied` exists to report honestly —
+                    # rather than assuming it from `sys.platform`, which is the mistake
+                    # this field exists to not repeat.
+                    applied[key] = False
+
+            try:
+                os.write(limits_w, json.dumps(applied).encode())
+            finally:
+                os.close(limits_w)
 
         with open(out_path, "wb") as out, open(err_path, "wb") as err:
             try:
@@ -366,11 +407,24 @@ class Jail:
                     stderr=err,
                     preexec_fn=apply_limits,
                     close_fds=True,
+                    pass_fds=(limits_w,),
                 )
             except FileNotFoundError as exc:
+                os.close(limits_r)
+                os.close(limits_w)
                 raise JailUnavailableError(
                     f"{argv[0]!r} was not found on PATH inside the jail"
                 ) from exc
+            except BaseException:
+                os.close(limits_r)
+                os.close(limits_w)
+                raise
+
+        # Our own copy of the write end has to close too, or a read below can block
+        # waiting for an EOF that only arrives once every writer has closed — and the
+        # parent process holds one whether or not the child ever gets to write.
+        os.close(limits_w)
+        limits_applied = self._read_limits_applied(limits_r)
 
         with self._live_lock:
             self._live = proc
@@ -385,7 +439,43 @@ class Jail:
             with self._live_lock:
                 self._live = None
 
-        return proc, timed_out
+        return proc, timed_out, limits_applied
+
+    @staticmethod
+    def _read_limits_applied(read_fd: int) -> dict[str, bool]:
+        """Read the child's real `setrlimit` outcome back across the fork boundary.
+
+        By the time `Popen()` returns to the caller, the child has already run
+        `apply_limits()` and either exec'd or failed to — `subprocess` itself uses an
+        internal pipe to confirm exactly that before returning control to the parent, so
+        the write on the child's side has already happened. This still bounds the read
+        with a short deadline rather than trusting that guarantee unconditionally: a
+        malformed protocol on this end must never be able to hang a build.
+        """
+        try:
+            ready, _, _ = select.select([read_fd], [], [], 2.0)
+            if not ready:
+                return {}
+            chunks = []
+            while True:
+                ready, _, _ = select.select([read_fd], [], [], 0.5)
+                if not ready:
+                    break
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            if not raw:
+                return {}
+            parsed = json.loads(raw.decode())
+            if not isinstance(parsed, dict):
+                return {}
+            return {str(k): bool(v) for k, v in parsed.items()}
+        except (OSError, ValueError):
+            return {}
+        finally:
+            os.close(read_fd)
 
     def _kill_group(self, proc: subprocess.Popen[bytes]) -> None:
         """SIGTERM the group, give it a grace period, then SIGKILL the group.

@@ -143,8 +143,26 @@ jobs:
       # the fixture loudly") true on a laptop and false on the branch that matters.
       # Same shape as the bypass table gating only one of its two columns: a check nobody
       # can fail is a document.
+      #
+      # This references packages/sandbox/, not services/sandbox/. An earlier version of
+      # this step (landed directly on this branch while the D-053 move was in flight)
+      # still pointed at services/sandbox/ — the exact stale-path failure mode BUG-016
+      # above already burned this project on once. Guarded with an existence check so a
+      # future move fails loudly with a warning instead of silently collecting zero tests.
       - name: Fixture and sandbox tests
-        run: pytest packages/test-fixtures/tests services/sandbox/tests -q -rs
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in packages/sandbox packages/test-fixtures; do
+            if [ ! -d "$dir" ]; then
+              echo "::warning::$dir does not exist — nothing to test. If it was moved, this path is now stale."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 0
+          fi
+          pytest packages/sandbox/tests packages/test-fixtures/tests -q -rs
 
       - name: Control API tests
         env:

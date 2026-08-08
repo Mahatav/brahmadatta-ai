@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from services.sandbox import Jail, JailPolicy, LimitKind
+from packages.sandbox import Jail, JailPolicy, LimitKind
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TARGET = REPO_ROOT / "demo" / "repositories" / "pktcfg"
