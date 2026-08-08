@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from api.api import api
-from tools.export_openapi import OUTPUT_PATH, _stringify_keys, render
+from tools.export_openapi import (
+    CANONICAL_REASON_PHRASES,
+    OUTPUT_PATH,
+    _STDLIB_REASON_PHRASES,
+    _stringify_keys,
+    render,
+)
 
 #: P0 surface. Cut endpoints are asserted absent further down, so nobody quietly
 #: re-adds a CUT feature through the API layer.
@@ -188,3 +194,103 @@ def test_confidence_appears_only_on_model_provenance(schema: dict):
         and name != "ModelProvenance"
     }
     assert not offenders, f"confidence leaked into: {offenders}"
+
+
+# --- #103: the dump must not depend on which interpreter rendered it --------------
+
+
+def test_no_response_description_is_an_interpreter_supplied_reason_phrase(schema: dict):
+    """The regression test for #103.
+
+    django-ninja labels responses from `http.client.responses`, which is the standard
+    library's `HTTPStatus` table — and that table changes between Python releases (3.13
+    renamed four phrases, one of which appears 23 times here). A dump carrying a phrase
+    straight from the running interpreter is not deterministic, and a drift check that
+    fires on non-drift is one people learn to mute.
+
+    Read from the *rendered* document rather than from the raw schema, because
+    rendering is where the pinning happens.
+    """
+    rendered = json.loads(render(schema))
+    offenders = []
+    for path, operations in rendered["paths"].items():
+        for method, operation in operations.items():
+            for status, response in operation["responses"].items():
+                description = response.get("description")
+                stdlib = _STDLIB_REASON_PHRASES.get(int(status))
+                pinned = CANONICAL_REASON_PHRASES.get(int(status))
+                if description == stdlib and description != pinned:
+                    offenders.append(f"{method.upper()} {path} -> {status}")
+    assert not offenders, (
+        f"these responses carry this interpreter's reason phrase rather than the "
+        f"pinned one: {offenders}"
+    )
+
+
+def test_every_status_in_the_document_has_a_pinned_reason_phrase(schema: dict):
+    """A new endpoint with an unpinned status must fail the export, not silently
+    reopen #103 on whichever interpreter runs next."""
+    rendered = json.loads(render(schema))
+    statuses = {
+        int(status)
+        for operations in rendered["paths"].values()
+        for operation in operations.values()
+        for status in operation["responses"]
+    }
+    unpinned = {
+        status
+        for status in statuses
+        if status in _STDLIB_REASON_PHRASES
+        and status not in CANONICAL_REASON_PHRASES
+    }
+    assert not unpinned, f"add to CANONICAL_REASON_PHRASES: {sorted(unpinned)}"
+
+
+def test_the_pinned_phrases_survive_a_renamed_stdlib_phrase(schema: dict, monkeypatch):
+    """Simulate the 3.13 rename directly: change the interpreter's table under the
+    exporter and assert the rendered document does not move.
+
+    This is the property a version pin in `requirements.txt` would not have — a pin
+    holds only until someone runs the exporter on a newer interpreter, which is exactly
+    how #103 was found.
+    """
+    before = render(schema)
+
+    # `_STDLIB_REASON_PHRASES` *is* `http.client.responses` — the same dict object
+    # django-ninja reads when it labels a response. Mutating it is therefore a faithful
+    # stand-in for running on an interpreter that renamed the phrase, rather than a
+    # stand-in for our own lookup only.
+    monkeypatch.setitem(_STDLIB_REASON_PHRASES, 422, "Some Future Name For 422")
+    monkeypatch.setitem(_STDLIB_REASON_PHRASES, 409, "Some Future Name For 409")
+
+    regenerated = _stringify_keys(api.get_openapi_schema())
+    assert (
+        regenerated["paths"]["/api/v1/system/health"]["get"]["responses"]["422"][
+            "description"
+        ]
+        == "Some Future Name For 422"
+    ), "the simulation did not take: ninja is not reading the patched table"
+
+    assert render(regenerated) == before
+
+
+def test_an_unpinned_status_raises_rather_than_drifting():
+    from tools.export_openapi import UnpinnedReasonPhrase, _normalize_reason_phrases
+
+    document = {
+        "paths": {
+            "/api/v1/whatever": {
+                "get": {"responses": {"418": {"description": "I'm a Teapot"}}}
+            }
+        }
+    }
+    with pytest.raises(UnpinnedReasonPhrase):
+        _normalize_reason_phrases(document)
+
+
+def test_a_hand_written_description_is_left_alone(schema: dict):
+    """Only phrases the interpreter supplied are replaced; the SSE stream's own
+    description is prose we wrote and must survive untouched."""
+    rendered = json.loads(render(schema))
+    sse = rendered["paths"]["/api/v1/missions/{mission_id}/events"]["get"]
+    assert sse["responses"]["200"]["description"].startswith("Ordered mission event")

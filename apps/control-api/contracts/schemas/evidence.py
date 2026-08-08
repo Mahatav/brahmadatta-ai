@@ -20,6 +20,7 @@ from contracts.enums import (
     DiscoveryMethod,
     FindingCategory,
     FuzzingMode,
+    InferenceMode,
     IsolationMode,
     PatchPolicyStatus,
     PatchProvenance,
@@ -64,6 +65,18 @@ class ModelProvenance(StrictSchema):
     # response instead of generating one live — is the fallback, and it is only
     # honest if the schema can say so. Same rule as D-008: a replayed response is
     # legitimate; claiming it was generated live is not.
+    #
+    # D-049: the replay triple alone was not enough, because *silence* read as live
+    # inference — QA reproduced exactly that (BUG-007 case D1). A replay-mode gateway
+    # that forgot three fields produced a record indistinguishable from a live
+    # generation. `inference_mode` is required and has no default, so the claim has to
+    # be stated either way.
+    inference_mode: InferenceMode = Field(
+        description="LIVE_INFERENCE or REPLAYED_TRANSCRIPT. Required, no default: a "
+        "default here would be the system making a provenance claim on the caller's "
+        "behalf when they said nothing, and every such default should point at the "
+        "weaker claim or not exist. Whatever renders provenance reads this."
+    )
     replayed_from_transcript: str | None = Field(
         default=None,
         max_length=500,
@@ -97,9 +110,26 @@ class ModelProvenance(StrictSchema):
             )
         return self
 
+    @model_validator(mode="after")
+    def _inference_mode_matches_the_replay_fields(self) -> "ModelProvenance":
+        declared_replay = self.inference_mode is InferenceMode.REPLAYED_TRANSCRIPT
+        has_replay = self.replayed_from_transcript is not None
+        if declared_replay and not has_replay:
+            raise ValueError(
+                "REPLAYED_TRANSCRIPT must name the transcript it was replayed from, "
+                "when it was captured, and its digest — otherwise the claim is not "
+                "checkable by anyone outside the team."
+            )
+        if not declared_replay and has_replay:
+            raise ValueError(
+                "a response carrying replay provenance cannot declare itself "
+                "LIVE_INFERENCE."
+            )
+        return self
+
     @property
     def is_replayed(self) -> bool:
-        return self.replayed_from_transcript is not None
+        return self.inference_mode is InferenceMode.REPLAYED_TRANSCRIPT
 
 
 class SourceLocation(StrictSchema):
@@ -439,6 +469,14 @@ class EvidenceBundle(StrictSchema):
         description="The mission verdict and the per-candidate breakdown it was "
         "derived from.",
     )
+    recommended_patch_id: UUID | None = Field(
+        default=None,
+        description="The one diff we stand behind. Derived and validated, not "
+        "free-form: it must name a patch in `patches` whose verification verdict is "
+        "VERIFIED, and when exactly one candidate verified it must be that one. A "
+        "bundle showing two verified patches without naming one invites a judge to "
+        "pick the wrong one and ask why we shipped it.",
+    )
     resource_usage: ResourceUsage
     gates_not_run: list[str] = Field(
         default_factory=list,
@@ -450,11 +488,48 @@ class EvidenceBundle(StrictSchema):
         "path ran throughout — a claim the pipeline has to earn, not assume.",
     )
     isolation_mode: IsolationMode = Field(
-        default=IsolationMode.ROOTLESS_CONTAINER,
-        description="How the target was contained. A subprocess jail (#81) is weaker "
-        "than a rootless container and is reported as what it is.",
+        description="How the target was contained. Required, with no default (D-049): "
+        "the previous default claimed ROOTLESS_CONTAINER, which is the stronger of the "
+        "two, so a bundle assembled by code that forgot the field overclaimed the "
+        "isolation posture. A subprocess jail (#81) is weaker and is reported as what "
+        "it is.",
     )
     tool_versions: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _recommended_patch_is_derived_from_the_evidence(self) -> "EvidenceBundle":
+        """A hand-set field sitting next to the data that already contains the truth
+        is a field that can lie, and it is exactly the kind that gets filled in at 2am
+        on D7. Same reasoning the architecture spec applied to `gates_not_run`.
+        """
+        verified_patch_ids = [
+            record.patch_id
+            for record in self.verifications
+            if record.verdict is Verdict.VERIFIED
+        ]
+        known_patch_ids = {patch.id for patch in self.patches}
+
+        if self.recommended_patch_id is None:
+            if len(set(verified_patch_ids)) == 1:
+                raise ValueError(
+                    "exactly one candidate verified, so recommended_patch_id must name "
+                    "it; leaving it unset defers the choice to whoever renders the "
+                    "report."
+                )
+            return self
+
+        if self.recommended_patch_id not in known_patch_ids:
+            raise ValueError(
+                f"recommended_patch_id {self.recommended_patch_id} does not name a "
+                f"candidate in this bundle's `patches`."
+            )
+        if self.recommended_patch_id not in verified_patch_ids:
+            raise ValueError(
+                f"recommended_patch_id {self.recommended_patch_id} names a candidate "
+                f"with no VERIFIED verification record. A recommendation is a claim "
+                f"about what the gates proved, not a preference."
+            )
+        return self
 
 
 class ExportRequest(StrictSchema):

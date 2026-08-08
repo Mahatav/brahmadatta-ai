@@ -160,15 +160,21 @@ remembers to set:
 
 | Fallback | How the contract prevents the inflated claim |
 |---|---|
-| Model replay (#82) | `ModelProvenance.replayed_from_transcript` / `captured_at` / `transcript_sha256` — a validator requires all three or none, so a half-declared replay cannot be mistaken for live inference |
+| Model replay (#82) | `ModelProvenance.inference_mode` is **required with no default** — `LIVE_INFERENCE` or `REPLAYED_TRANSCRIPT` — and `REPLAYED_TRANSCRIPT` must carry `replayed_from_transcript` / `captured_at` / `transcript_sha256`, all three or none. Silence is a validation error, not a claim of live inference (D-049). |
 | Reproducer replay (#83) | `FindingSummary.discovery_method` is **required with no default** — `FUZZING_CAMPAIGN`, `DIRECT_HARNESS` or `REPLAYED_REPRODUCER` — and a replayed finding must name its `replay_source` while a live one may not carry one. `FuzzingReport.mode` is required, and `NOT_RUN` cannot report executions or crashes |
-| Gate evidence | `GateResult.evidence_source`: a gate may only `PASS` on `TOOL_EXECUTION` with a named tool. A replayed artifact is recordable and displayable and **cannot pass a gate** — so a run whose fuzzer never executed cannot claim the renewed-fuzz gate |
-| Subprocess jail (#81) | `IsolationMode` is required on `SandboxStatus` and recorded on `EvidenceBundle`; `SUBPROCESS_JAIL` cannot be reported as `ROOTLESS_CONTAINER` |
+| Gate evidence | `GateResult.evidence_source` is **required with no default** (D-049). A gate may only `PASS` on `TOOL_EXECUTION` with a named tool; a `NOT_RUN` gate may not claim `TOOL_EXECUTION` at all. A replayed artifact is recordable and displayable and **cannot pass a gate** — so a run whose fuzzer never executed cannot claim the renewed-fuzz gate |
+| Subprocess jail (#81) | `IsolationMode` is **required with no default** on both `SandboxStatus` and `EvidenceBundle` (D-049 — the bundle previously defaulted to the stronger claim); `SUBPROCESS_JAIL` cannot be reported as `ROOTLESS_CONTAINER` |
 | Operator-supplied patch (D-008) | `PatchCandidate` validator: `MODEL_GENERATED` requires `ModelProvenance`, `OPERATOR_SUPPLIED` forbids it |
 
 `EvidenceBundle.substitutions` lists every fallback used, with a mandatory non-empty
 reason. An empty list is the claim that the primary path ran throughout — a claim the
 pipeline has to earn, not one a reader has to infer from a missing section.
+
+`EvidenceBundle.recommended_patch_id` names the one diff we stand behind (D-048). It is
+derived and validated, not free-form: when set it must name a patch in `patches` whose
+verification verdict is `VERIFIED`, and when exactly one candidate verified it must be
+set to that one. A bundle showing two verified patches without naming one invites a
+judge to pick the wrong one and ask why we shipped it.
 
 ### Properties the schemas enforce structurally
 

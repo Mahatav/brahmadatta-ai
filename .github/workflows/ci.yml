@@ -181,7 +181,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r apps/control-api/requirements.txt
 
-      - name: Regenerate and diff
+      - name: Regenerate and diff (Python 3.12)
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
+          DATABASE_URL: "sqlite:///ci.sqlite3"
+        run: infrastructure/scripts/openapi-contract-check.sh
+
+      # #103 / D-049 part 3. The dump used to carry `http.HTTPStatus`'s reason phrases
+      # straight from whichever interpreter ran the exporter, and 3.13 renamed four of
+      # them — so the drift check failed for a reason that had nothing to do with the
+      # contract. The exporter now pins them (CANONICAL_REASON_PHRASES).
+      #
+      # This second leg is the acceptance criterion, not decoration: the fix is only
+      # worth anything if CI proves the dump is byte-identical on both, and a pin in
+      # requirements.txt would hold only until someone ran it locally on something
+      # newer — which is exactly how this was found.
+      #
+      # Added as steps in the same job rather than as a matrix, deliberately: a matrix
+      # renames the required check from "openapi dump is current" to
+      # "openapi dump is current (3.12)" and silently unsets branch protection.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Reinstall the control API on Python 3.13
+        run: |
+          set -euo pipefail
+          if [ ! -d apps/control-api ]; then exit 0; fi
+          python -m pip install --upgrade pip
+          pip install -r apps/control-api/requirements.txt
+
+      - name: Regenerate and diff (Python 3.13 — the dump must be interpreter-independent)
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret

@@ -1,6 +1,6 @@
 """The mission state machine, and the authorization gate that fronts it.
 
-Two things are enforced here, and the orchestrator (issue #12) is expected to call
+Four things are enforced here, and the orchestrator (issue #12) is expected to call
 them rather than reimplement them:
 
 1. **Legal transitions only.** `TRANSITIONS` is exhaustive over `MissionState`; a
@@ -11,17 +11,40 @@ them rather than reimplement them:
    and cover the snapshot being worked on. There is no argument that bypasses it and
    no default that stands in for it — the parameter is required and `None` is a
    refusal, not a skip.
+3. **A verdict state is backed by this mission's own verification records** —
+   `isinstance`-checked, mission-bound and de-duplicated (D-045).
+4. **A paused mission resumes only into the state it paused from** (D-047).
+
+## What this module cannot do, and where the rest lives
+
+`assert_verdict_is_evidenced` is a pure function over the records it is handed. It
+can check that each record is real, belongs to this mission, and derives the verdict
+being claimed. It **cannot** check that it was shown *all* of them: dropping a
+`REJECTED` record before the call is invisible from inside. No amount of validation
+in `contracts/` closes that, and a guard that looks total while missing it is worse
+than one that is honestly partial (D-045).
+
+The completeness half therefore lives at the database boundary, in
+`orchestrator.transitions.transition`, which loads the records itself by mission id
+inside the transaction that holds `SELECT … FOR UPDATE` on the mission row. The same
+applies to `assert_candidate_set_open`, whose real enforcement is
+`Mission.verification_started_at` (D-046).
+
+`contracts/` stays free of a persistence dependency on purpose — it is imported by
+the OpenAPI export, which must run without a database.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Sequence
+from uuid import UUID
 
 from contracts.authorization import AuthorizationRecord, covers_snapshot, is_active
 from contracts.enums import MissionStage, MissionState, TERMINAL_STATES, Verdict
 from contracts.errors import (
     AuthorizationRequiredError,
+    CandidateSetFrozenError,
     InvalidStateTransitionError,
     VerificationRequiredError,
 )
@@ -43,8 +66,18 @@ STATE_SEQUENCE: tuple[MissionState, ...] = (
     MissionState.EXPORTING,
 )
 
-#: States a paused mission may resume into.
-_RESUMABLE: frozenset[MissionState] = frozenset(
+#: States a mission may be paused *from*, and therefore the only states it may resume
+#: into. This is a static superset used to keep `TRANSITIONS` exhaustive and to answer
+#: "could a pause here ever be resumed". It is NOT the set of legal resume targets for
+#: a given mission — see `assert_resume` and `allowed_transitions(..., paused_from=)`.
+#:
+#: D-047: with a fixed resumable set, pause was a forward skip *and* a backward one. A
+#: mission paused in VERIFY could resume into BASELINE, re-run the baseline, and write a
+#: second `BaselineReport` for the same snapshot — and `BaselineReport` is the
+#: denominator for "regression preserved" (P0-5), so two of them make the central
+#: verification claim ambiguous to anyone auditing the bundle. `paused_from` closes
+#: both directions with one lookup.
+PAUSABLE_STATES: frozenset[MissionState] = frozenset(
     {
         MissionState.BASELINE,
         MissionState.TRIAGE,
@@ -90,7 +123,7 @@ TRANSITIONS: dict[MissionState, frozenset[MissionState]] = {
         {MissionState.VERIFIED, MissionState.REJECTED, MissionState.HUMAN_REVIEW}
     )
     | _ABORTS,
-    MissionState.PAUSED: _RESUMABLE | _ABORTS,
+    MissionState.PAUSED: PAUSABLE_STATES | _ABORTS,
     MissionState.CANCELLING: frozenset({MissionState.CANCELLED, MissionState.FAILED}),
     MissionState.VERIFIED: frozenset(),
     MissionState.REJECTED: frozenset(),
@@ -149,12 +182,93 @@ VERDICT_FOR_STATE: dict[MissionState, Verdict] = {
 }
 
 
-def allowed_transitions(state: MissionState) -> frozenset[MissionState]:
-    return TRANSITIONS[MissionState(state)]
+def allowed_transitions(
+    state: MissionState, paused_from: MissionState | None = None
+) -> frozenset[MissionState]:
+    """What this mission may legally do next.
+
+    For `PAUSED` the answer depends on the mission, not only on the state: it may
+    resume into `paused_from` and nowhere else, plus the aborts. A pause with no
+    recorded origin can only be aborted — fail closed, because the alternative is
+    letting an unknown origin stand in for any origin.
+
+    `MissionDetail.allowed_transitions` is rendered from this, so the UI's buttons and
+    the guard below cannot disagree.
+    """
+    state = MissionState(state)
+    if state is not MissionState.PAUSED:
+        return TRANSITIONS[state]
+    if paused_from is None:
+        return _ABORTS
+    return frozenset({MissionState(paused_from)}) | _ABORTS
+
+
+def assert_resume(
+    current: MissionState,
+    target: MissionState,
+    paused_from: MissionState | None,
+) -> None:
+    """Raise unless a paused mission is resuming into exactly the state it paused from.
+
+    D-047. `TRANSITIONS[PAUSED]` lists every pausable state so the table stays
+    exhaustive; this narrows it to the one that is true for *this* mission. Both
+    directions are closed by the same check — a mission paused in `BASELINE` cannot
+    skip forward to `EXPORTING`, and one paused in `VERIFY` cannot fall back to
+    `BASELINE` and write a second `BaselineReport` for the same snapshot.
+    """
+    if MissionState(current) is not MissionState.PAUSED:
+        return
+
+    target = MissionState(target)
+    if target in _ABORTS:
+        # Getting out safely is never blocked by the bookkeeping.
+        return
+
+    if paused_from is None:
+        raise InvalidStateTransitionError(
+            f"Cannot resume into {target}: this mission has no recorded paused_from, "
+            f"so there is no state it is known to have paused in.",
+            details={
+                "current_state": str(current),
+                "requested_state": str(target),
+                "allowed": sorted(str(s) for s in _ABORTS),
+            },
+        )
+
+    paused_from = MissionState(paused_from)
+    if target is not paused_from:
+        raise InvalidStateTransitionError(
+            f"A paused mission resumes only into the state it paused from. This one "
+            f"paused in {paused_from} and tried to resume into {target}.",
+            details={
+                "current_state": str(current),
+                "requested_state": str(target),
+                "paused_from": str(paused_from),
+                "allowed": sorted(str(s) for s in (frozenset({paused_from}) | _ABORTS)),
+            },
+        )
+
+
+#: The inverse of `VERDICT_FOR_STATE`. One entry per verdict, so a new `Verdict`
+#: member cannot reach the Core as an unmapped state.
+STATE_FOR_VERDICT: dict[Verdict, MissionState] = {
+    verdict: state for state, verdict in VERDICT_FOR_STATE.items()
+}
 
 
 def is_terminal(state: MissionState) -> bool:
     return MissionState(state) in TERMINAL_STATES
+
+
+def derive_mission_outcome(verdicts: Sequence[Verdict]) -> MissionState:
+    """The terminal state the recorded verdicts produce (architecture spec §2.3).
+
+    The mission's terminal state is a function of the whole candidate set, not of
+    whichever verification finished last — that is what makes the fan-out in #80 a
+    fan-out rather than a loop. `derive_mission_verdict` owns the reduction rule; this
+    only names the state it lands in, so there is exactly one place that decides.
+    """
+    return STATE_FOR_VERDICT[derive_mission_verdict(verdicts)]
 
 
 def assert_stage_can_run(
@@ -187,12 +301,42 @@ def assert_stage_can_run(
         )
 
 
+def assert_candidate_set_open(
+    verifications: Sequence[VerificationRecord],
+) -> None:
+    """Raise if any verification exists — the candidate set closes when VERIFY starts.
+
+    D-046. This is the **statement** of the rule, not its enforcement: a caller that
+    never calls it is not stopped by it, and a caller handed an empty list learns
+    nothing. The enforcement is `Mission.verification_started_at`, checked under the
+    mission row lock in `orchestrator.candidates.record_patch_candidate` — "has
+    verification started" is state, and state lives in the store.
+
+    It lives here anyway because this is the file a developer reads before writing the
+    insert, and because the rule needs to be visible next to the fan-out it bounds.
+    Without it the next reader sees `PATCH → VERIFY` producing N candidates with no
+    stated bound and reasonably concludes there isn't one.
+
+    The failure it exists to prevent: *"add one more candidate and re-verify"* is
+    generate-until-pass, and it needs no transition-table change, so it is the one
+    failure mode here that leaves no diff for a reviewer to object to.
+    """
+    if verifications:
+        raise CandidateSetFrozenError(
+            f"Verification has already produced {len(verifications)} record(s) for "
+            f"this mission; the candidate set is closed.",
+            details={"verification_count": len(verifications)},
+        )
+
+
 def assert_verdict_is_evidenced(
     current: MissionState,
     target: MissionState,
     verifications: Sequence[VerificationRecord],
+    *,
+    mission_id: UUID,
 ) -> None:
-    """Raise unless a verdict state is backed by the mission's verification runs.
+    """Raise unless a verdict state is backed by *this mission's* verification runs.
 
     Takes the **set** of records, not one. A mission runs N candidates through the
     identical pipeline — the demo runs two, one that holds and one that does not — so
@@ -203,9 +347,27 @@ def assert_verdict_is_evidenced(
     from `CORRELATE`/`PATCH`/`VERIFY` when policy needs a person before anything has
     been verified, is a legitimate pause and is not covered.
 
+    Three checks on the records themselves, each closing a case QA reproduced against
+    the D1 guard (BUG-003, BUG-004; ruled on in D-045):
+
+    * **`isinstance`.** The previous guard read `record.verdict` off whatever it was
+      handed, so any object with a `.verdict` attribute — a `CandidateVerdict`, or a
+      one-line stand-in with no gate matrix anywhere — satisfied it. A type annotation
+      is documentation; this is the enforcement.
+    * **Mission binding.** Every record's `mission_id` must equal the mission being
+      transitioned, so another mission's `VERIFIED` cannot justify this one's verdict.
+      `AuthorizationRecord.covers_snapshot` is the same idea applied to authority.
+    * **De-duplication by `record.id`.** The same record supplied twice must not
+      outvote a record supplied once.
+
     Each record already guarantees its own verdict was derived from its gate matrix
-    (`VerificationRecord` re-derives it in a validator), so requiring the records here
-    is enough: there is no path to `VERIFIED` that skips the gates.
+    (`VerificationRecord` re-derives it in a validator), so a record that survives all
+    three carries a real gate matrix for this mission.
+
+    **What is still not checked here, and cannot be.** That the caller passed *every*
+    record. Dropping a `REJECTED` one is invisible from inside this function. Call it
+    only from a transaction-scoped path that loaded the records itself — see the module
+    docstring and `orchestrator.transitions.transition`.
     """
     if MissionState(current) is not MissionState.EXPORTING:
         return
@@ -214,7 +376,7 @@ def assert_verdict_is_evidenced(
     if expected is None:
         return
 
-    records = list(verifications)
+    records = _checked_records(verifications, target, mission_id)
     if not records:
         raise VerificationRequiredError(
             f"Cannot enter {target}: no verification records. A verdict state must be "
@@ -236,6 +398,44 @@ def assert_verdict_is_evidenced(
         )
 
 
+def _checked_records(
+    verifications: Sequence[VerificationRecord],
+    target: MissionState,
+    mission_id: UUID,
+) -> list[VerificationRecord]:
+    """Type-check, mission-bind and de-duplicate the supplied records."""
+    mission_id = UUID(str(mission_id))
+    seen: dict[UUID, VerificationRecord] = {}
+
+    for index, record in enumerate(verifications):
+        if not isinstance(record, VerificationRecord):
+            raise VerificationRequiredError(
+                f"Cannot enter {target}: element {index} of the verification set is a "
+                f"{type(record).__name__}, not a VerificationRecord. Only a record "
+                f"carrying a gate matrix can justify a verdict.",
+                details={
+                    "requested_state": str(target),
+                    "offending_index": index,
+                    "offending_type": type(record).__name__,
+                },
+            )
+        if record.mission_id != mission_id:
+            raise VerificationRequiredError(
+                f"Cannot enter {target}: verification {record.id} belongs to mission "
+                f"{record.mission_id}, not {mission_id}. Another mission's evidence "
+                f"does not justify this mission's verdict.",
+                details={
+                    "requested_state": str(target),
+                    "mission_id": str(mission_id),
+                    "offending_verification_id": str(record.id),
+                    "offending_mission_id": str(record.mission_id),
+                },
+            )
+        seen[record.id] = record
+
+    return list(seen.values())
+
+
 def assert_transition(
     current: MissionState,
     target: MissionState,
@@ -243,12 +443,19 @@ def assert_transition(
     now: datetime,
     snapshot_sha256: str | None = None,
     verifications: Sequence[VerificationRecord] = (),
+    *,
+    mission_id: UUID,
+    paused_from: MissionState | None = None,
 ) -> None:
     """Raise unless the mission may move from `current` to `target` right now.
 
-    Three independent conditions, all of which must hold: the transition is in the
-    table, an active authorization covers the work, and — for the verdict states — a
-    verification record justifies the claim.
+    Four independent conditions, all of which must hold: the transition is in the
+    table; a paused mission is resuming into the state it paused from; an active
+    authorization covers the work; and — for the verdict states — this mission's own
+    verification records justify the claim.
+
+    `mission_id` is keyword-only and required. It has no default, so the verdict guard
+    cannot be run "without a mission" by a caller who did not think about it.
     """
     current = MissionState(current)
     target = MissionState(target)
@@ -263,7 +470,8 @@ def assert_transition(
             },
         )
 
-    assert_verdict_is_evidenced(current, target, verifications)
+    assert_resume(current, target, paused_from)
+    assert_verdict_is_evidenced(current, target, verifications, mission_id=mission_id)
 
     if target in _AUTHORIZATION_EXEMPT_TARGETS:
         return
