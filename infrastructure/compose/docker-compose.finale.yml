@@ -44,7 +44,9 @@ services:
     <<: *hardening
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95): unsized before this — see the matching comment in docker-compose.yml
+      # and nginx.conf's client_max_body_size comment for the mechanism.
+      - /tmp:size=256m
       - /var/cache/nginx
       - /var/run
     cap_drop: ["ALL"]
@@ -95,7 +97,8 @@ services:
     <<: [*env-file, *hardening]
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95): was unsized.
+      - /tmp:size=256m
     cap_drop: ["ALL"]
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.finale

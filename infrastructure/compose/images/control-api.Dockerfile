@@ -58,11 +58,46 @@ EXPOSE 8000
 # 127.0.0.1, which is right for a bare-metal run and wrong here: a loopback-bound listener
 # is unreachable from nginx in another container. It is still not exposed to the host —
 # docker-compose.yml publishes no port for this service, so the only route in is nginx.
-CMD ["uvicorn", "config.asgi:application", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--reload", "--reload-dir", "/app", \
-     "--proxy-headers", "--forwarded-allow-ips", "*", \
-     "--log-level", "info"]
+#
+# SEC-14 (#98): --forwarded-allow-ips was "*" here — any client that could reach the
+# container, not just nginx, could set X-Forwarded-Proto and X-Forwarded-For and have
+# uvicorn believe it. The correct pattern already existed eight lines below in the
+# runtime target: ${UVICORN_FORWARDED_ALLOW_IPS:-...}, an env var docker-compose.yml
+# controls. Same shape here, using sh -c for the same reason the runtime target does —
+# CMD's exec form does not expand shell variables, so a hardcoded "*" was the only value
+# a JSON-array CMD could ever produce. Default 127.0.0.1 is deliberately wrong-safe: with
+# no override, the dev server trusts nothing, which fails loudly (uvicorn logs the real
+# peer IP as untrusted) rather than silently defaulting back to "*".
+#
+# Verification status, stated plainly (see the PR for #98's acceptance criteria):
+#   VERIFIED  the compose wiring: `docker compose up` with this change resolves the
+#             container's UVICORN_FORWARDED_ALLOW_IPS to the pinned api-network subnet
+#             (172.28.90.0/24), a real request reached /api/v1/system/health through
+#             nginx over TLS (200 OK), and the shell substitution `${VAR:-default}` was
+#             checked in isolation for both the set and unset cases.
+#   VERIFIED  end-to-end with THIS Dockerfile's CMD actually running, in a later session.
+#             The earlier hang (`resolve image config for
+#             docker-image://docker.io/docker/dockerfile:1.7`) was this machine's Docker
+#             Desktop credential helper (`docker-credential-desktop`) stalling on every
+#             invocation — confirmed by reproducing the identical hang on a bare
+#             `docker pull docker/dockerfile:1.7` with no Dockerfile involved at all, and
+#             by getting a clean pull immediately after pointing `DOCKER_CONFIG` at a
+#             config with no `credsStore`. Environmental, not a property of this
+#             repository's config, and not something anything under version control can
+#             fix. `docker buildx build --target dev` completed
+#             (`brahmadatta-control-api-test:dev`), and running that image's actual CMD
+#             confirmed both branches of the substitution: unset resolves to the
+#             wrong-safe `--forwarded-allow-ips 127.0.0.1` default, and
+#             `UVICORN_FORWARDED_ALLOW_IPS=172.28.90.0/24` (the value docker-compose.yml
+#             supplies) resolves to `--forwarded-allow-ips 172.28.90.0/24` — read back
+#             from `/proc/1/cmdline` inside the running container, not asserted from the
+#             Dockerfile text. `docker compose -f docker-compose.yml config` also
+#             validates clean with this change in place.
+CMD ["sh", "-c", "exec uvicorn config.asgi:application \
+     --host 0.0.0.0 --port 8000 \
+     --reload --reload-dir /app \
+     --proxy-headers --forwarded-allow-ips \"${UVICORN_FORWARDED_ALLOW_IPS:-127.0.0.1}\" \
+     --log-level info"]
 
 
 # ---------------------------------------------------------------------------

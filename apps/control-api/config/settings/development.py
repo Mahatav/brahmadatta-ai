@@ -9,6 +9,11 @@ from config import env
 from config.settings.base import *  # noqa: F401,F403
 from config.settings.base import INSTALLED_APPS
 
+# Not env-driven. Deliberately — mirrors config.settings.finale (SEC-03). This profile
+# must never present itself as APP_ENV=finale, which would suppress every finale-only
+# system check for a stack that is not actually the finale.
+APP_ENV = "development"
+
 DEBUG = env.get_bool("DJANGO_DEBUG", True)
 
 # Admin defaults ON here — it is the reason Django was chosen over FastAPI (D-013):
