@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -426,8 +425,10 @@ def test_an_archive_digest_already_claimed_by_another_mission_is_refused(
         policy={},
     )
     other_dir = roots["source_root"] / "pktcfg-again"
-    other_dir.mkdir()
-    (other_dir / "src").symlink_to(repo_dir / "src")
+    (other_dir / "src").mkdir(parents=True)
+    (other_dir / "src" / "main.c").write_text("int main(void) { return 0; }\n")
+    (other_dir / ".git").mkdir()
+    (other_dir / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     other_digest = expected_digest(other_dir, tmp_path)
     assert other_digest == digest  # byte-identical content -> the same real hash
 

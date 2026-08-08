@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 
 from authorization.errors import UnreadableArchiveError
 
+
 #: A member name is refused if, once normalized, it is absolute or steps outside the
 #: archive root. This is the same class of defect zip-slip exploits rely on; refusing
 #: it here means no later, less careful consumer of this archive has to re-derive the

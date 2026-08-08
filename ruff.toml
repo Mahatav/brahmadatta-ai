@@ -63,6 +63,7 @@ ignore = [
 [lint.isort]
 known-first-party = [
     "api",
+    "authorization",
     "config",
     "contracts",
     "missions",

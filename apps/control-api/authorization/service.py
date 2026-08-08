@@ -25,9 +25,9 @@ its own.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Callable
 
 from django.conf import settings
 from django.db import transaction

@@ -73,8 +73,8 @@ def test_an_oversized_source_is_refused_and_no_partial_file_is_left_in_the_store
     tmp_dir = root / ".tmp"
     if tmp_dir.exists():
         assert list(tmp_dir.iterdir()) == []
-    for shard in root.glob("*/*"):
-        assert False, f"unexpected file left behind: {shard}"
+    leftover = list(root.glob("*/*"))
+    assert leftover == [], f"unexpected file(s) left behind: {leftover}"
 
 
 def test_a_missing_source_is_refused(tmp_path: Path):
