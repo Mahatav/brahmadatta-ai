@@ -246,8 +246,8 @@ def test_a_candidate_cannot_be_inserted_into_a_frozen_mission_by_any_path(
     """`PatchCandidate.objects.create()` bypassed the recorder and its docstring said
     "inserting one is not a plain save()" — which is a comment, not a mechanism. The
     three other models in this file that need a write rule enforce it in `save()`."""
-    from missions.models import Finding, PatchCandidate
     from missions.lifecycle import lifecycle_write
+    from missions.models import Finding, PatchCandidate
 
     finding = Finding.objects.create(
         mission=mission,

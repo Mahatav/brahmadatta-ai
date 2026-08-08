@@ -39,8 +39,8 @@ doing.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 #: The mission fields the orchestrator owns. A write to any of these outside
 #: `orchestrator.transitions.transition` (or, for the freeze column,

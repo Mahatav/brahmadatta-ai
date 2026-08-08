@@ -51,7 +51,6 @@ from typing import Any
 from django.core.exceptions import ValidationError
 from django.db import models
 
-from contracts.errors import MissionStateWriteError
 from contracts.enums import (
     AnalyzerTool,
     DiscoveryMethod,
@@ -68,6 +67,7 @@ from contracts.enums import (
     Severity,
     Verdict,
 )
+from contracts.errors import MissionStateWriteError
 from missions.lifecycle import LIFECYCLE_FIELDS, lifecycle_write_permitted
 
 

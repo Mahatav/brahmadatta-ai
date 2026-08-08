@@ -18,6 +18,7 @@ import ast
 import inspect
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from contracts.enums import (
     GateStatus,
@@ -223,12 +224,12 @@ def test_a_mission_with_an_unloadable_record_can_still_be_failed(mission, findin
     )
     assert updated == 1, "the corruption did not take; the rest of this test is vacuous"
 
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         repository.load_verifications(mission.id)
 
     # Forward progress is refused — a verdict must never be derived from a set we
     # could not read.
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         transitions.transition(
             mission.id, MissionState.EXPORTING, trace_id=TRACE, now=NOW
         )
@@ -307,7 +308,6 @@ def test_a_dropped_rejection_cannot_reach_verified(mission, finding):
     """
     from contracts.schemas.evidence import CandidateVerdict, MissionVerdictSummary
     from contracts.verdict import derive_mission_verdict
-    from pydantic import ValidationError as PydanticValidationError
 
     # 1. The vacuity, executed. This is the assertion that stops the wrong model coming
     #    back the next time someone re-derives it from the decision record.
@@ -385,10 +385,10 @@ def test_an_unparseable_authorization_does_not_wedge_the_abort_path(mission, fin
 
     # `statement` has min_length=20 in the contract; a shorter one cannot be loaded.
     Authorization.objects.filter(mission=mission).update(statement="too short")
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         repository.load_active_authorization(mission, NOW)
 
-    with pytest.raises(Exception):
+    with pytest.raises(PydanticValidationError):
         transitions.transition(mission.id, MissionState.TRIAGE, trace_id=TRACE, now=NOW)
 
     transitions.transition(mission.id, MissionState.CANCELLING, trace_id=TRACE, now=NOW)
@@ -420,7 +420,7 @@ def test_the_abort_tolerance_does_not_extend_to_forward_progress(mission, findin
     assert updated == 1
 
     for forward in (MissionState.EXPORTING, MissionState.PAUSED):
-        with pytest.raises(Exception):
+        with pytest.raises(PydanticValidationError):
             transitions.transition(mission.id, forward, trace_id=TRACE, now=NOW)
 
     mission.refresh_from_db()
