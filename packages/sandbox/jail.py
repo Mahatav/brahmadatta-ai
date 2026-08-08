@@ -43,6 +43,18 @@ live in `packages/sandbox/tests/test_jail.py`:
 | the environment is scrubbed | `test_environment_is_scrubbed_to_the_allowlist` |
 | `limits_applied` is measured per run, not guessed from the platform (D-054) | `test_limits_applied_is_a_real_per_run_measurement` |
 
+**Two open gaps, ruled on and gated rather than silently accepted (D-056).** Both require an
+adversarial target and are not reachable through `#16`/`#17`/`#27`'s ordinary `cmake`/`ctest`
+invocation — they are why this module cannot be pointed at `#28`'s fuzzing worker until both
+close:
+
+| Gap | Condition to trigger it | Tracking |
+|---|---|---|
+| **SEC-38** — a detached descendant can survive `_sweep_detached_descendants` under rapid, repeated fork-and-detach (~1-in-10 to 1-in-15 in testing), reproducing at the real default `kill_grace_seconds=5.0`. The final sweep's re-walk is anchored on this jail's own child pid, which is already dead by the time of that walk, so a descendant reparenting between two poll iterations can go briefly invisible. | A target that forks and `setsid()`s repeatedly near the kill window — the exact pattern a hostile or malformed fuzz target can produce, not ordinary build/test behaviour. | `#28`'s Definition of Done. A single-detachment test is not sufficient re-verification for this — the regression test must exercise *rapid, repeated* detachment. |
+| **SEC-35** — `_classify`'s `SIGXFSZ` branch does not fire for a target that ignores or handles that signal. CPython does so by default (`signal.getsignal(SIGXFSZ) == SIG_IGN` at interpreter start), so a Python-based target genuinely stopped by `RLIMIT_FSIZE` reports `limit_hit == NONE` instead. The jail still stops the process — this is an evidence-accuracy gap, not an isolation escape. | A Python-based (or any `SIGXFSZ`-ignoring) target actually hitting `max_file_bytes`. | `#28`'s Definition of Done. The fix needs the same stderr/on-disk-size fallback `MEMORY`'s branch already uses, verified against a Python target, not `dd`. |
+
+**No caller may point this jail at generated or fuzzer-derived input before both close.**
+
 Anything not in that table is *intended*, not enforced. In particular this module does
 **not** prevent a running process from reading outside the jail, opening a network
 socket, or exhausting a limit the kernel applies per-user rather than per-process.
