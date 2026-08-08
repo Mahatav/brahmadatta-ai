@@ -50,8 +50,8 @@ assertion failures and tests that never ran, because neither is evidence of a pa
 from __future__ import annotations
 
 import json
-import xml.etree.ElementTree as ET  # noqa: S405 - parsing our own jailed ctest output, not untrusted input
-from dataclasses import dataclass, field
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import BuildStep, StepFailure, ToolchainError, first_error_line
@@ -181,7 +181,9 @@ def enumerate_tests(build_dir: Path, jail: Jail, ctest_path: str) -> tuple[str, 
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise ToolchainError(f"ctest --show-only=json-v1 did not produce valid JSON: {exc}") from exc
+        raise ToolchainError(
+            f"ctest --show-only=json-v1 did not produce valid JSON: {exc}"
+        ) from exc
     return tuple(entry["name"] for entry in payload.get("tests", []))
 
 
@@ -194,7 +196,9 @@ def _case_labels(testcase: ET.Element) -> tuple[str, ...]:
     return tuple(labels)
 
 
-def parse_ctest_junit(junit_path: Path, *, expected_tests: tuple[str, ...] | None = None) -> CTestSummary:
+def parse_ctest_junit(
+    junit_path: Path, *, expected_tests: tuple[str, ...] | None = None
+) -> CTestSummary:
     """Parse a `ctest --output-junit` file into a :class:`CTestSummary`.
 
     Raises :class:`ToolchainError` when the file is missing, malformed, or — if

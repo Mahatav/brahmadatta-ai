@@ -52,7 +52,9 @@ def test_a_path_inside_the_jail_is_accepted(jail: Jail) -> None:
     assert jail.resolve_inside(inside) == inside.resolve()
 
 
-def test_environment_is_scrubbed_to_an_allowlist(jail: Jail, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_environment_is_scrubbed_to_an_allowlist(
+    jail: Jail, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Injected violation: put a secret-shaped variable in the parent process's
     environment and confirm the child does not inherit it."""
     monkeypatch.setenv("SUPER_SECRET_TOKEN", "should-not-leak-into-the-child")
@@ -88,9 +90,7 @@ def test_a_forked_child_process_is_killed_too(jail: Jail) -> None:
     """The timeout must signal the whole process group, not just the direct child —
     otherwise a `make` that forked a compiler leaves the compiler running as an orphan."""
     marker = jail.root / "child-still-running"
-    script = (
-        f'(trap "" TERM; sleep 20; touch {marker}) & wait'
-    )
+    script = f'(trap "" TERM; sleep 20; touch {marker}) & wait'
     result = jail.run(["/bin/sh", "-c", script], label="fork-hang", timeout_seconds=1.0)
     assert result.timed_out is True
     time.sleep(2.0)

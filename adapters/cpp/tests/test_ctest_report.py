@@ -118,7 +118,9 @@ def test_a_short_junit_file_is_rejected_against_the_enumeration(tmp_path: Path) 
     junit_path.write_text(_MIXED_JUNIT)  # has t_ok, t_bad, t_skip = 3 names
     # Ask for a 4th name that is not in the file.
     with pytest.raises(ToolchainError, match="missing"):
-        parse_ctest_junit(junit_path, expected_tests=("t_ok", "t_bad", "t_skip", "t_never_enumerated"))
+        parse_ctest_junit(
+            junit_path, expected_tests=("t_ok", "t_bad", "t_skip", "t_never_enumerated")
+        )
 
 
 @pytest.mark.slow

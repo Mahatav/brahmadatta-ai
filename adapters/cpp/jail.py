@@ -60,7 +60,7 @@ from __future__ import annotations
 import os
 import resource
 import signal
-import subprocess  # noqa: S404 - driving build tools is this module's entire job
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -114,7 +114,9 @@ class JailLimits:
 
     def __post_init__(self) -> None:
         if self.wall_clock_seconds <= 0:
-            raise ValueError("wall_clock_seconds must be positive: a jail with no timeout is not a jail")
+            raise ValueError(
+                "wall_clock_seconds must be positive: a jail with no timeout is not a jail"
+            )
         if self.max_captured_bytes <= 0:
             raise ValueError("max_captured_bytes must be positive")
 
@@ -175,7 +177,9 @@ def _apply_limits(limits: JailLimits) -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (limits.file_size_bytes, limits.file_size_bytes))
     resource.setrlimit(resource.RLIMIT_NOFILE, (limits.open_files, limits.open_files))
     if sys.platform != "darwin":
-        resource.setrlimit(resource.RLIMIT_AS, (limits.address_space_bytes, limits.address_space_bytes))
+        resource.setrlimit(
+            resource.RLIMIT_AS, (limits.address_space_bytes, limits.address_space_bytes)
+        )
         if hasattr(resource, "RLIMIT_NPROC"):
             resource.setrlimit(resource.RLIMIT_NPROC, (limits.max_processes, limits.max_processes))
 
@@ -297,7 +301,7 @@ class Jail:
                 stdin=subprocess.DEVNULL,
                 close_fds=True,
                 start_new_session=True,
-                preexec_fn=lambda: _apply_limits(limits),  # noqa: PLW1509
+                preexec_fn=lambda: _apply_limits(limits),
             )
             try:
                 exit_code = process.wait(timeout=wall)

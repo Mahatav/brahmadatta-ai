@@ -113,7 +113,9 @@ class BaselineOutcome:
     def passed(self) -> bool:
         """The D3 gate signal. Identical formula to `BaselineReport.passed`:
         configure and build succeeded, at least one test ran, and none failed."""
-        return self.configure_ok and self.build_ok and self.tests_total > 0 and self.tests_failed == 0
+        return (
+            self.configure_ok and self.build_ok and self.tests_total > 0 and self.tests_failed == 0
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -147,7 +149,9 @@ def _failure_from_step_failure(exc: StepFailure) -> BaselineFailureDetail:
     )
 
 
-def _failure_from_adapter_error(exc: AdapterError, step: BuildStep, target: str) -> BaselineFailureDetail:
+def _failure_from_adapter_error(
+    exc: AdapterError, step: BuildStep, target: str
+) -> BaselineFailureDetail:
     """AdapterError/ToolchainError carry no command or exit code — nothing ran. Recorded
     with `command=()` and `exit_code=-1` (a sentinel no real process ever returns) so the
     absence of a command is visible in the report rather than papered over with `0`."""
@@ -225,7 +229,7 @@ def run_baseline_stage(
     # exactly how far the pipeline got: DETECT/PROBE_TOOLCHAIN failures mean neither ran;
     # a CONFIGURE StepFailure means configure itself failed; a BUILD StepFailure means
     # configure succeeded and build did not.
-    assert failure is not None  # noqa: S101 - one of the two branches above always sets it
+    assert failure is not None
     configure_ok = failure.step not in (
         BuildStep.DETECT.value,
         BuildStep.PROBE_TOOLCHAIN.value,
@@ -253,10 +257,14 @@ def _adapter_name_or_unknown(source: Path) -> str:
     try:
         return detect(source).build_system.value
     except AdapterError:
-        return BuildSystem.C_CMAKE_CTEST.value if (source / "CMakeLists.txt").is_file() else "UNKNOWN"
+        return (
+            BuildSystem.C_CMAKE_CTEST.value if (source / "CMakeLists.txt").is_file() else "UNKNOWN"
+        )
 
 
-def emit_baseline_events(outcome: BaselineOutcome, *, sequence_start: int = 1) -> list[dict[str, Any]]:
+def emit_baseline_events(
+    outcome: BaselineOutcome, *, sequence_start: int = 1
+) -> list[dict[str, Any]]:
     """The `BASELINE_RECORDED` + `BASELINE_PASSED`/`BASELINE_FAILED` pair, shaped like
     `contracts.schemas.envelope.MissionEvent` carrying a `BaselinePayload`.
 

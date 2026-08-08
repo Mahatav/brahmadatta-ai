@@ -128,7 +128,9 @@ def _banner_version(output: str) -> str | None:
     return match.group(1) if match else None
 
 
-def probe_build_tools(jail: Jail, names: tuple[str, ...] = ("cmake", "ctest")) -> tuple[ToolVersion, ...]:
+def probe_build_tools(
+    jail: Jail, names: tuple[str, ...] = ("cmake", "ctest")
+) -> tuple[ToolVersion, ...]:
     """Resolve and version each tool, running it inside ``jail``.
 
     Raises :class:`ToolchainError` when a tool is absent and :class:`StepFailure` when it is

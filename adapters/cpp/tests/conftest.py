@@ -13,7 +13,7 @@ Tests that shell out to `cmake`/`ctest` are marked `slow`; run everything with
 from __future__ import annotations
 
 import shutil
-import subprocess  # noqa: S404 - test setup only, fixed argv
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -57,7 +57,7 @@ def candidate_b_source(tmp_path: Path) -> Path:
     dest = tmp_path / "pktcfg-candidate-b"
     shutil.copytree(PKTCFG_SOURCE, dest)
     patch_file = PKTCFG_SOURCE / "patches" / "candidate-b-rejected-crash-only-fix.patch"
-    result = subprocess.run(  # noqa: S603 - fixed argv, test fixture setup
+    result = subprocess.run(
         ["patch", "-p1", "-i", str(patch_file)],
         cwd=dest,
         capture_output=True,
@@ -76,7 +76,7 @@ def candidate_a_source(tmp_path: Path) -> Path:
     dest = tmp_path / "pktcfg-candidate-a"
     shutil.copytree(PKTCFG_SOURCE, dest)
     patch_file = PKTCFG_SOURCE / "patches" / "candidate-a-correct-bounds-fix.patch"
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         ["patch", "-p1", "-i", str(patch_file)],
         cwd=dest,
         capture_output=True,

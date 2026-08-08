@@ -187,3 +187,48 @@ jobs:
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
           DATABASE_URL: "sqlite:///ci.sqlite3"
         run: infrastructure/scripts/openapi-contract-check.sh
+
+  # ---------------------------------------------------------------------------
+  # #16/#17/#27 (compiler-toolchain-engineer). "A suite CI does not collect is a suite
+  # that does not exist" — this job is that line acted on. Without it, every claim in
+  # adapters/cpp/tests and workers/baseline/tests — including the notrun-is-not-a-pass
+  # regression test and the D3 gate rehearsal — would be true only on a laptop.
+  #
+  # ubuntu-24.04's default image ships cmake, make, gcc/g++ (with libasan/libubsan) and
+  # `patch`, so no extra install step is needed for the demo target
+  # (demo/repositories/pktcfg, plain CMake + CTest, no third-party dependencies). Versions
+  # actually present are printed so a drifted runner image is visible in the log rather
+  # than silently changing what "the toolchain" means between runs — the same reasoning
+  # as the compiler/CMake version fields the adapter itself records per run
+  # (adapters/cpp/toolchain.py).
+  cpp-adapter:
+    name: C/C++ adapter (#16, #17, #27)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Toolchain versions actually used this run
+        run: |
+          set -euo pipefail
+          cmake --version
+          ctest --version
+          cc --version || true
+          patch --version | head -1
+
+      - name: Install test tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: C/C++ adapter and baseline worker tests
+        run: |
+          set -euo pipefail
+          if [ ! -d adapters/cpp ]; then
+            echo "adapters/cpp does not exist yet — nothing to test"
+            exit 0
+          fi
+          pytest adapters/cpp/tests workers/baseline/tests -q -rs

@@ -70,7 +70,12 @@ class StackFrame:
     line: int | None
 
     def as_dict(self) -> dict[str, object]:
-        return {"index": self.index, "function": self.function, "file": self.file, "line": self.line}
+        return {
+            "index": self.index,
+            "function": self.function,
+            "file": self.file,
+            "line": self.line,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +132,11 @@ def _asan_finding(text: str, header: re.Match[str]) -> SanitizerFinding:
     block = after_header.split("\n\n", 1)[0]
     stack = _parse_stack(block)
 
+    kind: str
+    function: str
+    file: str | None
+    line: int | None
+
     summary = _ASAN_SUMMARY.search(text)
     if summary:
         kind = summary.group("kind")
@@ -163,6 +173,10 @@ def _ubsan_findings(text: str) -> tuple[SanitizerFinding, ...]:
         end = headers[idx + 1].start() if idx + 1 < len(headers) else len(text)
         block = text[header.end() : end]
         stack = _parse_stack(block.split("\n\n", 1)[0])
+        kind: str
+        function: str
+        file: str | None
+        line: int | None
         summary = _UBSAN_SUMMARY.search(block)
         if summary:
             kind = summary.group("kind")

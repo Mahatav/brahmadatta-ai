@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
-import subprocess  # noqa: S404 - read-only `git rev-parse`, no shell, fixed argv
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 

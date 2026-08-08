@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .ctest_report import CTestSummary, run_ctest
@@ -93,7 +93,9 @@ class ReproducerResult:
         }
 
 
-def _configure_argv(cmake_path: str, detected: DetectedTarget, build_dir: Path, spec: VariantSpec) -> list[str]:
+def _configure_argv(
+    cmake_path: str, detected: DetectedTarget, build_dir: Path, spec: VariantSpec
+) -> list[str]:
     argv = [
         cmake_path,
         "-S",
