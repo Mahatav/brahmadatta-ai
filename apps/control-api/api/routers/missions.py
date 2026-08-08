@@ -16,10 +16,12 @@ import json
 from uuid import UUID
 
 from django.http import HttpRequest, StreamingHttpResponse
-from ninja import Query, Router
+from ninja import Query, Router, Status
 
 from api.auth import OPERATOR_ROLES, READ_ROLES, require_role
 from api.errors import ERROR_RESPONSES, envelope
+from api.trace import get_trace_id
+from authorization import service
 from contracts.authorization import AuthorizationRecord, AuthorizationRequest
 from contracts.enums import ErrorCode
 from contracts.errors import NotImplementedYetError
@@ -116,7 +118,10 @@ def authorize_mission(
     request: HttpRequest, mission_id: UUID, payload: AuthorizationRequest
 ):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    record = service.authorize_mission(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(201, record)
 
 
 @router.post(
@@ -127,7 +132,10 @@ def authorize_mission(
 )
 def create_snapshot(request: HttpRequest, mission_id: UUID, payload: SnapshotRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    record = service.create_mission_snapshot(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(201, record)
 
 
 @router.post(
