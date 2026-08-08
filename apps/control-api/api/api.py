@@ -7,6 +7,7 @@ TypeScript types from — see `packages/schemas/README.md`.
 
 from __future__ import annotations
 
+from django.conf import settings
 from ninja import NinjaAPI
 
 from api.auth import BearerTokenAuth
@@ -38,14 +39,30 @@ against.
 frozen vocabulary and the request's trace id, which is also returned as `X-Trace-Id`.
 """.strip()
 
+def docs_urls(docs_enabled: bool) -> tuple[str | None, str | None]:
+    """The `(docs_url, openapi_url)` pair `NinjaAPI` is constructed with.
+
+    SEC-05 (#96): `API_DOCS_ENABLED` is `False` in the finale profile
+    (`config/settings/finale.py`), which turns both URLs off at the application layer.
+    nginx closes the same two paths independently
+    (`conf.d.finale/brahmadatta.conf`) — belt and braces, deliberately. A pure function
+    so the gate itself is unit-testable without constructing a second `NinjaAPI`.
+    """
+    if not docs_enabled:
+        return None, None
+    return "/docs", "/openapi.json"
+
+
+_docs_url, _openapi_url = docs_urls(getattr(settings, "API_DOCS_ENABLED", True))
+
 api = NinjaAPI(
     title="Brahmadatta AI Control API",
     version="0.1.0",
     description=DESCRIPTION,
     auth=BearerTokenAuth(),
     urls_namespace="control-api",
-    docs_url="/docs",
-    openapi_url="/openapi.json",
+    docs_url=_docs_url,
+    openapi_url=_openapi_url,
 )
 
 register_exception_handlers(api)

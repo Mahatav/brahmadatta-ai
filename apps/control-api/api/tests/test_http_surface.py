@@ -58,6 +58,31 @@ def test_a_supplied_trace_id_is_echoed_when_it_is_safe(client: Client):
     assert response.headers["X-Trace-Id"] == "abc123def456"
 
 
+# --- SEC-05 (#96): the docs/openapi routes only exist when API_DOCS_ENABLED is True ----
+
+
+def test_docs_urls_are_off_when_the_flag_is_off():
+    from api.api import docs_urls
+
+    assert docs_urls(False) == (None, None)
+
+
+def test_docs_urls_are_on_when_the_flag_is_on():
+    from api.api import docs_urls
+
+    assert docs_urls(True) == ("/docs", "/openapi.json")
+
+
+@pytest.mark.django_db
+def test_docs_and_openapi_are_reachable_under_the_test_profile(client: Client):
+    """The test/development profiles default API_DOCS_ENABLED to True — this is the
+    control for the finale-only gate: the routes exist and answer 200 unauthenticated
+    when the flag is on, so SEC-05's fix is that the finale profile turns it off, not
+    that these routes were unreachable in every profile."""
+    assert client.get("/api/v1/openapi.json").status_code == 200
+    assert client.get("/api/v1/docs").status_code == 200
+
+
 @pytest.mark.django_db
 def test_a_hostile_trace_id_is_replaced(client: Client):
     response = client.get(

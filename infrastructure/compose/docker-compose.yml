@@ -41,7 +41,11 @@ services:
     <<: *hardening
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95): unsized before this, an unauthenticated caller could fill host RAM
+      # through nginx's own request-body buffering (nginx.conf's client_max_body_size
+      # comment explains the mechanism). 256m comfortably covers the 64m body ceiling
+      # plus the client/proxy/fastcgi/uwsgi/scgi temp paths nginx.conf points at /tmp.
+      - /tmp:size=256m
       - /var/cache/nginx
       - /var/run
     cap_drop: ["ALL"]
@@ -91,6 +95,10 @@ services:
       target: dev
     container_name: brahmadatta-control-api
     <<: [*env-file, *hardening]
+    # SEC-04 (#95): mirrors the finale profile's control-api tmpfs sizing so the two
+    # profiles cannot diverge on this the way they had on APP_ENV (SEC-03).
+    tmpfs:
+      - /tmp:size=256m
     environment:
       DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
       # Container-local overrides of the values in apps/control-api/.env.example, which
