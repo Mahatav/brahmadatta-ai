@@ -36,6 +36,23 @@ Pass `--drop ''` to stream the log intact.
 Recovery is the ordinary path: call `/events/replay?since_sequence=12`, which serves
 every event from 13 on, including the withheld ones.
 
+## This is a build tool and it never goes on screen
+
+`docs/09-company/10-fallback-ladder.md` §2.5 bans this fixture from the finale. It is
+realistic fabricated events — that is what makes it useful for building panels, and it is
+exactly what makes it dangerous at hour 30 when the panels are dead and this is the
+obvious thing to reach for. Streaming it in front of a judge would be decorative fake
+telemetry presented as a run.
+
+Two things enforce that here rather than leaving it to a tired operator's judgement:
+
+*   The server binds to loopback only. Serving it on an address someone else can reach
+    needs `--allow-remote`, which prints the ban and is not something you type by
+    accident.
+*   Every response carries `X-Brahmadatta-Fixture: replay`, and the stream opens with a
+    `: FIXTURE REPLAY` comment. A panel, a proxy log, or a screen recording all show what
+    this is.
+
 ## Speed
 
 `--speed` scales the fixture's own inter-event gaps. `--speed 1` runs the mission in its
@@ -157,6 +174,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("X-Trace-Id", "fixture-replay")
+        self.send_header("X-Brahmadatta-Fixture", "replay")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -252,11 +270,23 @@ class ReplayHandler(BaseHTTPRequestHandler):
         # whole stream arrives in a lump at the end, silently. See
         # infrastructure/compose/nginx/includes/sse.conf.
         self.send_header("X-Accel-Buffering", "no")
-        self.send_header("Connection", "keep-alive")
+        # An SSE body has no Content-Length. It is terminated by the connection closing,
+        # which is what `close_connection` below arranges. The alternative — chunked
+        # transfer encoding — would be equally valid but adds a framing layer nginx is
+        # told to strip anyway (`chunked_transfer_encoding off` in includes/sse.conf).
+        # Without one of the two a client blocks forever waiting for a body length that
+        # never comes, which is how this was found.
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        # Fallback ladder §2.5: this stream is fabricated and must never be shown to a
+        # judge. Say so on the wire, so a proxy log or a screen recording carries it too.
+        self.send_header("X-Brahmadatta-Fixture", "replay")
         self.end_headers()
 
         try:
-            self.wfile.write(b": brahmadatta fixture replay open\n\n")
+            self.wfile.write(
+                b": FIXTURE REPLAY - fabricated events, build tool only, never on screen\n\n"
+            )
             self.wfile.flush()
             if resume_after:
                 self.wfile.write(
@@ -318,7 +348,22 @@ class ReplayHandler(BaseHTTPRequestHandler):
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+FIXTURE_BAN = (
+    "docs/09-company/10-fallback-ladder.md §2.5: the #71 fixture is a build tool. It is "
+    "fabricated telemetry and must never be streamed in front of a judge."
+)
+
+
 def serve(args: argparse.Namespace) -> int:
+    if args.host not in LOOPBACK and not args.allow_remote:
+        raise SystemExit(
+            f"refusing to bind {args.host}: this replay serves fabricated mission "
+            f"events.\n{FIXTURE_BAN}\nIf you genuinely need it reachable from another "
+            f"host on the dev network, pass --allow-remote."
+        )
+
     events = load_events(args.fixture)
     dropped = parse_drop(args.drop)
 
@@ -340,6 +385,7 @@ def serve(args: argparse.Namespace) -> int:
     print(f"speed        {args.speed}x (max gap {args.max_gap}s)")  # noqa: T201
     print(f"stream       {base}/events")  # noqa: T201
     print(f"gap recovery {base}/events/replay?since_sequence=N")  # noqa: T201
+    print(f"\nBUILD TOOL - {FIXTURE_BAN}")  # noqa: T201
     print("ctrl-c to stop")  # noqa: T201
 
     try:
@@ -387,6 +433,11 @@ def main(argv: list[str] | None = None) -> int:
         "replay. Pass '' to stream the log intact.",
     )
     parser.add_argument("--loop", action="store_true", help="Restart when the fixture ends.")
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Bind a non-loopback address. Read the fallback ladder §2.5 first.",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
