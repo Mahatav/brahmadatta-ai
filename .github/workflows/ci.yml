@@ -93,27 +93,52 @@ jobs:
     name: pytest
     runs-on: ubuntu-24.04
 
-    # BUG-022. There was no `services:` block here at all, so the whole control API suite
-    # ran on SQLite — and SQLite does not merely fail to prove the locking properties, it
-    # HIDES their failure. `SELECT ... FOR UPDATE` is a no-op there, so the suite is green
-    # whether the locking is right or wrong. QA proved gap-free sequences, the candidate-set
-    # freeze and legal transition chains against a real postgres:16-alpine, in a container
-    # that has since been destroyed. Nothing kept those results true.
+    # BUG-022 (docs/09-company/11-qa-report.md, round 3, "major", devops + backend-developer):
+    # there was no `services:` block here at all, so the whole control API suite ran on
+    # SQLite. That does not merely fail to prove the lock-dependent properties — it HIDES
+    # their failure, and QA measured exactly how much by how, running the SAME shipped code
+    # against both engines:
+    #
+    #   TC-P0  is FOR UPDATE a lock at all?  Postgres: a second connection is REFUSED with
+    #          "could not obtain lock on row". SQLite: the second connection ACQUIRES it
+    #          immediately — the lock call compiles away to a no-op.
+    #   TC-P1  gap-free `sequence` under 8 concurrent writers x 25 events: 200/200 rows,
+    #          gap-free, on Postgres with the lock. The negative control (lock replaced by
+    #          a plain `.get()`, i.e. what an "innocent" refactor produces) LOSES 147 of
+    #          200 writes on Postgres — the unique constraint is a backstop, not a
+    #          substitute for the lock.
+    #   TC-P2  the candidate-set freeze (D-046) under an interleaved insert: 25/25 clean
+    #          under the lock, 25/25 BREACHED without it — same code, same negative-control
+    #          method.
+    #   TC-P2b the same script, same shipped code, against SQLITE: the shipped D-046
+    #          enforcement breaches 6 / 6. Not merely untested there — absent. "231 passed"
+    #          on the SQLite suite is true and describes none of this.
+    #
+    # QA's own words: "this is not a defect in the code; it is the measurement of exactly
+    # how much the CI signal is worth on this property, and it is the argument for BUG-022."
     #
     # The judgement call was whether to SPLIT — most tests on SQLite for speed, the
     # lock-dependent ones on Postgres — or to run everything on Postgres. Split, rejected:
     # every mechanism for assigning a test to the Postgres lane (a marker, a directory, a
     # naming convention) is something a person has to remember, and a lock-dependent test
-    # that lands in the SQLite lane reports green while testing nothing. That is strictly
-    # worse than no split. There is no assignment to get wrong if there is one lane.
+    # that lands in the SQLite lane reports green while testing nothing — which is the exact
+    # failure mode TC-P2b just measured. There is no assignment to get wrong if there is one
+    # lane. QA's own concurrency harnesses (TC-P0/P1/P2) are throwaway scripts, not
+    # committed, and reproducing them as a permanent CI check is out of this scope — tracked
+    # as a follow-up, not silently dropped. This PR closes the SQLite-hides-it half of
+    # BUG-022 (a regression in the compose/finale posture, i.e. an accidental switch back to
+    # SQLite, now fails CI); it does not add the concurrency harnesses themselves.
     #
-    # Cost of the decision: the service container adds roughly 10-15 seconds, started in
-    # parallel with checkout. The suite itself takes seconds either way. SQLite stays the
-    # local default via apps/control-api/config/settings/test.py, which uses setdefault, so
-    # a developer with no Postgres is unaffected and CI overrides it by exporting
-    # DATABASE_URL. Approved by: CTO (technical).
+    # Cost: the service container adds roughly 10-15s, started in parallel with checkout;
+    # QA measured the suite itself at 3.6x wall-clock on Postgres vs SQLite (4.87s vs
+    # 1.29s) — round trips, not meaningfully slower in absolute terms. SQLite stays the
+    # local default via apps/control-api/config/settings/test.py's `setdefault`, so a
+    # developer with no Postgres running is unaffected; CI overrides it by exporting
+    # DATABASE_URL below. Final approval authority: CTO (technical) — recorded as a decision
+    # in this PR per BUG-022's routing ("engineering-manager to route").
     #
-    # 16-alpine matches what QA measured against and what docker-compose.finale.yml runs.
+    # 16-alpine matches what QA measured against (postgres:16-alpine / PostgreSQL 16.13)
+    # and what docker-compose.finale.yml runs.
     services:
       postgres:
         # postgres:16-alpine, pinned by multi-arch index digest, resolved and pull-tested
@@ -230,14 +255,7 @@ jobs:
           DJANGO_SETTINGS_MODULE: config.settings.test
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
           DJANGO_DEBUG: "false"
-          # BUG-022 (round-2 security review of #110): this used to be
-          # sqlite:///ci.sqlite3, and SQLite does not just fail to prove the locking
-          # properties — it hides their failure. SELECT ... FOR UPDATE is a silent no-op on
-          # SQLite, so the suite is green whether the locking is right or wrong. QA proved
-          # gap-free sequences, the candidate-set freeze, and legal transition chains
-          # against a real postgres:16-alpine, in a container that no longer exists.
-          # Nothing kept those results true afterwards. `services:` above is that container,
-          # restored.
+          # See BUG-022 above `services:` for why this is Postgres, not sqlite:///ci.sqlite3.
           DATABASE_URL: "postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci"
         run: |
           set -euo pipefail
@@ -246,22 +264,45 @@ jobs:
             exit 0
           fi
           pip install -r apps/control-api/requirements.txt
+
+          # Drop any test_* database left on the service BEFORE running, so "a test_*
+          # database exists afterward" is evidence about THIS run and not a stale leftover.
+          # GitHub-hosted runners give every job a fresh service container, so this never
+          # fires there — it matters on a reused/self-hosted runner, and it is what caught
+          # a false pass in this PR's own local verification: a `test_ci` database left
+          # over from an earlier manual run made a genuinely broken check (DATABASE_URL
+          # pointed at sqlite, Postgres untouched) report PASS, because the check only
+          # asked "does one exist" instead of "did THIS run make one".
+          python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci')
+          conn.autocommit = True
+          names = [r[0] for r in conn.execute(\"SELECT datname FROM pg_database WHERE datname LIKE 'test%'\").fetchall()]
+          for n in names:
+              conn.execute(f'DROP DATABASE \"{n}\"')
+          print(f'pre-run cleanup: dropped {names}' if names else 'pre-run cleanup: nothing to drop')
+          "
+
           cd apps/control-api
           # --reuse-db is CI-only, passed here rather than in pytest.ini (owned by the
           # backend developer). Without it pytest-django DROPS the test database at
-          # teardown, and the "did this actually touch Postgres" check below would always
-          # fail regardless of what the suite did — verified in this session.
+          # teardown, and the check below would always find nothing regardless of what the
+          # suite did — verified in this session, before the pre-run drop above was added.
           pytest -q --reuse-db
-          # The suite can pass while never having opened a connection — that is exactly
-          # how this went unnoticed on SQLite. Assert Django actually created and used a
-          # Postgres test database, not just that pytest exited 0.
+
+          # The suite can pass while never having opened a connection to Postgres at all —
+          # that is exactly how BUG-022 went unnoticed. Assert Django actually created and
+          # used a Postgres test database THIS run, not just that pytest exited 0.
           python -c "
-          import os, psycopg
+          import psycopg
           conn = psycopg.connect('postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci')
           conn.autocommit = True
           rows = conn.execute(\"SELECT datname FROM pg_database WHERE datname LIKE 'test%'\").fetchall()
-          assert rows, 'no test_* database found on the Postgres service — the suite did not touch Postgres'
-          print(f'ok: pytest-django created and used {[r[0] for r in rows]}')
+          assert rows, (
+              'no test_* database found on the Postgres service after this run — the '
+              'suite did not touch Postgres. Check DATABASE_URL above.'
+          )
+          print(f'ok: pytest-django created and used {[r[0] for r in rows]} on this run')
           "
 
       # Runs AFTER the control-API install, on purpose and for the same reason as BUG-016.
