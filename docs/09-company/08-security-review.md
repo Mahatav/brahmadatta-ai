@@ -29,6 +29,7 @@ says so in §7 rather than being left out.
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 | **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS WITH CONDITIONS** — SEC-26 (High) before any extraction stage is built on this; SEC-27, SEC-28, SEC-31 before merge; SEC-29, SEC-30 before #12/upload land. No Critical. Mission-row lock **verified serializing under real Postgres**, not just SQLite. Round-4 pass in **§15**. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -2887,3 +2888,617 @@ Exact pinning without an audit step is a decision to freeze whatever was vulnera
 
 **Final approval authority** — CTO (technical/CI); cybersecurity sets the dependency policy
 requirement.
+
+---
+
+## 15. Round 4 — 2026-08-08 · PR #119 `feat/authorize-snapshot` · the authorization gate and snapshot ingest
+
+Reviewed at `2ae5173` (`origin/feat/authorize-snapshot`), in an isolated `git worktree` off
+`origin/main` (`/Users/manu/Documents/GitHub/brahmadatta-ai-pr119`, branch
+`review/security-authorize-snapshot`). No code edited, no other role's files changed. Two
+other agents were live in `services/model-gateway/`, `adapters/cpp/`, `infrastructure/` during
+this review; none of their trees were touched.
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Seven new findings (SEC-26…SEC-32), one High
+(SEC-26) and four Medium. The core claim — every id this gate accepts is checked against the
+*locked* mission row, not against what the caller merely asserts — holds everywhere I probed it,
+including under real concurrent writers on Postgres. What does not fully hold is two things one
+level down from that claim: an archive-safety check that covers path-shaped traversal but not
+link-shaped traversal, and a cross-mission uniqueness check that is correct in outcome but not
+atomic under real concurrency. Full reasoning in §15.4–§15.6.
+
+### 15.1 Scope and what I ran, for real, this session
+
+```
+$ cd apps/control-api && python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+$ DJANGO_SETTINGS_MODULE=config.settings.test .venv/bin/python -m pytest -o addopts=""
+======================= 294 passed, 2 warnings in 1.90s ========================
+
+$ source .venv/bin/activate && python manage.py check
+System check identified no issues (0 silenced).
+$ python manage.py makemigrations --check --dry-run
+No changes detected
+
+$ bash infrastructure/scripts/openapi-contract-check.sh
+openapi contract: PASS — the committed dump matches the live schema
+
+$ .venv/bin/ruff check apps/control-api/authorization apps/control-api/api/tests/test_authorize_snapshot.py \
+    apps/control-api/api/routers/missions.py apps/control-api/config/settings/base.py
+All checks passed!
+
+$ .venv/bin/pip-audit -r requirements.txt -r requirements-dev.txt
+No known vulnerabilities found
+```
+
+Every one of the PR body's claimed results reproduced independently, on a venv I built myself
+from the pinned requirements files, not from the author's environment. **294/294, ruff clean,
+OpenAPI unchanged, no missing migrations, no vulnerable pin — all confirmed by me, not taken on
+report.**
+
+Also run, not claimed by the PR body:
+
+```
+$ detect-secrets scan apps/control-api/authorization apps/control-api/api/routers/missions.py \
+    apps/control-api/config/settings/base.py apps/control-api/.env.example
+# no findings besides the placeholder ARTIFACT_ROOT=/SNAPSHOT_SOURCE_ROOT=/SNAPSHOT_STAGING_ROOT=
+# blank defaults in .env.example — not secrets, unset placeholders.
+$ git ls-files | grep -i '\.env$'
+# (nothing — .env is not tracked; .gitignore:22-23 covers it)
+```
+
+### 15.2 The SEC-15-pattern probe, run against every id these two endpoints accept
+
+This is the thing I was asked to go looking for, specifically: `mission_id` vs. `repository_ref`
+vs. `archive_ref` vs. cross-mission `Artifact.sha256` reuse, each checked against the *locked*
+mission row rather than against what the caller merely claims.
+
+| id | Checked against | Where | Verified how |
+|---|---|---|---|
+| `mission_id` | `Mission.objects.select_for_update().get(pk=mission_id)` — the lock itself | `service.py:57-64` | Read; the lock is the first statement in both `authorize_mission` and `create_mission_snapshot`. |
+| `AuthorizationRequest.repository_ref` | `mission.repository_ref` (the locked row), exact string equality | `service.py:88-94` | **Independently re-verified by injection** — disabled the check, `test_authorization_for_a_different_repository_is_refused` and `test_a_refused_authorize_leaves_no_authorization_row_behind` went red (403→201), restored, green again. §15.3. |
+| `SnapshotRequest.archive_sha256` (caller's assertion) | The digest actually computed by re-hashing the bytes the server itself streamed to disk (`store.ingest_from_path`) | `service.py:161-167` | Read + the PR's own `test_a_digest_the_server_cannot_verify_is_refused` / `test_a_swapped_archive_is_refused`, both still green in my run. Not independently re-injected by me — time-boxed to the two checks in §15.3 instead. |
+| `Artifact.sha256` (content-addressed) | Every **other** mission's claim on the same digest | `service.py:171-173` | **Independently re-verified by injection** — disabled the check, `test_an_archive_digest_already_claimed_by_another_mission_is_refused` went red (409→201), restored, green again. §15.3. **Also independently re-verified under real concurrent Postgres writers**, where it found a real gap — SEC-27, §15.5. |
+| `archive_ref` (staging-root path) | The fixed `SNAPSHOT_STAGING_ROOT` boundary, never against the mission | `service.py:201-215, 261-286` | Read. **Not** checked against the mission at all — this is real, and it is SEC-30, not a false alarm: `archive_ref` is a shared, flat, non-mission-scoped namespace by design. |
+| `repository_ref` used to locate bytes | The fixed `SNAPSHOT_SOURCE_ROOT` boundary, by basename only | `service.py:218-258` | Read + symlink-escape and `..`-traversal manual probes, both correctly refused (§15.6 details the one gap that basename-only resolution has, which is not a traversal — it's a collision — SEC-29). |
+
+**Net finding of the probe itself: the pattern SEC-15 named — an id accepted from a request and
+never compared to the thing it is supposed to belong to — does not recur here for `mission_id`,
+`repository_ref` (the authorization-declaration check), or `archive_sha256`/`Artifact.sha256` in
+the single-threaded case.** Two adjacent gaps do exist, and they are not the SEC-15 pattern
+exactly — they are a *link-following* variant of the same "check what's named, not what's really
+there" family (SEC-26) and a *missing atomicity* variant of the same cross-mission check done
+right in principle (SEC-27). Neither is a case of an id simply never being checked.
+
+### 15.3 Independent re-verification by injection, per the standing rule
+
+I did not trust the PR body's own injection table. I re-ran two of the five rows myself, on the
+unmodified worktree, saving a `diff`-verified backup before each edit and restoring it after:
+
+**Injection 1 — disable `require_active_authorization` in `create_mission_snapshot`:**
+
+```
+--- authorization/service.py
++        # require_active_authorization(mission, MissionStage.INGEST, now)
+```
+```
+$ pytest api/tests/test_authorize_snapshot.py -k "without_an_authorization or expired_authorization or revoked_authorization"
+FAILED test_snapshot_without_an_authorization_is_refused
+FAILED test_snapshot_with_an_expired_authorization_is_refused
+FAILED test_snapshot_with_a_revoked_authorization_is_refused
+  assert 409 == 403   # fell through to the digest-mismatch check instead of refusing up front
+3 failed, 16 deselected
+```
+Restored. `diff -q` against the pre-injection file: identical. Full 19-test file green again.
+
+**Injection 2 — disable the cross-mission artifact-claim check in `create_mission_snapshot`:**
+
+```
+--- authorization/service.py
++        # if existing_artifact is not None and existing_artifact.mission_id != mission.id:
++        #     raise SnapshotArtifactClaimedError(details={"sha256": result.sha256})
+```
+```
+$ pytest api/tests/test_authorize_snapshot.py -k already_claimed
+FAILED test_an_archive_digest_already_claimed_by_another_mission_is_refused
+  assert 201 == 409   # a second mission's snapshot silently claimed the first mission's artifact
+1 failed, 18 deselected
+```
+Restored. Full 294-test suite re-run: **294 passed.**
+
+Both of the checks I chose to re-verify are the two most load-bearing ones for the SEC-15 pattern
+specifically — the pre-I/O authorization gate, and the cross-mission artifact binding. Both are
+genuinely load-bearing, not merely present. I did not re-inject the digest-mismatch or
+member-safety checks myself; those are read-verified only (member safety is separately attacked
+in §15.6, which found the real gap the injection table did not cover).
+
+### 15.4 The mission-row lock under real concurrency, not SQLite
+
+The PR's own caveat: `SELECT ... FOR UPDATE` is a no-op on SQLite, so "lock the mission row
+first, check everything against the locked row" was exercised single-threaded only. I stood up
+an isolated `postgres:16-alpine` container (port 15432, unrelated to the other agents'
+`brahmadatta-db` container, removed at the end of this session), ran real migrations against it,
+and drove two real threads with two real DB connections at three scenarios.
+
+```
+=== Scenario A: same mission, two concurrent identical-digest snapshot posts ===
+Thread X: ('ok', UUID(...))
+Thread Y: ('ok', UUID(...))   <- same UUID as X
+Snapshot rows for mission: 1
+
+=== Scenario C: same mission, two concurrent DIFFERENT-digest snapshot posts ===
+Thread P (digest1): ('ok', UUID(...), 'e639f1...')
+Thread Q (digest2): ('SnapshotAlreadyRecordedError', 'This mission already has a snapshot with a different digest.')
+Snapshot rows recorded for the mission: ['e639f1...']
+```
+
+**Confirmed under real Postgres: the mission-row lock genuinely serializes.** The loser in
+Scenario C did not race, did not see a stale read, and was not able to overwrite the winner's
+snapshot — it blocked on the row lock, then read the winner's already-committed row and refused
+correctly with the documented `409`. This is exactly the property the PR's docstring claims and
+it was previously unverified. **I am closing that half of the caveat: proven, not merely
+asserted, on real Postgres, by me, this session.**
+
+### 15.5 SEC-27 — the half of the caveat that did *not* hold
+
+```
+=== Scenario B: two DIFFERENT missions, byte-identical content, forced interleave
+     via a barrier placed around Artifact.objects.filter(pk=...).first() ===
+Thread A (mission_a): ('ok', UUID(...))
+Thread B (mission_b): ('error', "IntegrityError: duplicate key value violates unique
+    constraint \"artifact_pkey\"\nDETAIL: Key (sha256)=(0ff12f...) already exists.")
+Artifact rows for this digest: 1
+Snapshot rows: mission_a=1 mission_b=0
+```
+
+**The reason this scenario needed a forced interleave and Scenarios A/C did not:** the mission-row
+lock only ever protects *one* mission's row. Two different missions' transactions never contend
+for the same lock, so `Artifact.objects.filter(pk=result.sha256).first()` (`service.py:171`) and
+`Artifact.objects.create(...)` (`service.py:175-180`) are a check-then-act pair with no lock
+spanning both operations, for the cross-mission case specifically. A barrier around `.first()`
+made the race deterministic instead of relying on thread-scheduling luck; the underlying gap is
+real regardless of the barrier — it is a property of the code, not of my harness.
+
+**Outcome quality: correct in the end, wrong in the telling.** The Postgres primary-key
+constraint on `Artifact.sha256` is a real backstop — exactly one Artifact row exists, exactly one
+mission ends up owning it, no data corruption occurred. But the loser did not get the documented,
+tested `SnapshotArtifactClaimedError` → `409 CONFLICT`; it got a raw, unhandled
+`django.db.utils.IntegrityError` → the generic `api.errors._unhandled` handler → `500 Internal
+Error`, logged as `"unhandled error"` even though this is a fully anticipated, already-named
+condition with its own exception class three lines above it. `api/errors.py`'s unhandled-exception
+path does not leak internal detail to the client (confirmed by reading it — generic message, trace
+id only), so this is not an information-disclosure finding. It is a correctness/robustness finding
+that reproduces on demand.
+
+**MEDIUM.** Rated below SEC-26 because (a) no data integrity or authorization property is broken
+— the artifact ends up bound to exactly one mission, which is the property the check exists to
+guarantee — and (b) the actor is an authenticated operator racing themselves or another operator,
+not an external attacker, under the current flat single-`OPERATOR`-role trust model. Rated Medium
+rather than Low because it is a demonstrated, reproducible divergence between the tested contract
+and the concurrent-runtime behavior, in the exact module whose caveat predicted this class of gap.
+
+**Required fix.** Wrap the `Artifact.objects.create(...)` call in `try`/`except IntegrityError`
+and re-raise `SnapshotArtifactClaimedError` on a unique-violation of the primary key — three lines,
+same shape as the existing check, and it turns the accidental-500 case into the documented 409
+without changing behavior in the non-racing case. Add a regression test using the same
+barrier-around-`.filter()` technique in this review (or Django's `TransactionTestCase` with two
+real threads against the test Postgres container) so this is pinned rather than re-discovered.
+
+**Location** — `apps/control-api/authorization/service.py:171-180`.
+
+### 15.6 SEC-26 — the zip-slip check covers member *names*, not member *links*
+
+`archive.py`'s docstring makes an explicit promise: `_is_safe_member_name` exists "so a downstream
+stage that does extract this archive should never have to make that judgement call again with less
+context than this one has." I took that promise as the thing to attack, per the task brief.
+
+**The check.** `_is_safe_member_name(member.name)` is called for every tar and zip member and
+correctly refuses `../../etc/passwd`-style and absolute names (`archive.py:33-39`,
+`_enumerate_tar:65-69`, `_enumerate_zip:93-97`) — I re-read this and it is genuinely correct for
+what it checks. **What it does not check, for a tar member specifically: `member.linkname`, or
+`member.type` (`SYMTYPE`/`LNKTYPE`).** A tar symlink or hardlink member can carry an innocuous,
+fully-safe `name` while its `linkname` points anywhere on the filesystem the extracting process can
+reach. `enumerate_members` never extracts, so it never notices.
+
+**Executed PoC, both halves — first that the "safe" gate accepts the archive, second what an
+ordinary extraction of an archive that passed it actually does:**
+
+```
+>>> tar = a symlink member name="innocuous_link" -> linkname="../../../../etc",
+...       plus a regular member name="innocuous_link/passwd" containing attacker bytes
+>>> _is_safe_member_name("innocuous_link")          -> True
+>>> _is_safe_member_name("innocuous_link/passwd")   -> True
+>>> enumerate_members(tar_path)                     -> ACCEPTED: ArchiveInfo(file_count=1, bytes_total=14)
+```
+
+That alone proves the gate misses the class. To show it is not a theoretical miss, I extracted the
+*same archive that `enumerate_members` accepted*, the ordinary way, on this project's own target
+interpreter:
+
+```
+$ python3.12 -c "print(tarfile.TarFile.extraction_filter)"
+None
+DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives...
+```
+
+Python 3.12 — the interpreter this project's own `README.md` tells every developer to build the
+venv with — ships the PEP 706 filter machinery but **defaults `extraction_filter` to `None`**,
+i.e. **unfiltered**, exactly like every Python version before it. The filter only becomes the
+default in 3.14. A plain `tar.extractall(dest)` — the ordinary, unremarkable way the next developer
+who writes the BASELINE/ANALYZE extraction stage will call it — gets no protection at all from the
+interpreter, only from whatever `archive.py` checked in advance.
+
+```
+>>> evil_dir_target = a real directory OUTSIDE the intended extraction root, containing
+...                    a pre-existing file HIDDEN_SECRET with known content
+>>> tar.extractall(extract_root)   # default filter=None, no filter= kwarg passed
+>>> open(victim_file).read()
+'ATTACKER CONTROLLED CONTENT\n'
+```
+
+**Confirmed: an archive that `enumerate_members` reports as safe, extracted the ordinary way,
+overwrites an arbitrary file outside the destination directory.** This is CWE-59 (Link Following),
+the symlink variant of the zip-slip family — distinct from, and not covered by, the path-traversal
+variant the existing test (`test_a_tar_with_a_path_traversal_member_is_refused`) and the module's
+own name-based check actually defend against.
+
+**HIGH, not Critical.** No extraction code path exists anywhere in this PR or the reachable
+control-api today — `enumerate_members` only counts, it never writes. Nothing an external attacker
+can reach over HTTP is compromised by this today. It is High rather than Critical because of that,
+and High rather than Medium because: (a) extraction of exactly these archives is not speculative —
+it is the explicit, near-term purpose of the BASELINE stage this same mission pipeline is built
+around; (b) the module's docstring makes an affirmative, specific safety promise to that future
+developer, and the promise is false; (c) zip-slip-class defects are a named CWE with well-understood
+severity once the write path exists, and fixing it now, before any consumer relies on the false
+promise, is materially cheaper than fixing it after BASELINE ships and depends on it.
+
+**Required fix**, either is sufficient on its own, both is better:
+
+1. In `_enumerate_tar`, refuse any member where `member.issym() or member.islnk()`
+   (`TarInfo.SYMTYPE`/`TarInfo.LNKTYPE`) outright — a repository snapshot has no legitimate reason
+   to contain a symlink or hardlink, and `build_tar_from_directory` (the only *writer* this PR
+   ships) never produces one, so refusing them costs nothing today.
+2. If symlinks must be permitted later, additionally validate `member.linkname` with the same
+   `_is_safe_member_name`-style containment check applied to the *resolved* target, not just the
+   member's own name.
+3. A test that builds the exact PoC archive above and asserts `enumerate_members` raises
+   `UnreadableArchiveError` — the zip case should get the analogous check for completeness even
+   though Python's stdlib `zipfile.extractall` does not itself create symlinks from Unix mode bits.
+
+**Location** — `apps/control-api/authorization/archive.py:33-39` (`_is_safe_member_name`),
+`:59-78` (`_enumerate_tar`, the call site that never inspects `member.linkname`/`member.type`).
+
+### 15.7 SEC-28 — `RepositoryOutOfScopeError`'s error code contradicts the check that just ran
+
+The author's own flagged open question, judged rather than assumed, per the task brief.
+
+**The problem, precisely.** `RepositoryOutOfScopeError` fires inside `_resolve_repository_ref`
+(`service.py:218-258`), which is called from `_materialize_source`, which is called from
+`create_mission_snapshot` **after** `require_active_authorization` (`service.py:138`) has already
+run and already confirmed an active, unrevoked, unexpired authorization covers this stage. By the
+time a caller can hit `RepositoryOutOfScopeError`, the system has already proven the authorization
+*is* valid. Labeling the resulting refusal `ErrorCode.INVALID_AUTHORIZATION` tells the operator the
+opposite of what was just established, for a failure that is actually about something else
+entirely: the configured `SNAPSHOT_SOURCE_ROOT` deployment doesn't have this repository checked
+out, or the operator supplied a remote URL this endpoint doesn't fetch.
+
+**Why this is a real (if Medium) finding and not a style nit.** `ErrorCode.UNSUPPORTED_REPOSITORY`
+already exists in the frozen vocabulary and is used, in this exact file, for exactly this class of
+failure — `UnreadableArchiveError` (`errors.py:94-105`, "the archive could not be read as a tar or
+zip") is `UNSUPPORTED_REPOSITORY`, not `INVALID_AUTHORIZATION`, for the identical reason: the
+authorization is not in question, the *source material* is. Conflating "your authorization is
+invalid" with "this deployment cannot read the repository you pointed at" sends an operator toward
+the wrong remediation (re-authorizing, which will fail identically every time) instead of the right
+one (stage the repository locally, or recognize that remote fetch isn't supported). This is exactly
+the kind of mislabeling the standing rule about naming things honestly exists to catch, one level
+below "does the check exist" — the check exists and is correct; the *label on its refusal* is not.
+
+**Ruling on the author's open question:** `INVALID_AUTHORIZATION` is the wrong code.
+`ErrorCode.UNSUPPORTED_REPOSITORY` is correct, matching the sibling error one function away in the
+same file. This also changes the HTTP status from `403` to whatever `UnreadableArchiveError` uses
+(`422`) for consistency, or the class can keep `403` with `UNSUPPORTED_REPOSITORY` if 403 is judged
+the better status for a scope refusal — the code is the finding, the status is a secondary call for
+whoever fixes it.
+
+**Required fix.** `errors.py:107-121`: change `RepositoryOutOfScopeError.code` from
+`ErrorCode.INVALID_AUTHORIZATION` to `ErrorCode.UNSUPPORTED_REPOSITORY`. Update
+`test_repository_ref_with_an_unsupported_scheme_is_refused` (`api/tests/test_authorize_snapshot.py:471`)
+accordingly — it currently pins the wrong code, which is why this shipped.
+
+**Location** — `apps/control-api/authorization/errors.py:107-121`.
+
+### 15.8 SEC-29 — basename-only `repository_ref` resolution collapses distinct paths onto one directory
+
+Judging the author's other flagged decision, per the task brief: basename-only lookup under
+`SNAPSHOT_SOURCE_ROOT` versus joining a containment-checked full path versus a registry.
+
+**The traversal question is correctly closed.** I read `_resolve_repository_ref`
+(`service.py:218-258`) specifically looking for a string an operator could put in `repository_ref`
+that reaches outside `SNAPSHOT_SOURCE_ROOT`, and there isn't one — only `PurePosixPath(...).name`
+survives, backslashes are normalized to forward slashes first, and the result is re-checked against
+`root.resolve()`'s parents regardless. This is a genuinely stronger construction than "join and
+check containment," for the reason the author's decision record gives: there is no path-shaped
+input left to get wrong. **I endorse this half of the decision.**
+
+**What the decision record does not weigh: identity, not traversal.** Basename-only resolution
+means `file:///org-a/repos/pktcfg`, `file:///org-b/repos/pktcfg`, and bare `pktcfg` are
+*indistinguishable* — all three resolve to the identical `SNAPSHOT_SOURCE_ROOT/pktcfg`. Two
+missions whose operators each correctly declared a `repository_ref` that matches their own
+mission's row (so the SEC-15-pattern check in `authorize_mission` passes for both, honestly) can
+still end up snapshotting the exact same on-disk directory if their intended repositories merely
+share a final path component — silently substituting the wrong repository's content into one
+mission's immutable, authorized evidence record, with no error anywhere in the request path.
+
+**Not reachable today.** `create_mission` is still `NotImplementedYetError` (confirmed by reading
+`api/routers/missions.py:74-79`), so `repository_ref` is presently server-side fixture/ORM data, not
+attacker- or even operator-reachable through the HTTP surface. This is why it is Medium rather than
+High: it is a design gap in code that is real and merged, not a live bypass.
+
+**MEDIUM, and it should be closed before #12 lands `create_mission`,** not after — once mission
+creation is a real endpoint, whoever names the second repository with a colliding basename does not
+need malicious intent, only bad luck with directory naming (`pktcfg` is exactly the kind of short,
+generic name a second target is likely to also use).
+
+**Required fix, either is sufficient:** (a) a uniqueness constraint or startup check enforcing that
+every directory directly under `SNAPSHOT_SOURCE_ROOT` has a name used by at most one
+`repository_ref` value across all missions — cheap, and keeps the current traversal-proof
+resolution; or (b) move to the author's option (c), a registry mapping `repository_ref` to a
+specific directory, once #12 exists and there is a natural place to put it. I am not picking
+between them — that is an implementation call for the owning developer — but I am requiring that
+this decision explicitly re-examine the identity question, not only the traversal question, before
+`create_mission` ships.
+
+**Location** — `apps/control-api/authorization/service.py:218-258` (`_resolve_repository_ref`).
+
+### 15.9 SEC-30 — `archive_ref` is a shared namespace with no mission scoping at all
+
+**The gap.** Whenever a caller supplies `archive_ref` (for `source="upload"`, or for
+`source="git"` with `archive_ref` also set — both real, tested code paths per the PR body's scope
+decision 2), it is resolved under `SNAPSHOT_STAGING_ROOT` and is **never compared to the requesting
+mission in any way** (`service.py:261-286` — contrast with `_resolve_repository_ref`, which at
+least derives from the mission's own row). `SNAPSHOT_STAGING_ROOT` is one flat directory shared by
+every mission.
+
+**Exploit scenario, combined with SEC-27.** Suppose mission A's operator stages a file at
+`archive_ref="build.tar"` (a real path once an upload endpoint exists) but has not yet called
+`/snapshot`. Any operator — including one working an unrelated mission B — can supply
+`archive_ref="build.tar"` on **mission B's** `/snapshot` call. If mission B's request is processed
+first, mission B's `Artifact` row claims that digest; when mission A subsequently calls `/snapshot`
+with its own correctly-computed digest, it is refused with `SnapshotArtifactClaimedError` — a
+mission denied a snapshot of its *own* staged content because a different mission's operator
+happened to name the same staged file first.
+
+**Tempered by two things.** First, the current role model (`api/auth.py:83-85`) is a single flat
+`OPERATOR` role with no per-mission ACL — every operator can already act on every mission, so this
+is not a privilege-boundary crossing between distrusting parties under the system as designed
+today. Second, no upload endpoint exists yet to place operator-influenced content at a
+`archive_ref`-addressable path — `SNAPSHOT_STAGING_ROOT` is only reachable from fixtures in the
+test suite right now.
+
+**MEDIUM.** Real design gap, not a live bypass, in code that is merged and tested. The entire
+purpose of the content-addressed `Artifact` index with mission binding (the check SEC-27 is about)
+is to make evidence unambiguously belong to the mission that produced it; leaving the *path that
+produces the bytes* completely unscoped by mission undermines that purpose even under a flat trust
+model, because "which mission's operator gets first claim on a race" is not the same guarantee as
+"this snapshot is this mission's own declared content."
+
+**Required fix.** Before an upload endpoint ships: either namespace staged uploads per-mission
+(e.g. `SNAPSHOT_STAGING_ROOT/<mission_id>/<archive_ref>`, so one mission's `archive_ref` value
+cannot resolve to another mission's staged bytes at all), or require the staging mechanism to record
+which mission a staged file was intended for and check it in `_materialize_source`. This does not
+need to block #18 in isolation — no upload endpoint exists to exploit it through yet — but it must
+be resolved as part of, not after, whichever PR adds one.
+
+**Location** — `apps/control-api/authorization/service.py:261-286` (`_materialize_source`),
+`:201-215` (`_resolve_under_root`).
+
+### 15.10 SEC-31 — the module's own docstring cites tests that do not exist
+
+`apps/control-api/authorization/__init__.py:27-33` lists, as the evidence for property 4 ("no
+stage runs without an active record"):
+
+```
+— ::test_snapshot_without_an_authorization_is_refused,
+  ::test_preflight_without_an_authorization_is_refused,
+  ::test_start_without_an_authorization_is_refused
+```
+
+```
+$ grep -rn "test_preflight_without_an_authorization_is_refused\|test_start_without_an_authorization_is_refused" \
+    --include="*.py" apps/control-api
+(no output)
+```
+
+**Neither test exists anywhere in the codebase.** `preflight_mission` and `start_mission`
+(`api/routers/missions.py:150-168`) are unconditional `NotImplementedYetError` — they raise before
+any authorization check, any orchestrator call, or any business logic runs at all (confirmed by
+reading; `require_role` runs, then the router body is exactly one line). The property these two
+citations claim to demonstrate is not merely undemonstrated at those two stages — it cannot be,
+because nothing reachable at those routes touches the authorization gate yet.
+
+**LOW-MEDIUM.** No security control is weakened by this — it's a documentation-accuracy defect, not
+a code defect — but it sits inside the exact module whose stated purpose is to be the trustworthy
+record of what this gate enforces, in a codebase whose own standing rule is "a property is described
+as enforced only when a named test demonstrates it." A future reviewer or auditor reading this
+docstring as the authoritative summary (which its position and tone invite) would reasonably, and
+wrongly, conclude `preflight`/`start` already refuse without authorization.
+
+**Required fix.** Either write the two tests against the real `NotImplementedYetError` behavior (a
+test that a stub 501s regardless of authorization state is a legitimate, if weak, thing to assert
+and name), or remove the two false citations and replace them with an explicit statement of what
+§15.11 below states: the property is demonstrated at `INGEST` only, and is not yet reachable at the
+other nine stages.
+
+**Location** — `apps/control-api/authorization/__init__.py:27-34`.
+
+### 15.11 SEC-32 · INFO · `Authorization.snapshot_sha256` binding is inert — every authorization is unbound
+
+`contracts/authorization.py:48-53` documents `snapshot_sha256`: "Once set, the authorization covers
+this snapshot and no other." `covers_snapshot` (`:87-95`) returns `True` unconditionally whenever
+`record.snapshot_sha256 is None`.
+
+```
+$ grep -rn "snapshot_sha256" apps/control-api --include="*.py" | grep -v tests
+# every hit is a READ (covers_snapshot, load_active_authorization, latest_snapshot_sha256,
+# assert_stage_can_run) or a schema field declaration. No call anywhere sets
+# Authorization.snapshot_sha256 to anything other than its column default (NULL).
+```
+
+`authorize_mission`'s `Authorization.objects.create(...)` (`service.py:97-104`) never passes
+`snapshot_sha256`. Every `Authorization` row this PR can produce is therefore permanently unbound,
+and `covers_snapshot` returns `True` for it against any snapshot digest, forever.
+
+**Not a live gap today.** The scenario this binding exists to prevent — an authorization granted
+for one snapshot being reused to justify work on a *different, later* snapshot of the same mission
+— cannot currently occur regardless, because `create_mission_snapshot` is write-once per mission
+(`SnapshotAlreadyRecordedError`, independently confirmed serialized under real Postgres in §15.4).
+So the two guarantees currently overlap completely: one mission, one snapshot, one (or more renewed)
+unbound authorization, and `covers_snapshot` being permanently `True` changes nothing observable.
+
+**INFO, tracked rather than rated as a finding with a required fix**, because there is no code path
+today where it matters. Flagging it so nobody reads the schema docstring's "once set" language and
+assumes the binding is enforced — it is declared, and it is inert. Whoever implements
+re-authorization-after-re-snapshot, or any flow that produces a second snapshot for a mission (a
+future scope change), must either set this field or explicitly re-justify why it is still safe to
+leave unset.
+
+**Location** — `apps/control-api/authorization/service.py:97-104`; `contracts/authorization.py:48-53,87-95`.
+
+### 15.12 What was reachable, and what plainly was not — the nine-stub caveat
+
+Confirmed by reading `api/routers/missions.py` directly, not inferred from the PR body: **only
+`authorize_mission` and `create_snapshot` call into `authorization.service`.**
+`create_mission`, `list_missions`, `get_mission`, `preflight_mission`, `start_mission`,
+`pause_mission`, `cancel_mission`, `replay_events` and `stream_events` all raise
+`NotImplementedYetError` (or its SSE equivalent) unconditionally, **before** any authorization
+check, any state-machine call, or any business logic runs.
+
+**"No stage runs without an active authorization record" is demonstrated for exactly one stage:
+`INGEST`, via `/snapshot`.** It is not merely "weakly demonstrated" at `BASELINE`/`TRIAGE`/etc — it
+is **not exercised at all**, because those routes 501 unconditionally and never reach the
+orchestrator or the guard. This matches the PR body's own §"NOT RUN" item 4, and I am independently
+confirming it reads correctly, not softening or inflating it: the property this gate exists to
+prove holds for the one stage that is wired up, and is simply not yet testable — not "not yet
+proven," genuinely not yet testable — for the other nine.
+
+### 15.13 What I did not review
+
+1. **The frontend / OpenAPI-consumer side of any of this.** No `apps/command-center` code exists
+   yet to check against the (unchanged) contract.
+2. **`mypy`.** Not run — the PR body says the same.
+3. **The `.env.example` new keys' effect on the finale/development profile system checks** beyond
+   `manage.py check` passing on the test profile. I did not run the finale-profile checks against
+   these four new settings specifically.
+4. **A live upload endpoint.** Does not exist; SEC-30's exploit path is analyzed against the code as
+   written, not executed against a running upload flow.
+5. **Concurrent `authorize_mission` calls racing a `create_mission_snapshot` call for the same
+   mission** (as opposed to same-endpoint races, which §15.4/§15.5 cover). Not run.
+6. **Resource/DoS behavior of `build_tar_from_directory`** against a very large or very deep
+   directory tree (as opposed to `ingest_from_path`'s `max_bytes` ceiling, which I did verify —
+   §15.1 covers the file-permission and ceiling checks I ran and are not repeated here since they
+   held: `0600`/`0700` confirmed on disk, oversized source correctly refused mid-stream with the
+   temp file cleaned up, no orphan).
+7. **`infrastructure/`, `services/model-gateway/`, `adapters/cpp/`** — out of scope for this PR;
+   other agents' live work, untouched.
+
+### 15.14 Verdict
+
+**PASS WITH CONDITIONS.** No Critical finding. The core promise this gate exists to make — every
+id is checked against the *locked* mission row, not against what the caller claims — holds
+everywhere I probed it, including under real concurrent Postgres writers, which was the specific
+thing left unproven going into this review. Two adjacent checks (archive link-safety,
+cross-mission-claim atomicity) do not fully hold, and one already-flagged error-code choice is
+confirmed wrong. None of the seven findings below allow an unauthorized caller to bypass the
+authorization gate, forge a digest, or corrupt another mission's evidentiary record through any
+HTTP surface reachable today.
+
+**Conditions on merge:**
+
+1. **SEC-26 (HIGH)** — refuse tar symlink/hardlink members outright in `archive.py`, before any
+   extraction-capable stage is built on top of this module. This is the one condition I would treat
+   as a hard blocker on the *next* PR that adds archive extraction, even though it does not block
+   this one.
+2. **SEC-27 (MEDIUM)** — catch the `IntegrityError` on the cross-mission artifact-claim race and
+   re-raise `SnapshotArtifactClaimedError`; add a concurrency regression test.
+3. **SEC-28 (MEDIUM)** — `RepositoryOutOfScopeError` → `ErrorCode.UNSUPPORTED_REPOSITORY`, and
+   update the one test that currently pins the wrong code.
+4. **SEC-31 (LOW-MEDIUM)** — remove or make true the two false test citations in
+   `authorization/__init__.py`.
+
+**Tracked, not blocking this PR, but blocking the PR that makes them reachable:**
+
+5. **SEC-29 (MEDIUM)** — resolve the basename-collision identity gap before `create_mission` (#12)
+   lands and `repository_ref` becomes operator-reachable.
+6. **SEC-30 (MEDIUM)** — namespace `archive_ref`/staged uploads per-mission before an upload
+   endpoint ships.
+7. **SEC-32 (INFO)** — no action required now; re-examine `Authorization.snapshot_sha256` binding
+   the moment any flow can produce a second snapshot for one mission.
+
+I will re-verify SEC-26, SEC-27 and SEC-28 personally before the follow-on PRs that depend on this
+one merge.
+
+### 15.15 Decision records to fold into `.project/decisions.md`
+
+**DR-SEC-R4-1 · `RepositoryOutOfScopeError` is mislabeled and must move to `UNSUPPORTED_REPOSITORY`**
+
+**Decision** — `RepositoryOutOfScopeError.code` changes from `ErrorCode.INVALID_AUTHORIZATION` to
+`ErrorCode.UNSUPPORTED_REPOSITORY`.
+
+**Options considered** — (a) leave it as `INVALID_AUTHORIZATION`, on the grounds that it is "the
+closest analog" (the author's own hedge in the PR body); (b) reassign to
+`UNSUPPORTED_REPOSITORY`, matching the sibling `UnreadableArchiveError` in the same file; (c) add a
+new `ErrorCode` member for this specific case.
+
+**Pros and cons** — (a) is free but actively misleading: the check fires only after
+`require_active_authorization` has already proven the authorization valid, so the code contradicts
+a fact the system just established, and it sends operators toward the wrong remediation. (c) is a
+contract change requiring OpenAPI regeneration and a frontend rebuild, the exact cost DR-BE-1 (#110)
+and this PR's own second decision record both already ruled against paying for a distinguishable
+`details` payload. (b) is free, reuses an existing code with the correct semantics one function
+away in the same file, and requires updating exactly one test that currently pins the wrong value.
+
+**Cost implications** — (b): one line in `errors.py`, one assertion in one existing test.
+
+**Security implications** — (b) improves incident diagnosis and operator remediation for a refusal
+on the safety-boundary path ("authorized repositories... only" per `CLAUDE.md`); it does not change
+any control's behavior, only its label.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b).
+
+**Final approval authority** — cybersecurity (error-code semantics on a security-relevant refusal
+path are mine to call; CTO may arbitrate if this is judged a contract-stability question instead).
+
+**DR-SEC-R4-2 · Basename-only `repository_ref` resolution is accepted for traversal-safety, conditioned on an identity fix before `create_mission` lands**
+
+**Decision** — endorse the author's basename-only resolution under `SNAPSHOT_SOURCE_ROOT` as the
+traversal defense (no path-shaped input reaches outside the root); require a uniqueness invariant
+or a registry-based resolution before `repository_ref` becomes operator-reachable through
+`create_mission` (#12).
+
+**Options considered** — the author's own three, restated in §15.8: (a) basename-only (as built);
+(b) full relative path plus containment check; (c) an explicit registry.
+
+**Pros and cons** — (a) is correctly the strongest against traversal, for the reason the author's
+decision record gives — no path string is left to get wrong. It is silent on identity: two
+different intended repositories sharing a final path component collapse onto one directory, which
+is a correctness gap, not a traversal gap, and the author's decision record does not weigh it
+because it was framed as a traversal-only question. (b) reopens the traversal risk the author
+correctly avoided. (c) resolves both but has no natural home before #12 exists.
+
+**Cost implications** — near-zero now (a directory-naming convention plus a startup check); a
+larger, but still small, change if (c) is chosen once #12 lands.
+
+**Security/data-integrity implications** — without a fix, the immutable, authorized snapshot record
+— this system's central evidentiary claim — can silently contain the wrong repository's content for
+a mission whose own declared `repository_ref` was correctly authorized. That is worse than a refused
+request; it is an unnoticed wrong answer.
+
+**Scalability implications** — none at current mission volume; grows with the number of distinct
+target repositories sharing directory-naming conventions.
+
+**Recommendation** — ship (a) as built for #18 (traversal safety is real and matters now); require
+the identity gap closed as an explicit condition on #12, not deferred indefinitely.
+
+**Final approval authority** — CTO for the resolution mechanism chosen; cybersecurity for whether
+the condition on #12 is satisfied before that PR merges.
