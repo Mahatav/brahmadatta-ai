@@ -3699,3 +3699,444 @@ shapes, not just timed.
 and a milestone before closing, same reasoning as §12.3 and §14.5 — not reargued here.
 
 No Critical is open anywhere in this pack. Both PRs are cleared for merge on the security axis.
+
+---
+
+## 17. Round 5 — 2026-08-08 · PR #113 `feat/sandbox-and-fixtures` · the canonical subprocess jail, `packages/sandbox/`
+
+Reviewed at `aa8e362` (`origin/feat/sandbox-and-fixtures`), diffed against `origin/main` at
+`1dca345`. Two isolated worktrees used: `/Users/manu/Documents/GitHub/.worktrees/pr113-review`
+(detached at the PR head, for running the actual test suites and adversarial probes) and
+`/Users/manu/Documents/GitHub/.worktrees/security-sandbox-jail` (branch
+`review/security-sandbox-jail`, for this document). No code in `packages/sandbox/` was edited.
+No other role's files were touched. Per D-053/D-054, this sign-off is a named standing condition
+of the CTO's ruling that made `packages/sandbox/` (built from #113) the canonical subprocess jail
+over the rival `adapters/cpp/` implementation (#120).
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Five new findings (SEC-33…SEC-37): one High
+(SEC-33), two Medium (SEC-34, SEC-35), one Low (SEC-36), one Informational (SEC-37). D-054's
+central claim — that `limits_applied` is measured from a real per-run `setrlimit()` outcome
+carried across the fork boundary, never guessed from `sys.platform` — **holds**, and I forced the
+exact failure mode the rejected implementation was vulnerable to and confirmed it does not
+recur (§17.2). What does not fully hold is the property this PR's own header table lists
+unconditionally: "the whole process group dies, no orphans." A trivial, one-line, non-exotic
+technique (a grandchild calling `os.setsid()`) defeats it completely and lets a process survive
+the wall-clock timeout indefinitely (§17.3) — this is the specific thing the task brief asked me
+to attack, and it succeeded.
+
+### 17.1 What I ran, for real, this session
+
+```
+$ cd .worktrees/pr113-review && python3.12 -m venv .venv && source .venv/bin/activate
+$ pip install -r requirements-dev.txt        # exact pins, no resolution drift
+Successfully installed ... jsonschema-4.26.0 ... pytest-9.1.1 ... ruff-0.16.1 ...
+
+$ pip list | grep -i django; python -c "import django"
+                                              # (no output from grep)
+ModuleNotFoundError: No module named 'django'
+```
+
+**The isolation-from-`apps/control-api` claim is real, not asserted.** `pytest-django` is a
+*test-runner plugin* installed transitively by `requirements-dev.txt`; the Django framework
+itself is not installed in this venv at all, and `import django` fails. `packages/sandbox/tests`
+ran clean against that:
+
+```
+$ pytest packages/sandbox/tests -q -rs
+.........s....................                                           [100%]
+SKIPPED [1] packages/sandbox/tests/test_jail.py:116: RLIMIT_AS is not enforced on Darwin: ...
+29 passed, 1 skipped in 19.96s
+```
+
+Then the Linux half, in the same base image the PR body cites, built fresh (not the author's
+container):
+
+```
+$ docker run --rm -v "$PWD":/work -w /work python:3.12-slim bash -lc \
+    "pip install -q -r requirements-dev.txt && pytest packages/sandbox/tests -q -rs"
+ss.........s..................                                           [100%]
+SKIPPED test_baseline_in_jail.py:36 / :67: cmake not installed
+SKIPPED test_jail.py:160: this is the Darwin-specific half of the memory_bytes measurement ...
+27 passed, 3 skipped in 11.68s
+```
+
+`test_memory_limit_stops_an_allocator` is in that 27 — a real 900 MB allocation, actually
+stopped by `RLIMIT_AS` inside `python:3.12-slim`, cross-checked in the same test against
+`result.limits_applied.get("memory_bytes") is True`. This is not a mocked assertion; it is the
+kernel doing the thing the field claims happened.
+
+```
+$ ruff check packages/sandbox
+All checks passed!
+
+$ pip install pip-audit && pip-audit -r requirements-dev.txt
+No known vulnerabilities found
+
+$ grep -rn "TOKEN\|SECRET\|PASSWORD\|API_KEY\|-----BEGIN" packages/sandbox --include="*.py" --include="*.md"
+# only monkeypatch.setenv("CONTROL_API_OPERATOR_TOKEN", "a-real-looking-secret-value") and
+# DJANGO_SECRET_KEY", "another-secret") in test_environment_is_scrubbed_to_the_allowlist —
+# placeholder test fixtures asserting these names are *not* passed through, not real secrets.
+```
+
+Every figure the PR body claims (55 passed/1 skipped on macOS in the earlier commit, 30/1 and
+30/3 after D-054's five new tests, ruff clean) reproduces independently in a venv I built myself
+from the pinned files — not taken on report.
+
+### 17.2 D-054's claim, attacked directly — no false positive, in either direction
+
+The task was explicit: force a `setrlimit()` failure inside the child and confirm the pipe
+carries the real outcome back, rather than defaulting to a claim of success — the exact failure
+mode `sys.platform != "darwin"` produced in the rejected implementation.
+
+**Forced failure → must report `False`, not default `True`:**
+
+```python
+def fake_setrlimit(which, limits):
+    if which in (resource.RLIMIT_AS, resource.RLIMIT_NPROC):
+        raise OSError(1, "Operation not permitted (forced by probe)")
+    return real_setrlimit(which, limits)
+
+with patch("resource.setrlimit", side_effect=fake_setrlimit):
+    with Jail.create(policy) as jail:
+        result = jail.run(["/bin/echo", "hello"])
+```
+```
+exit: 0
+limits_applied: {'memory_bytes': False, 'max_processes': False}
+OK: forced setrlimit failure correctly reported as False, not defaulted to True
+```
+
+**Forced failure on a *mandatory*, untracked limit (`RLIMIT_CPU`/`FSIZE`/`CORE`, set outside the
+try/except in `apply_limits`) → must fail loud, not silently proceed unprotected:**
+
+```
+run() raised as expected on a mandatory-limit setrlimit failure: SubprocessError: Exception
+occurred in preexec_fn.
+```
+
+Both directions hold. The mechanism described in `jail.py:349-397` and the README's "a per-run
+record, not a platform guess" section is accurate: the pipe is opened before `fork()`, written
+inside `preexec_fn` from the real outcome of each tracked `setrlimit()` call, closed before
+`exec()`, and read back with a bounded `select()` deadline rather than an unconditional block.
+I could not make it claim a limit was applied when the syscall that would apply it had actually
+failed, in either the tracked pair (`memory_bytes`/`max_processes`) or the untracked mandatory
+set. **D-054's core claim is verified, not merely read.**
+
+### 17.3 SEC-33 — `os.setsid()` in a grandchild survives the wall-clock timeout: the "no orphans" claim is not general, only the one shape the named test covers
+
+**HIGH.** `packages/sandbox/README.md`'s header table claims, unconditionally, "The timeout
+kills grandchildren — no orphans," backed by `test_timeout_kills_grandchildren_leaving_no_orphans`
+— and the CTO's own D-053 ruling names this exact test as the decisive advantage over the rival
+implementation ("orphan-process coverage... the property the module's own header calls out as the
+reason for `os.setsid()`"). The task brief asked directly: "Try to make a child survive the
+timeout." It survives.
+
+**The mechanism.** `_kill_group` (`jail.py:480-517`) signals via `os.killpg(pgid, sig)`, where
+`pgid` is captured once, from the direct child, right after spawn (`jail.py:487-490`).
+`apply_limits` (`jail.py:359-397`) calls `os.setsid()` on that direct child, making it a session
+and process-group leader specifically so `killpg` can reach everything under it — this is stated
+as the whole point in the module's own docstring. But `os.setsid()` is available to *any*
+process that is not already a group leader, including a grandchild the jailed command itself
+forks. A grandchild that calls it moves itself into a brand-new session with a new pgid of its
+own — no longer a member of the pgid `_kill_group` signals — and `killpg` on the original group
+never reaches it.
+
+**Executed PoC.** A direct jail child forks a grandchild; the grandchild calls `os.setsid()`,
+records its own pid, and sleeps:
+
+```python
+policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=2.0, kill_grace_seconds=0.5)
+code = """
+import os, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()                       # detach into a new session/pgid
+    open(pidfile, "w").write(str(os.getpid()))
+    time.sleep(600)
+else:
+    time.sleep(600)
+"""
+with Jail.create(policy) as jail:
+    result = jail.run([sys.executable, "-c", code])
+```
+```
+result: ... -> WALL_CLOCK limit (2.02s wall, 0.01s cpu, 13.2 MB peak)
+limit_hit: WALL_CLOCK
+SURVIVOR: pid 71594 is STILL ALIVE after jail exit + grace period -- ESCAPE CONFIRMED
+```
+
+The jail correctly detects and reports the wall-clock timeout on the direct child (`limit_hit`
+is `WALL_CLOCK`, and `Jail.close()`/`__exit__` ran and removed the jail root). The grandchild
+that detached is not in the killed group, receives neither `SIGTERM` nor `SIGKILL`, is
+independently confirmed alive with `os.kill(pid, 0)` after the full grace period and jail
+teardown, and would run for however long its own workload takes — unbounded, since it is now
+outside every limit this module sets (`RLIMIT_CPU`/`RLIMIT_AS`/wall-clock all belong to the
+jailed run's own bookkeeping, not to a kernel-level container it can't escape).
+
+**Why this is more than a hypothetical edge case.** This is exactly the technique the module's
+own `test_timeout_kills_grandchildren_leaving_no_orphans` was written to rule out — and does rule
+out, for the one shape it tests: an ordinary `subprocess.Popen()`-spawned grandchild that stays
+in the inherited process group. The property-table row makes no such qualification; it reads as
+a general guarantee. A build tool that daemonizes a background helper (several real ones do —
+ccache daemons, some generator backends) needs no malicious intent to hit this, and once #28
+(fuzzing, explicitly gated on this module being replaced by #15's namespace isolation) is in
+scope, a target that deliberately detaches to survive a kill is a completely unsurprising thing
+for adversarial or even just misbehaving code to do.
+
+**Not Critical, because:** nothing in the currently-merged consumer path (`test_baseline_in_jail`
+configuring/building/testing the trusted demo target) deliberately detaches, so today's actual
+D3 usage is not exposed. It is High rather than Medium because the property is claimed
+unconditionally in the header table that is this PR's own stated contract ("every claim... names
+the test that demonstrates it"), the named test demonstrates a narrower thing than the row's
+plain-English claim, and the module is the explicit, near-term dependency for #28 running
+untrusted code — the exact context where this gap stops being theoretical.
+
+**Required fix, either is acceptable, in order of preference:**
+1. Track the full descendant tree by PID (e.g. `PR_SET_CHILD_SUBREAPER` on the jail process plus
+   a walk of `/proc/*/stat` for reparented descendants on Linux, or an equivalent), not just the
+   one process group captured at spawn, and kill everything found — this is the actual fix and
+   the real reason #15's namespace/container isolation exists.
+2. At minimum before merge: **correct the claim.** Re-word the README's property-table row and
+   the module's opening docstring to state the guarantee accurately — "kills every descendant that
+   remains in the spawned process group; a process that calls `setsid()` to leave it is not
+   caught, and closing that gap in general requires PID-namespace isolation (#15)" — matching the
+   same honesty standard this document already holds the `RLIMIT_AS`/Darwin and
+   `RLIMIT_NPROC`/per-user caveats to. A corrected claim with a linked follow-up issue is an
+   acceptable interim condition; an unqualified claim next to a test that does not demonstrate it
+   is not.
+3. Either way, this specific property must be closed — by fix or by an explicit, tracked
+   limitation with an owner — **before `packages/sandbox` is relied on for #28.**
+
+**Location** — `packages/sandbox/jail.py:480-517` (`_kill_group`, `_group_alive`), the property
+row in `packages/sandbox/README.md`'s header table, and the parallel claim in `jail.py`'s module
+docstring table (`jail.py:38`).
+
+### 17.4 SEC-34 — the CI stale-path guard warns, but exits 0: the exact "a check nobody can fail" failure mode it was written to close
+
+**MEDIUM.** `469240b`'s own commit message states the intent precisely: make a stale
+`services/sandbox` reference (or any future path that goes stale the same way) "fail loudly
+with a warning instead of silently collecting zero tests." The implementation does not do that.
+
+```yaml
+# .github/workflows/ci.yml
+for dir in packages/sandbox packages/test-fixtures; do
+  if [ ! -d "$dir" ]; then
+    echo "::warning::$dir does not exist — nothing to test. If it was moved, this path is now stale."
+    missing=1
+  fi
+done
+if [ "$missing" = "1" ]; then
+  exit 0
+fi
+```
+
+`exit 0` on the missing-directory branch means the step — and the job — is reported **green**.
+A `::warning::` annotation is a small yellow marker on the run summary page, not a failed check;
+it does not block a merge, does not fail a required status check, and is easy to miss in a fast
+merge flow. If `packages/sandbox/` (or `packages/test-fixtures/`) is ever renamed again, deleted,
+or the pathspec silently goes stale the same way `services/sandbox` did during this very PR's own
+history (§17.5), CI reports success while collecting zero tests from either suite — which is
+verbatim the bug this step's own comment says it exists to prevent: "a check nobody can fail is
+a document."
+
+**Exploit scenario.** A future PR renames `packages/sandbox` (as this one already did once) and
+misses updating this one CI reference (as `4a7fd65`/`469240b`'s own predecessor commit did for
+`services/sandbox`, caught only by the author's own `git status`, not by CI). Every sandbox test
+— including the ones this review just used to verify `limits_applied` and the memory ceiling —
+stops running in CI, and the merge goes through green.
+
+**Required fix.** Fail the job (`exit 1`) when a directory that is expected to exist today is
+missing, rather than treating "missing" as an unconditional pass. If a genuinely optional,
+not-yet-built path is needed later, gate the pass-vs-fail decision on something that can't
+silently regress (e.g. a tracked issue reference or an explicit allow-list), not a bare existence
+check that always resolves to success.
+
+**Location** — `.github/workflows/ci.yml`, the "Fixture and sandbox tests" step (see §17.1 for
+the exact block).
+
+### 17.5 SEC-35 — `LimitKind.FILE_SIZE` is dead: a run genuinely stopped by `RLIMIT_FSIZE` is reported as `limit_hit == NONE`
+
+**MEDIUM.** `errors.py` defines `LimitKind.FILE_SIZE` as one of the taxonomy's named members, and
+`JailPolicy.max_file_bytes` sets `RLIMIT_FSIZE` unconditionally in every run. `Jail._classify`
+(`jail.py:543-588`) — the function whose entire job is "say which limit stopped the command, or
+`NONE`" — never once inspects for a file-size failure. `FILE_SIZE` is unreachable code.
+
+**Executed PoC**, a 4 MiB policy against a script writing 40 MiB to one file:
+
+```python
+policy = JailPolicy(cpu_seconds=20, wall_clock_seconds=20)
+object.__setattr__(policy, "max_file_bytes", 4 * 1024 * 1024)
+# ... open("big.bin","wb") and write 40 x 1 MiB chunks ...
+```
+```
+result: ... -> exit 1 (0.02s wall, 0.02s cpu, 14.1 MB peak)
+limit_hit: NONE
+stderr tail: OSError: [Errno 27] File too large
+actual file size on disk: 4194304
+```
+
+The kernel enforced the limit correctly — the file is capped at exactly the policy's 4 MiB, and
+the process actually stopped because of it (`OSError: File too large`, `errno.EFBIG`). But
+`result.limit_hit` reports `NONE` — the same value it reports for an unrelated ordinary command
+failure. `_classify`'s own docstring says the honest part of the function "is what it refuses to
+claim" about attributing failures to the wrong cause; here it does the opposite of what it
+promises for this specific limit, silently.
+
+**Why this matters beyond a taxonomy gap.** A caller — the orchestrator surfacing a mission
+event, or the evidence bundle recording why a stage failed — reads `limit_hit` specifically so it
+does not have to parse stderr text to explain a failure. For every other limit this module
+enforces, that promise holds (`CPU`, `MEMORY`, `WALL_CLOCK`, `OUTPUT` are all correctly
+classified, confirmed by the existing test suite and, for memory, independently by me in §17.1).
+For `FILE_SIZE` specifically, a build that failed because it hit a real, intentional resource
+ceiling is indistinguishable in the record from a build that simply crashed on its own — the
+same "a zero dressed as a result" failure mode D-010/D-023 already legislate against elsewhere in
+this project, one level down.
+
+**Required fix.** In `_classify`, detect the `RLIMIT_FSIZE` case (e.g. `SIGXFSZ` when the signal
+is delivered rather than converted to `EFBIG`, and/or `EFBIG`/`"File too large"` in `stderr` the
+way `MEMORY`'s allocator-failure markers are already matched) and return `LimitKind.FILE_SIZE`.
+Add a named test exercising it — this module's own standing rule.
+
+**Location** — `packages/sandbox/jail.py:543-588` (`_classify`), `packages/sandbox/errors.py:20`
+(`LimitKind.FILE_SIZE`, defined, never produced).
+
+### 17.6 SEC-36 — `max_file_bytes`'s docstring overclaims disk protection it does not provide
+
+**LOW.** `policy.py`'s `max_file_bytes` field docstring: "Stops a runaway log or a pathological
+build product filling the disk." `RLIMIT_FSIZE` bounds the size of any *single* file; it does not
+bound the sum of many files a process writes. A build product that fills the disk by writing many
+files each individually under the 512 MiB default is not stopped by this limit at all — SEC-35's
+PoC demonstrates the per-file cap works exactly as designed; nothing here demonstrates (or could,
+given what `RLIMIT_FSIZE` is) the aggregate claim the docstring makes. This specific claim is not
+in the README's tested-property table, so it is not a table-vs-test mismatch the way SEC-33 is —
+it is an internal-documentation overclaim a future integrator could reasonably rely on.
+
+**Required fix.** Narrow the docstring to what is true ("stops a single runaway file from growing
+past this size — does not bound total disk usage across multiple files") — the same kind of
+correction §17.3 asks for on the orphan claim, at lower stakes.
+
+**Location** — `packages/sandbox/policy.py`, `max_file_bytes` field docstring.
+
+### 17.7 SEC-37 — `preexec_fn` does non-trivial work in a process the module itself documents as multi-threaded (informational)
+
+**INFORMATIONAL / LOW — not independently reproduced as a failure.** CPython's own documentation
+warns that `preexec_fn` is "NOT SAFE to use in the presence of threads" in the calling process,
+because `fork()` duplicates only the calling thread; a lock held by another thread at the moment
+of `fork()` (e.g. in the memory allocator) is duplicated in a permanently-locked state in the
+child, and any further allocation in the child can then hang. `apply_limits`
+(`jail.py:359-397`) is not trivial: it calls `os.setsid()`, five `setrlimit()` calls,
+`json.dumps()`, and `os.write()` — and `Jail.cancel()` (`jail.py:208-218`) is explicitly designed
+to be called from a second thread while `run()` is blocked on the child in the first, which is
+precisely the shape the warning describes. `test_cancel_stops_a_running_command_from_another_thread`
+passed in both my macOS and Linux runs with no hang observed, so this is a latent risk class, not
+a demonstrated defect — the trigger is timing-dependent and I did not reproduce a hang in this
+session.
+
+**The mitigating factor, and why this does not rise above informational.** If `preexec_fn` does
+deadlock or otherwise fail to complete, the parent's bounded `select()` read in
+`_read_limits_applied` (`jail.py:445-478`) times out after ~2.5 s and returns `{}` — which the
+field's own docstring defines as "the measurement itself could not be recovered... not that
+nothing was applied." That is the honest direction to fail in: ambiguous, not a false claim of
+protection. The failure mode this hazard could produce is a slower or hung run, not a silent
+false positive on `limits_applied`.
+
+**Suggested follow-up, not a merge condition.** If a future host process embeds this module in a
+context with many real background threads (the orchestrator/worker, not this test suite), revisit
+whether the pipe-report logic in `apply_limits` can be simplified to reduce what runs post-fork,
+or moved to a wrapper that does the `setrlimit` calls via `os.posix_spawn`'s `file_actions`/
+`setsigmask` primitives instead of `preexec_fn`, which does not carry the same warning.
+
+**Location** — `packages/sandbox/jail.py:339-397` (`_spawn_and_wait`, `apply_limits`).
+
+### 17.8 The `packages/sandbox/` → `services/sandbox/` rename — verified clean
+
+Grepped the entire PR-branch tree, not just the diff:
+
+```
+$ grep -rln "services/sandbox\|services\.sandbox" . --exclude-dir=.git
+.github/workflows/ci.yml
+$ grep -n "services/sandbox" .github/workflows/ci.yml
+147:  # This references packages/sandbox/, not services/sandbox/. An earlier version of
+149:  # still pointed at services/sandbox/ — the exact stale-path failure mode BUG-016
+```
+
+Both hits are prose in a comment *narrating* the history of the stale-path bug the author caught
+and fixed (§17.5's neighboring CI section) — not a live reference. No functional path,
+import, `pytest` invocation, or fixture payload anywhere in this PR's tree points at the
+now-nonexistent `services/sandbox`. I independently re-verified both self-reported fixes:
+
+- `469240b` (the `git add` pathspec failure) — diffed against its parent; the commit genuinely
+  contains the 226-line change its message describes (CI wiring, `limits_applied` end to end,
+  README updates, `jsonschema` pin), not an empty or partial diff.
+- `aa8e362` (the stale `services/sandbox/README.md` string embedded in the committed fixture) —
+  confirmed the only change is the one `LogPayload` text string in
+  `build_mission_fixture.py` and the four corresponding bytes in the regenerated
+  `mission-pktcfg-001.events.jsonl`; nothing else in the fixture shifted.
+
+**No stale reference survives.** This part of the task closes clean.
+
+### 17.9 CI wiring — the isolation claim is real (with the one caveat in §17.4)
+
+Confirmed in §17.1: `packages/sandbox/tests` runs green with only `requirements-dev.txt`
+installed, Django genuinely not importable in that environment. The claim "no
+`apps/control-api` dependency" is true today, verified by me, not assumed from the PR body. The
+one open issue is not whether the isolation is real — it is that the CI step meant to *keep it
+enforced over time* degrades to a no-op instead of a hard failure if the path it checks for ever
+goes stale again (SEC-34).
+
+### 17.10 What I did **not** review
+
+- **`packages/test-fixtures/`** — out of this task's scope (the subprocess jail specifically);
+  not reviewed here at all, including `sse_replay.py`'s loopback-binding claim, which §11–§16 of
+  this document have not touched either. A separate pass, if wanted.
+- **`adapters/cpp/` and `workers/baseline/run.py`'s consumer-side import updates** — per D-053
+  these are explicitly out of #113's own scope and belong to a different, in-flight PR/seat; the
+  task brief also named `adapters/cpp/` as another agent's active lane this session. I confirmed
+  (§17.8, and a direct grep of current `main`) that neither directory currently imports
+  `sandbox` at all, so there is nothing stale to find yet — but the reconciliation itself (moving
+  them onto `packages.sandbox`, per D-053's "one integration detail flagged, not resolved here")
+  is unverified and is someone else's work to do and mine to re-check later.
+- **`probe_limits()` wired into a real preflight check** — the PR body itself lists this as not
+  done (#12's surface); nothing to review because it does not exist yet.
+- **RLIMIT_NPROC's actual behavior under a real fork bomb** — the README already discloses this
+  honestly ("a brake on a fork bomb, not a defence against one... per-user on most kernels"), and
+  no property-table row claims it is enforced or tested, so there is no claim-vs-test mismatch to
+  chase here the way there is for `FILE_SIZE` (SEC-35) or the orphan claim (SEC-33). I did not
+  empirically fork-bomb this sandbox to confirm the disclosed weakness's exact shape — the
+  disclosure is honest as written, so I did not spend the session budget re-deriving it.
+- **TOCTOU on `Jail.resolve()`** — a symlink swapped in between `resolve()` returning and the
+  command actually running. Given the jail directory is `0700`, created per-mission, and the only
+  local actors are the operator's own processes (no untrusted concurrent local user in this
+  system's threat model), I judged this low-value to chase this round and did not build a probe
+  for it. Flagged here rather than silently skipped.
+- **A fully adversarial fuzz-target run inside the jail** — nothing in this PR runs a real fuzzer
+  yet (#28 is explicitly future work, gated on #15). Everything I attacked was constructed by me
+  against the jail's own primitives, not against a real untrusted target binary.
+
+### 17.11 Verdict and required conditions
+
+**PASS WITH CONDITIONS.** No Critical. `packages/sandbox/` may merge. Before it is relied upon as
+the isolation boundary for #28 (fuzzing untrusted code) specifically — which the task brief
+correctly frames as the reason this sign-off carries real weight — the following must close:
+
+1. **SEC-33 (HIGH)** — fix the process-group escape via `os.setsid()`, or at minimum correct the
+   README/docstring claim to accurately scope what "no orphans" actually covers, with a tracked
+   follow-up to close the gap for real before #28. **This is the named condition that matters
+   most**, since it is the exact property the CTO's own D-053 ruling cited as this
+   implementation's decisive advantage.
+2. **SEC-34 (MEDIUM)** — make the CI stale-path guard fail the job, not warn-and-pass, when a
+   directory it depends on unexpectedly disappears.
+3. **SEC-35 (MEDIUM)** — classify a real `RLIMIT_FSIZE` stop as `LimitKind.FILE_SIZE`, not
+   `NONE`, and add the test the module's own rule requires.
+4. **SEC-36 (LOW)** — narrow the `max_file_bytes` docstring's disk-protection claim to what
+   `RLIMIT_FSIZE` actually bounds.
+5. **SEC-37 (INFO)** — no action required to merge; a follow-up worth tracking if this module is
+   later embedded in a genuinely multi-threaded host process.
+
+D-054's `limits_applied` claim is verified, not merely reviewed — I attacked it directly in both
+directions (§17.2) and it held. The three self-reported bugs from the `packages/sandbox/` move
+(the `git add` pathspec failure, the stale fixture string, and the CI path reference) are all
+independently confirmed fixed, and no further stale reference survives anywhere in the tree
+(§17.8). The gap this review adds is the one the task asked me to specifically go looking for —
+a way to make a child survive the timeout — and it exists. I will re-verify SEC-33 personally
+once a fix or a corrected claim lands, before #28 begins relying on this module.
