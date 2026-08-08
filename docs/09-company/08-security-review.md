@@ -2887,3 +2887,203 @@ Exact pinning without an audit step is a decision to freeze whatever was vulnera
 
 **Final approval authority** — CTO (technical/CI); cybersecurity sets the dependency policy
 requirement.
+
+---
+
+## 15. Re-verification — 2026-08-08 · #110's SEC-15/16/18, and #111's SEC-24/25
+
+Both conditions personally re-verified, as promised in §13.6 and §14.10. Executed in fresh
+isolated worktrees, independent scripts, not the fix's own tests.
+
+### 15.1 #110 · SEC-15, SEC-16, SEC-18 — all three CLOSED
+
+At `48fee55` (`feat/state-machine`, now merged). Full suite first:
+
+```
+$ cd apps/control-api && pytest
+262 passed, 2 warnings in 1.64s
+```
+
+**SEC-15.** `orchestrator/candidates.py:190-201` — `record_verification` now loads the patch
+under the same lock and refuses when `patch.mission_id != mission.id`, raising the new
+`CrossMissionEvidenceError`. Re-ran the exact §13 B4 attack — freeze mission A on a `REJECTED`
+candidate, create scratch mission B, verify B's candidate into A:
+
+```
+[BLOCKED]  SEC-15: verify mission B's candidate into frozen mission A
+           CrossMissionEvidenceError: Patch candidate a8d83ea2-… belongs to mission
+           296cb35b-…, not 6d1224…
+```
+
+**SEC-16.** New module `missions/lifecycle.py` — a per-thread context flag
+(`lifecycle_write_permitted`), claimed only inside `transitions.transition` and
+`record_verification`'s freeze write, and checked by both `Mission.save()` and a
+`MissionQuerySet.update()` override for exactly four fields (`state`, `paused_from`, `verdict`,
+`verification_started_at`). Re-ran both §13 attacks:
+
+```
+[BLOCKED]  SEC-16a: assert_transition(pruned set) + Mission.save()
+           MissionStateWriteError: Write to mission lifecycle field(s) ['state', 'verdict']
+           outside orchestrator.transitions.transition.
+[BLOCKED]  SEC-16b: CREATED -> VERIFIED via queryset .update()
+           MissionStateWriteError: Bulk update of mission lifecycle field(s)
+           ['state', 'verdict'] outside orchestrator.transitions.transition.
+```
+
+Two controls, because a guard this shaped is only good if it isn't blanket:
+
+```
+[ok]  ordinary field (name) still writable via Mission.save()            -> succeeds
+[ok]  orchestrator.transitions.transition() still reaches VERIFIED       -> succeeds, state=VERIFIED
+```
+
+Also checked BUG-020 (an author-stated widening, not one of my three conditions): an abort
+(`VERIFY -> FAILED`) with a deliberately corrupted `Authorization` row still succeeds, confirming
+aborts don't get wedged by evidence that fails to load — the same reasoning §13's SEC-20 asked
+for, applied by the author to authorization as well as verification records. Confirmed.
+
+**SEC-18.** `config/env.py`'s new `_libpq_options` — an explicit `LIBPQ_TLS_PARAMETERS`
+allowlist, fail-closed on anything else:
+
+```
+sslmode=require                    OPTIONS={'connect_timeout': 5, 'sslmode': 'require'}
+sslmode=verify-full+sslrootcert    OPTIONS={..., 'sslmode': 'verify-full', 'sslrootcert': '/etc/ssl/ca.pem'}
+sslmode=disable                    OPTIONS={'connect_timeout': 5, 'sslmode': 'disable'}
+no query string at all             OPTIONS={'connect_timeout': 5}
+```
+
+**The four DSNs that were byte-identical in §13 are now four different configurations.**
+Unrecognised or malformed parameters refuse to boot rather than dropping silently:
+
+```
+[refused]  sslfoo=bar               -> ImproperlyConfigured: does not understand 'sslfoo'
+[refused]  application_name=x       -> ImproperlyConfigured: does not understand 'application_name'
+[refused]  sslmode set twice        -> ImproperlyConfigured: which one wins would be an accident
+[refused]  sslmode=yolo             -> ImproperlyConfigured: libpq does not define 'yolo'
+```
+
+All three conditions closed. #110 merged with no open blocker from this seat.
+
+### 15.2 #111 · SEC-24, SEC-25 — both CLOSED, and SEC-25's number independently reproduced twice over
+
+At `fda584b` (`feat/model-gateway`, on top of #111's CTO-conditions commit).
+
+**A correction was raised against my original SEC-25 figure mid-review** — a five-minute check
+against `idna==3.10` reported 0.045s at 60,000 characters, not ~100s. I re-verified from scratch
+rather than defending the number: reproduced 99.8s (direct `idna.encode`) and 122.5s (through
+`classify()`) across two fresh processes, then root-caused it in the installed `idna` source —
+`check_label()` calls `valid_contexto()` once per codepoint, and for the advisory's payload
+(`"٠" * N`, Arabic-Indic digit zero) that function does an O(N) scan per call, before the
+length check that would otherwise short-circuit an ordinary long string. A differential over five
+control shapes at the same length — ordinary ASCII, digits, dotted labels, deeply nested labels,
+punycode-prefixed — showed all five 150–400× faster than the ContextO payload, which is exactly
+why none of the corrector's three adversarial shapes reached it. Posted in full on #111; not
+repeated here at length.
+
+**SEC-24 fix** — `_unwrap` now reports *which* mechanism produced an effective address
+(`ipv4-mapped`, `nat64`, `6to4`, or none), and `_classify_address` refuses `nat64`/`6to4` outright
+once they reach the allow decision, citing RFC 3056 §2 and RFC 6052 §3.1 for why neither
+mechanism is a legitimate carrier of a non-global address. `ipv4-mapped` is untouched — correctly,
+since that notation genuinely does deliver to the embedded address on a dual stack. Re-ran all six
+original attack cases plus two originally-correct controls plus three ipv4-mapped controls:
+
+```
+[ok]  6to4 wrapping 127.0.0.1        -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  6to4 wrapping 10.0.0.1         -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  6to4 wrapping 192.168.1.1      -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64 wrapping 127.0.0.1       -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64 wrapping 10.0.0.1        -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64-local wrapping 192.168.0.1 -> translation-wrapper-non-global (was: allowed-network)
+[ok]  6to4 wrapping 8.8.8.8 (author's original case)   -> still global-address
+[ok]  NAT64 wrapping 8.8.8.8                            -> still global-address
+[ok]  ipv4-mapped loopback   -> still allowed-network (control, correctly unchanged)
+[ok]  ipv4-mapped RFC1918    -> still allowed-network (control, correctly unchanged)
+[ok]  ipv4-mapped metadata   -> still denied-network (control, correctly unchanged)
+```
+
+MISMATCHES: 0. The resolver check (`assert_resolves_inside_boundary`) inherits the fix — a
+declared name resolving to a 6to4/NAT64-wrapped private address is now refused, while one
+resolving to a plain or ipv4-mapped loopback still resolves. Confirmed with four cases, 0
+mismatches.
+
+**SEC-25 fix** — `idna` bumped to `3.18` (`pip-audit`: **No known vulnerabilities found**), plus
+`_oversized_hostname_reason` — an RFC 1035 253/63 length check applied to the **raw string,
+split on literal dots**, before `idna.encode()` at both call sites (`classify()` and
+`normalise_service_names`). Splitting on the literal string rather than running IDNA processing
+first is the right design: the SEC-25 payload is one label with no dots, so a check that
+IDNA-processed the string before finding the labels would already have paid the cost it exists to
+avoid. Re-measured the exact advisory payload through the real call site:
+
+```
+n=  1000   0.0003s  rule=host-too-long
+n=  5000   0.0001s  rule=host-too-long
+n= 60000   0.0009s  rule=host-too-long
+```
+
+**99.8–122.5s to 0.0009s.** Also confirmed the two halves are independently effective rather than
+one masking the other: `idna==3.18` alone (bypassing the application guard, calling
+`idna.encode` directly on a 60,000-character payload) returns in **0.0000s** with `IDNAError:
+Domain too long` — the library's own fix holds on its own, and the length guard is real defense in
+depth against a future regression, not decoration.
+
+**The bypass table — re-run by me, not read.** 60 cases became 68; each addition tagged and
+documented:
+
+```
+$ python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py --quiet
+GATEWAY  mismatches: 0 of 68
+CONTROL  mismatches: 39 of 68  (gated at exactly 39)
+```
+
+Eight new rows in `gateway/tests/bypass_table.py`, tagged `SEC-24`/`SEC-25`: four attack cases
+(6to4/NAT64 × private/loopback), one link-local case, one `ipv4-mapped` control asserting it
+**must stay allowed**, and two SEC-25 cases — the actual 60k ContextO payload and a 300-char
+ordinary-ASCII control confirming the length guard refuses on length alone, not on script.
+
+### 15.3 The import-check false positive, verified by injection rather than by reading
+
+Not one of my three conditions, but I hold this invariant (C5) and the claim was specific enough
+to check. `#110` landing on `main` added `apps/control-api/tools/export_openapi.py`, which does
+`from http.client import responses as _STDLIB_REASON_PHRASES` — a status-reason-phrase dict, not
+a client — and the architecture test's original root-level check (`"http" in HTTP_CLIENT_ROOTS`)
+flagged it.
+
+**The fix removes `"http"` from the root-level set entirely** and replaces it with
+`_imports_http_client_connection`, an AST walk checking specifically for
+`http.client.HTTPConnection`/`HTTPSConnection` — the two classes that actually open a socket —
+or the bare `import http.client`.
+
+```
+$ pytest tests/architecture/ -q -rs
+47 passed in 0.74s
+```
+
+Confirmed the real file's import does not trip it, then injected three violations myself and
+reverted each:
+
+```
+inject "import http.client"                                    -> FAILED, correctly caught
+inject "from http.client import HTTPSConnection"                -> FAILED, correctly caught
+inject "from http.client import responses, HTTPConnection"      -> FAILED, correctly caught
+  (mixed import: the safe name does not shield the dangerous one in the same statement)
+```
+
+Worktree clean after each revert. The reasoning holds, and the fix is precise rather than merely
+narrower — the mixed-import case was not claimed by the author and I tried it anyway; it is
+caught.
+
+### 15.4 Verdict
+
+**#110: no open condition from this seat.** SEC-15, SEC-16, SEC-18 all closed and independently
+re-verified against the exact attacks that opened them.
+
+**#111: no open condition from this seat.** SEC-24 and SEC-25 both closed and independently
+re-verified, including a full re-derivation of SEC-25 after a correction was raised against my
+original number — the corrected reproduction is stronger than the original finding, not weaker:
+it is now root-caused in the library's source and differentially proven against five control
+shapes, not just timed.
+
+**#78 may close.** Condition from §14.5 stands: SEC-02 and SEC-19 filed against #93 with an owner
+and a milestone before closing, same reasoning as §12.3 and §14.5 — not reargued here.
+
+No Critical is open anywhere in this pack. Both PRs are cleared for merge on the security axis.
