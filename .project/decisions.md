@@ -2022,3 +2022,196 @@ question days earlier than waiting for real events. **[Δ #13]**
 **Final approval authority** — CTO (technical) for Parts 1, 3 and 4; Part 2's standing rule
 applies to every seat, and `cybersecurity` and `qa-engineer` should both treat a breach of it
 as a finding.
+
+---
+
+## D-050 · One endpoint policy, in `contracts/`, and the gateway's implementation is the survivor · 2026-08-07 · CTO
+
+**Decision** — The endpoint policy is consolidated into a single module in `contracts/`,
+imported by both the model gateway and the control API. `services/model-gateway/gateway/endpoint_policy.py`
+(PR #111) is the implementation that survives; `contracts/model_policy.py` is replaced by it,
+not merged with it. The 60-case bypass table moves with it and becomes the module's own test.
+
+**The argument is not "duplication might drift". The duplication has already produced a hole,
+and the hole is in the layer that gates boot.**
+
+`contracts/checks.py::check_model_endpoints` calls `assert_local_inference_endpoint` from
+`contracts/model_policy.py` and raises a Django `Error`, which stops `manage.py check`,
+`runserver` and ASGI startup. That is the boot gate for invariant A — and it is wired to the
+**weaker** of the two implementations. Concretely, today:
+
+```
+GATEWAY  mismatches: 0 of 60
+CONTROL  mismatches: 34 of 60
+```
+
+`SMALL_MODEL_BASE_URL=https://my-llm-proxy.internal/v1` **boots cleanly**, because the control
+API's check waves it through — and is then refused by the gateway at call time, mid-mission.
+Of the two possible arrangements that is strictly the worse one: the process starts, the
+operator believes the configuration is good, and the failure surfaces during a run on D6
+rather than at startup. D-028 already established that this invariant must fail as early and
+as structurally as available; a stricter check sitting downstream of a looser boot gate is the
+opposite of that.
+
+**A second reason, and it is the one that would have bitten later.** The C5 / L3
+single-inference-client test walks `apps/`. The gateway sits in `services/`, so **the test
+that enforces "exactly one module may construct an inference client" does not see the module
+that constructs the inference client.** Whatever else is decided, the enforcement scope has to
+cover wherever that client actually lives.
+
+**Options considered** — (a) leave both, fix `contracts/model_policy.py` separately to match;
+(b) gateway imports the control API's module; (c) control API imports the gateway's module;
+(d) one module in `contracts/`, imported by both.
+
+**Pros and cons** — (a) is two implementations of one invariant maintained in lockstep by
+hand, which is not an invariant, it is a coincidence with good intentions; the 34-of-60 number
+is what that looks like after two days. (b) makes the boot gate the weaker rule permanently.
+(c) is forbidden by C5 — `api` must not import `gateway` — and correctly so. (d) is what C5
+permits and, as the orchestrator read it, what C5's own docstring describes: both sides may
+import `contracts`. The prohibition is directional and only one direction is barred.
+
+**Cost implications** — one file move, one deletion, one import change on each side. The test
+comes with it.
+
+**Security implications** — this is the decision. One implementation, one boot gate, one
+60-case table, and the strictest available rule at the earliest available moment.
+
+**Scalability implications** — none.
+
+**Condition — the consolidated module must stay importable without Django.** Verified today:
+`contracts/model_policy.py` → `contracts/errors.py` → `contracts/enums.py` → stdlib. **Zero
+Django anywhere in that chain**, which is exactly why sharing it is clean and why it must stay
+that way. If the module ever acquires a `ninja.Schema` or `django.conf` import it stops being
+importable by the gateway, and the duplication returns by necessity rather than by choice. Add
+`test_endpoint_policy_imports_without_django` — a subprocess import with no
+`DJANGO_SETTINGS_MODULE` — so that regression is caught by a test rather than by someone
+re-deriving this reasoning in three days.
+
+**Condition — the bypass table gates both columns.** CI currently drives its exit code from
+the gateway column only; the control-API column is *reported*, not gated. After consolidation
+there is one column and it gates. A measurement nobody can fail is a document.
+
+**Note on authorship.** The `ml-infra-engineer` seat declining to edit another seat's file was
+right, and flagging the two divergences rather than quietly winning was more right. The seat's
+reading of C5 was over-cautious — C5 bars `api → gateway`, not `gateway → contracts` — but
+over-cautious on a security boundary, surfaced for a ruling, is the correct failure direction.
+
+**Final approval authority** — CTO (technical); **`cybersecurity` holds the veto** on §4 of the
+architecture spec, and this is squarely inside it. The seat reviewing #110 should get the same
+table.
+
+---
+
+## D-051 · Where two implementations of an allowlist disagree, the stricter one wins · 2026-08-07 · CTO
+
+**Decision** — Both of the gateway's deliberate divergences are adopted. Private DNS suffixes
+no longer pass on the suffix alone, and the reserved documentation ranges are denied. The three
+currently-`ALLOWED` control-API cases that flip to denied are **expected output, not
+regressions**.
+
+**The general rule, stated once so it does not need re-arguing.** For an allowlist guarding a
+hard invariant, when two implementations disagree the stricter one wins by default and the
+burden of proof sits on the looser one. The asymmetry is not close:
+
+| | Cost |
+|---|---|
+| False negative — a legitimate local endpoint refused | caught at boot, fixed by naming it in one environment variable |
+| False positive — a hostile endpoint permitted | repository content leaves the building, discovered never |
+
+**On the private suffixes.** This retires my own wording in D-028, where I wrote that the
+name-based check *"proves the hostname is inside the boundary"*. It does not even do that.
+Nobody owns `.internal`, `.local`, `.svc` or `.test`, and the case that settles it is
+`api.openai.com.evil.test`, which the old rule permitted. The correct model is the gateway's:
+**declaration grants trust, not the suffix.** `MODEL_SERVICE_NAMES` is the operator naming what
+is inside the boundary, and `_DECLARABLE_SUFFIXES` stops the declaration itself from becoming a
+one-line hole.
+
+**On the documentation ranges.** Adopted, and the PR's own sentence is the best argument in it
+and should survive into the security review verbatim: *"not globally routable" and "inside our
+trust boundary" are different properties and only the second one is the question being asked.*
+The old module conflated them, which is the same root cause as `169.254.169.254` passing —
+already fixed, same lesson, second instance.
+
+**The three flipped cases are a required declaration, not a breakage.** The compose service
+name for the model host keeps working the moment it is listed in `MODEL_SERVICE_NAMES`. That
+is a configuration change surfaced at startup, which is precisely the cheap side of the table
+above. It must be in `.env.example` and in the D1 setup path before #12 needs a model, so that
+the first person to hit it reads a declaration prompt rather than debugging a refusal.
+
+**Options considered** — (a) adopt both tightenings; (b) adopt the documentation ranges only,
+keeping suffix-passing for developer convenience; (c) keep the looser rule and revisit after
+the competition.
+
+**Pros and cons** — (b) is the tempting middle and it keeps the exact hole #78 was filed
+about. (c) trades the project's single most-repeated product rule for a small amount of setup
+friction. (a) costs one environment variable.
+
+**Cost implications** — one `MODEL_SERVICE_NAMES` entry, documented once.
+
+**Security implications** — closes `my-llm-proxy.internal`, `evil.internal`, `sneaky.svc`,
+`redirector.local` and `api.openai.com.evil.test`, all of which pass today.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-052 · `services/model-gateway/` is a package-location divergence from D-026; corrected, but not on the critical path · 2026-08-07 · CTO
+
+**Raised here because nobody raised it, and consolidating the policy would have papered over
+it.** D-026 (ratifying DR-C) placed the model gateway as a Python package **inside**
+`apps/control-api/`, and the architecture spec §4.1 L3 named the path `apps/control-api/gateway/client.py`.
+PR #111 builds it at `services/model-gateway/`, with its own `pyproject.toml`,
+`requirements.txt` and `pytest.ini`.
+
+**Decision** — D-026 stands; it is not overturned. The gateway package moves to
+`apps/control-api/gateway/` and the two requirements files merge. **This does not block
+#111**, and it is scheduled as a follow-up with an owner and a date rather than held over a
+merge — the same standard I required of others in D-045…D-048, applied to my own decision.
+
+**Is it actually a violation?** Partly, and being precise matters. There is no Dockerfile and
+no compose entry, so it is not yet a second *process* — which is what D-026's security
+argument was about ("a second process that must both hold repository context and reach the
+model"). It is a **packaging** divergence, not yet a deployment one. That is why it is a
+follow-up and not a blocker.
+
+**Why it still has to be corrected, in order of weight:**
+
+1. **The C5 test walks `apps/`.** The enforcement scope for the single-inference-client rule
+   excludes the directory containing the inference client. This is the one that matters and
+   D-050 fixes the policy half of it; the client half needs the move.
+2. **Two requirements files are two dependency sets.** The gateway is the single component
+   that must never acquire an outbound HTTP dependency by accident. One dependency file is a
+   control surface; two is a place for one to appear unreviewed.
+3. **A separate `pytest.ini` means the control-API test run does not execute the gateway's
+   tests.** Post-consolidation, a change to the shared policy module would not run the 60-case
+   table unless CI happens to invoke both suites. That is the same fragility D-049 Part 3
+   named for the OpenAPI dump: a check that can silently not run is worse than one that fails.
+
+**What is genuinely good about the current layout, and must be preserved through the move:**
+the gateway's tests skip cleanly and *visibly* (`-rs`) when `apps/control-api/` is absent. A
+skip nobody sees is a test that quietly stopped asserting — that instinct is right and the
+merged layout should keep it.
+
+**Options considered** — (a) move now, blocking #111; (b) move as a scheduled follow-up;
+(c) overturn D-026 and keep `services/`.
+
+**Pros and cons** — (a) costs the ml-infra seat rework in the middle of D2–D3 for a
+correctness gain that D-050 already delivers most of. (c) was argued and rejected on security
+grounds in D-026, and nothing in #111 is new evidence against that reasoning — the PR did not
+argue for the location, it simply used it. (b) takes the urgent half now and the tidy half on a
+date.
+
+**Cost implications** — a directory move and one requirements merge. Hours, not days.
+
+**Security implications** — item 1 above is the security content; the rest is hygiene.
+
+**Scalability implications** — none. D-026's reversibility clause is unaffected.
+
+**Owner and date** — `ml-infra-engineer`, **by end of D4 (2026-08-10)**, tracked as a new
+issue. If D4 is under pressure it slips to the D8–11 buffer, and the C5 test scope is widened
+to cover `services/` in the meantime as a one-line stopgap — **that widening is not optional
+and lands with #111**, because it is the part that is actually load-bearing.
+
+**Final approval authority** — CTO (technical).
