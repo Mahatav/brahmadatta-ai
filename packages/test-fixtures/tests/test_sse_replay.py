@@ -14,20 +14,22 @@ panel silently renders nothing.
 from __future__ import annotations
 
 import http.client
+import itertools
 import json
 import socket
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import sse_replay  # noqa: E402
+import sse_replay
 
 FIXTURE = sse_replay.DEFAULT_FIXTURE
 DROPPED = {13, 14, 15}
@@ -134,7 +136,7 @@ def test_live_stream_has_a_visible_gap(server, events) -> None:
     for dropped in DROPPED:
         assert dropped not in sequences
 
-    jumps = [b - a for a, b in zip(sequences, sequences[1:]) if b - a != 1]
+    jumps = [b - a for a, b in itertools.pairwise(sequences) if b - a != 1]
     assert jumps, (
         "a client can only exercise reconnect-and-replay if it can see that it missed "
         "something"
@@ -238,7 +240,7 @@ def test_frames_arrive_incrementally_not_in_one_block(events) -> None:
             sock.settimeout(max(0.1, deadline - time.monotonic()))
             try:
                 chunk = sock.recv(65536)
-            except socket.timeout:
+            except TimeoutError:
                 break
             if not chunk:
                 break
@@ -326,7 +328,7 @@ def test_timing_probe_detects_a_buffered_stream(events) -> None:
         def log_message(self, *args: Any) -> None:
             pass
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             body = "".join(
                 f"id: {event['sequence']}\nevent: {event['type']}\n"
                 f"data: {json.dumps(event, separators=(',', ':'))}\n\n"

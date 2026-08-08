@@ -70,7 +70,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
@@ -153,8 +153,8 @@ class ReplayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     # injected by serve()
-    events: list[dict[str, Any]] = []
-    dropped: set[int] = set()
+    events: ClassVar[list[dict[str, Any]]] = []
+    dropped: ClassVar[set[int]] = set()
     speed: float = 4.0
     max_gap: float = 2.0
     keepalive: float = 15.0
@@ -166,7 +166,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
     # -- helpers -----------------------------------------------------------------
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("[replay] %s %s\n" % (self.address_string(), fmt % args))
+        sys.stderr.write(f"[replay] {self.address_string()} {fmt % args}\n")
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
         payload = json.dumps(body).encode()
@@ -189,7 +189,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
 
     # -- routing -----------------------------------------------------------------
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
+    def do_GET(self) -> None:
         url = urlparse(self.path)
         query = parse_qs(url.query)
 

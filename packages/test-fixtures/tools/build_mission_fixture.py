@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -126,7 +126,7 @@ EXPORT_ID = UUID("94dae7f2-1e48-4b39-a60d-5032f1b8e4d7")
 TRACE_ID = "fixture-pktcfg-001"
 ADAPTER = "C_CMAKE_CTEST"
 
-T0 = datetime(2026, 8, 7, 13, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 7, 13, 0, 0, tzinfo=UTC)
 
 # --- measured constants ---------------------------------------------------------
 #

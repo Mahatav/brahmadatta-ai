@@ -62,7 +62,7 @@ def probe(url: str, timeout: float) -> dict[str, float]:
         sock.settimeout(max(0.1, deadline - time.monotonic()))
         try:
             chunk = sock.recv(65536)
-        except (TimeoutError, socket.timeout):
+        except TimeoutError:
             break
         if not chunk:
             break
