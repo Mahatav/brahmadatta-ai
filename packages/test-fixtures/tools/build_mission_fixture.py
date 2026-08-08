@@ -64,6 +64,7 @@ from contracts.enums import (  # noqa: E402
     FuzzingMode,
     GateName,
     GateStatus,
+    InferenceMode,
     MissionStage,
     MissionState,
     PatchPolicyStatus,
@@ -987,6 +988,10 @@ def build() -> Builder:
         prompt_sha256="c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776655443322110ffee0dd",
         context_bytes=4812,
         confidence=0.71,
+        # D-049 (BUG-007): required, no default — silence used to read as live
+        # inference. Every candidate below is genuinely replayed (the model host was
+        # down; see the LOG event above), so this is the honest value, not a filler.
+        inference_mode=InferenceMode.REPLAYED_TRANSCRIPT,
         replayed_from_transcript="transcript://pktcfg-001/candidate-a",
         captured_at=T0 - timedelta(days=1),
         transcript_sha256="1f2e3d4c5b6a79887766554433221100fedcba9876543210abcdef0123456789",
