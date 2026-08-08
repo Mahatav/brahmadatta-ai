@@ -104,6 +104,22 @@ class UnreadableArchiveError(ContractError):
     default_message = "The snapshot archive could not be read as a tar or zip archive."
 
 
+class RepositoryOutOfScopeError(ContractError):
+    """`repository_ref` does not resolve to a path inside the allowlisted source root.
+
+    Refused before any byte of it is read. This is the filesystem half of the safety
+    boundary: authorized repositories and isolated environments only — a mission
+    cannot point itself at an arbitrary path on the host and have the control API
+    read it.
+    """
+
+    code = ErrorCode.INVALID_AUTHORIZATION
+    http_status = 403
+    default_message = (
+        "The repository reference does not resolve to an authorized local path."
+    )
+
+
 class InvalidOperatorInputError(ContractError):
     """Boundary validation that pydantic's length limits do not cover.
 

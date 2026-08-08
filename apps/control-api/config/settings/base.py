@@ -137,6 +137,27 @@ SANDBOX_POLICY = {
     "max_seconds": env.get_int("SANDBOX_MAX_SECONDS", 5400),
 }
 
+# --- Snapshot ingestion (#18) ---------------------------------------------------
+#
+# Content-addressed artifact store: ARTIFACT_ROOT/<sha256[0:2]>/<sha256>, mode 0600,
+# directory 0700 (architecture spec §5.2). SNAPSHOT_SOURCE_ROOT bounds which local
+# directories a mission's own repository_ref may resolve to when the snapshot is built
+# from a directory rather than an uploaded archive — a repository_ref that resolves
+# outside this root is refused (authorization.errors.RepositoryOutOfScopeError), never
+# read. SNAPSHOT_STAGING_ROOT bounds an uploaded archive's archive_ref the same way.
+ARTIFACT_ROOT = Path(env.get_str("ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifacts")))
+SNAPSHOT_SOURCE_ROOT = Path(
+    env.get_str(
+        "SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories")
+    )
+)
+SNAPSHOT_STAGING_ROOT = Path(
+    env.get_str("SNAPSHOT_STAGING_ROOT", str(BASE_DIR / "var" / "uploads"))
+)
+#: 512 MiB. The demo targets are single-digit megabytes; this is a DoS ceiling, not a
+#: realistic size, and ingestion refuses (does not truncate) the instant it is crossed.
+SNAPSHOT_MAX_BYTES = env.get_int("SNAPSHOT_MAX_BYTES", 536_870_912)
+
 # --- Security headers ----------------------------------------------------------
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
