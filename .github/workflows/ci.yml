@@ -7,17 +7,28 @@
 # docs/04-development/31-development-setup-guide.md §Checks — it is just not spending
 # runner minutes on every pull request this week.
 #
-# What is NOT in CI, and how it is covered instead:
+# Three of those four scripts are now BACK IN, in the `ingress` job. The argument that put
+# them there is not "more checks are better", it is that each one guards a property that
+# fails SILENTLY — nothing goes red, nothing logs an error, and the first symptom is at the
+# finale. A lint failure announces itself; a buffered event stream does not.
 #
-#   ruff / mypy                         ruff.toml, mypy.ini — run locally
-#   docker compose config, nginx -t      infrastructure/scripts/nginx-validate.sh
-#   SSE survives the proxy               infrastructure/scripts/smoke-sse.sh
-#   only nginx has egress (C4)           infrastructure/scripts/egress-test.sh
-#   shellcheck, actionlint               run locally
+#   nginx -t + compose config       ingress job. ~30s. Catches a config that cannot start.
+#   SSE survives the proxy          ingress job. ~2min. Two of its four cases inject a
+#                                   violation and require the stream to break (#114).
+#   only nginx has egress (C4)      ingress job, plus the static half in
+#                                   tests/architecture/test_compose_topology.py, which runs
+#                                   in the cheap pytest job and needs nothing running.
 #
-# Those four scripts are the ones worth promoting back into CI first, in that order, when
-# the budget for it exists. `smoke-sse.sh` and `egress-test.sh` guard invariants that fail
-# silently, which is the argument for them going first.
+# What is still NOT in CI, and how it is covered instead:
+#
+#   ruff / mypy                     ruff.toml, mypy.ini — run locally
+#   shellcheck, actionlint          run locally
+#   finale-egress-evidence.sh       REHEARSAL, not CI. It builds and boots the whole finale
+#                                   stack to prove egress denial from inside the running
+#                                   container. That is the right test and the wrong cadence
+#                                   — see SEC-R3 and docs/06-operations/74-rehearsal-checklist.md,
+#                                   where it is a numbered checklist item with a place to
+#                                   record the output, not an intention.
 #
 # Design notes that survive the cut:
 #   - Actions are pinned to a commit SHA, not a tag. A tag is mutable and can be repointed
@@ -81,6 +92,43 @@ jobs:
   pytest:
     name: pytest
     runs-on: ubuntu-24.04
+
+    # BUG-022. There was no `services:` block here at all, so the whole control API suite
+    # ran on SQLite — and SQLite does not merely fail to prove the locking properties, it
+    # HIDES their failure. `SELECT ... FOR UPDATE` is a no-op there, so the suite is green
+    # whether the locking is right or wrong. QA proved gap-free sequences, the candidate-set
+    # freeze and legal transition chains against a real postgres:16-alpine, in a container
+    # that has since been destroyed. Nothing kept those results true.
+    #
+    # The judgement call was whether to SPLIT — most tests on SQLite for speed, the
+    # lock-dependent ones on Postgres — or to run everything on Postgres. Split, rejected:
+    # every mechanism for assigning a test to the Postgres lane (a marker, a directory, a
+    # naming convention) is something a person has to remember, and a lock-dependent test
+    # that lands in the SQLite lane reports green while testing nothing. That is strictly
+    # worse than no split. There is no assignment to get wrong if there is one lane.
+    #
+    # Cost of the decision: the service container adds roughly 10-15 seconds, started in
+    # parallel with checkout. The suite itself takes seconds either way. SQLite stays the
+    # local default via apps/control-api/config/settings/test.py, which uses setdefault, so
+    # a developer with no Postgres is unaffected and CI overrides it by exporting
+    # DATABASE_URL. Approved by: CTO (technical).
+    #
+    # 16-alpine matches what QA measured against and what docker-compose.finale.yml runs.
+    services:
+      postgres:
+        image: postgres@sha256:3b0d5e7d0e7b8b1c8e2d31bbbf4e2c3e60c0b6ecc0f1c8e4f0f5b0a7b19a1e57
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-not-a-real-password
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
