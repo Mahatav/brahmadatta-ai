@@ -1,0 +1,4 @@
+# Test tooling for services/model-gateway.
+-r requirements.txt
+
+pytest==9.1.1

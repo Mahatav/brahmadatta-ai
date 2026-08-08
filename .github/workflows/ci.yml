@@ -156,6 +156,38 @@ jobs:
           cd apps/control-api
           pytest -q
 
+      # Runs AFTER the control-API install, on purpose and for the same reason as BUG-016.
+      # gateway/tests/test_contract_alignment.py feeds the gateway's provenance record to
+      # the control API's real ModelProvenance; without django-ninja importable it skips,
+      # and a silently-skipping alignment test is how two definitions of the same three
+      # fields drift apart between now and D6. `-rs` prints any skip that does happen.
+      #
+      # This step is also the one that makes the SEC-02 bypass table a gate rather than a
+      # document: 60 cases, run on every pull request.
+      - name: Model gateway tests
+        run: |
+          set -euo pipefail
+          if [ ! -d services/model-gateway ]; then
+            echo "services/model-gateway does not exist yet — skipping"
+            exit 0
+          fi
+          pip install -r services/model-gateway/requirements-dev.txt
+          cd services/model-gateway
+          pytest -q -rs
+
+      # The same table the security review will be re-run against, executed as a script so
+      # its output is in the CI log verbatim and can be pasted into a review without
+      # anybody re-deriving it. Exit code is driven by the gateway policy only; the
+      # control-api column is #93's and is reported, not gated.
+      - name: Endpoint policy bypass table
+        run: |
+          set -euo pipefail
+          if [ ! -f infrastructure/scripts/testing/endpoint-policy-bypass-table.py ]; then
+            echo "bypass table script not present — skipping"
+            exit 0
+          fi
+          python infrastructure/scripts/testing/endpoint-policy-bypass-table.py
+
   # ---------------------------------------------------------------------------
   # Without this, issue #6's acceptance criterion — "a contract change breaks the frontend
   # build" — is simply false: a hand-committed OpenAPI dump drifts silently the first time
