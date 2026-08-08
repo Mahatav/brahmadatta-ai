@@ -9,8 +9,9 @@
 | 1 | PR #87 — Django + django-ninja control API and the frozen mission contract | `a853e80` merged with `origin/main` `ff0a11e`, merge commit `1eeb176` | **REJECTED** (§156) |
 | 2 | PR #87, after the mechanical fixes | `743ffa9`, already containing `origin/main` `81e7657` | **APPROVED WITH KNOWN ISSUES** (§0.4) |
 | 3 | PR #110 — persistent state machine, models, migrations; D-045 … D-049 | `4db0212`, merge-base `origin/main` `00f1afc` | **REJECTED** (§R3.9) |
+| 3.12 | PR #110, narrow re-check of BUG-019 and BUG-023 only | `48fee55` | **Both conditions CLOSED** (§R3.12) — no blocker outstanding on my ledger |
 
-All three in throwaway detached worktrees. Nothing was pushed to any branch under test.
+All in throwaway detached worktrees. Nothing was pushed to any branch under test.
 
 **Issues in scope:** #6, #9 (Django half), #12, #14, #77, #78, #80, #103, the CTO's nine
 conditions C1–C9 (review comment on **#79** — see §0), and CTO rulings **D-045 … D-049**.
@@ -792,11 +793,11 @@ accuracy only. **Owner:** none required.
 | BUG-012 | minor | open, unchanged | health 200 while `degraded`; reproduced against a paused database | backend-developer + devops |
 | BUG-009, BUG-014, BUG-015, BUG-017 | minor/trivial | open, **not re-tested** | Not in this PR's files | as before |
 | BUG-006, BUG-011, BUG-013 | *cybersecurity's* | see their §13 | BUG-011 now rated SEC-18/HIGH by `cybersecurity` | cybersecurity |
-| **BUG-019** | **blocker** | **NEW** | A mission reaches `VERIFIED` on another mission's patch through the sanctioned API (= SEC-15) | backend-developer |
+| **BUG-019** | **blocker** | **CLOSED — R3.12, `48fee55`** | A mission reaches `VERIFIED` on another mission's patch through the sanctioned API (= SEC-15). Two-mission harness re-run on fresh Postgres 16: attack now `[BLOCKED] CrossMissionEvidenceError`, A's verdict never disturbed. Named test `test_a_candidate_from_another_mission_cannot_be_verified_into_this_one` passes | backend-developer |
 | BUG-020 | major | NEW | "`gates` validated on write" is false; a malformed row blocks even the abort path (= SEC-20) | backend-developer |
 | BUG-021 | major | NEW | Public `assert_transition` accepts a pruned set; `Mission.state` has no writer guard (= SEC-16) | CTO, then backend-developer |
 | BUG-022 | major | NEW | No PostgreSQL job in CI; every lock-dependent property is unguarded against regression | devops + backend-developer |
-| BUG-023 | minor | NEW | `test_a_dropped_rejection_cannot_reach_verified` is misnamed; PR body repeats it (= SEC-23c) | backend-developer |
+| BUG-023 | minor | **CLOSED — R3.12, `48fee55`** | `test_a_dropped_rejection_cannot_reach_verified` was misnamed. Fixed by adding the correctly-named `test_a_dropped_human_review_record_cannot_reach_verified` and repurposing the old name to prove the correction (= SEC-23c) | backend-developer |
 | BUG-024 | minor | NEW | `recommended_patch_id` description names a case its validator permits | backend-developer |
 | BUG-025 | minor | NEW | `PatchCandidate` has no model-level freeze backstop (= SEC-17) | backend-developer |
 | BUG-026 | trivial | NEW | PR body's ruff counts do not reproduce on the pinned ruff | backend-developer |
@@ -832,6 +833,10 @@ SEC-17 / B3) I have said so.
 ### R3.9 Verdict — Round 3
 
 # REJECTED
+
+**Superseded by §R3.12 (2026-08-08, `48fee55`): both of the conditions below — BUG-019 and
+BUG-023 — closed by execution.** Preserved verbatim below rather than rewritten; see the
+standing note at the end of this file.
 
 On **BUG-019**, and on nothing else.
 
@@ -936,6 +941,90 @@ thread-pool question against genuinely held streams.
 done by then — a manual re-run of TC-P0 through TC-P3 against the finale compose stack's
 PostgreSQL, because the properties in §R3.2 are the ones that make invariant B real and they
 are currently proved by one QA session and nothing else.
+
+---
+
+### R3.12 Re-check of the fix commit `48fee55` — BUG-019 and BUG-023 only
+
+**Date:** 2026-08-08. **Scope: narrow, by design** — the two named checks from R3.11's first
+trigger, on a fresh disposable `postgres:16-alpine` (a new container; the round-3 one had
+already been torn down). This is not a fourth full round. The fix commit touches more than
+these two findings (`missions/lifecycle.py` is new, and `record_verification` now also
+enforces SEC-21's authorization/stage checks) — those are **not** audited here and are not
+covered by this addendum's verdict.
+
+**BUG-019 — my own two-mission harness (`05_sec15.py`, unmodified from R3.6), re-run against
+`48fee55` on Postgres 16:**
+
+```
+  mission A frozen at 2026-08-07 12:00:00+00:00
+  A's own candidates: 1, verdicts on A: ['REJECTED']
+
+  control: can we add another candidate to A through the recorder?
+    [BLOCKED] CandidateSetFrozenError
+
+  the attack: verify mission B's candidate INTO mission A
+    [BLOCKED] CrossMissionEvidenceError: Patch candidate 17cd1048-… belongs to mission
+              5a249913-…, not 36a5710f-…. A candidate outside this mission's own frozen
+              candidate set cannot be verified into it.
+
+  verdicts now on A: ['REJECTED']
+    [BLOCKED] VerificationRequiredError: Cannot enter VERIFIED: the mission's 1
+              verification run(s) derive REJECTED, which does not justify that state.
+```
+
+The attack is refused at the point it used to succeed — inside `record_verification`, before
+any row is written — rather than later, so A's own verdict is never disturbed. **BUG-019:
+CLOSED.**
+
+The fix reads correctly against the two things that made this a blocker rather than a major:
+the check runs *inside* the `transaction.atomic()` block, under the mission row lock already
+held (`patch = PatchCandidate.objects.select_related(None).get(pk=patch_id)` then a direct
+`mission_id` comparison), and it raises before `derive_verdict` or any `.create()` call — so
+there is no window where a partial write could land.
+
+**The named test, executed:**
+
+```
+$ pytest -v orchestrator/tests/test_cross_mission_evidence.py::test_a_candidate_from_another_mission_cannot_be_verified_into_this_one \
+           orchestrator/tests/test_cross_mission_evidence.py::test_the_frozen_mission_cannot_reach_verified_by_borrowing_evidence \
+           orchestrator/tests/test_verdict_completeness.py::test_a_dropped_human_review_record_cannot_reach_verified \
+           orchestrator/tests/test_verdict_completeness.py::test_a_dropped_rejection_cannot_reach_verified
+orchestrator/tests/test_cross_mission_evidence.py ..                     [ 50%]
+orchestrator/tests/test_verdict_completeness.py ..                       [100%]
+4 passed in 1.21s
+```
+
+`test_a_candidate_from_another_mission_cannot_be_verified_into_this_one` builds the exact
+two-mission shape (`orchestrator/tests/test_cross_mission_evidence.py:104`), asserts
+`CrossMissionEvidenceError`, and then asserts A still reaches its own honest `REJECTED` —
+not merely that the attack raises, but that A's verdict was never touched by it.
+
+**BUG-023 — handled better than a rename.** I expected a straight rename. What landed
+instead: `test_a_dropped_human_review_record_cannot_reach_verified` is the correctly-named
+test (the case that actually bites), and the old name,
+`test_a_dropped_rejection_cannot_reach_verified`, was **kept and repurposed** to prove the
+correction rather than deleted — it now executes `derive_mission_verdict([VERIFIED,
+REJECTED]) is derive_mission_verdict([VERIFIED]) is VERIFIED` directly, drives the demo pair
+to a real `VERIFIED` through the sanctioned path, and asserts the rejection is still on disk
+and still required in the `MissionVerdictSummary`. That is a stronger fix than the one I
+asked for: it does not just correct the label, it makes the *reason* the old label was wrong
+executable, which is exactly what stops the wrong model coming back the next time someone
+re-derives it. **BUG-023: CLOSED.**
+
+**Context, not part of either named check:** the full control-api suite on this Postgres is
+`262 passed in 6.39s` (up from round 3's `231` — the fix commit added tests). I ran it as a
+smoke check, not as a re-audit; the additional files in the diff (`missions/lifecycle.py`,
+the SEC-21 checks in `record_verification`, `test_single_writer.py`,
+`test_mission_state_single_writer.py`) are outside this addendum's scope and carry no
+verdict from me.
+
+**Verdict on my two blocking conditions: both CLOSED, by execution, on PostgreSQL 16.**
+`cybersecurity`'s SEC-15 is theirs to close; I note only that we reached the same defect from
+opposite directions without seeing each other's notes, which is what the review chain is for.
+**#110 has no blocker outstanding on my ledger.** BUG-020, 021, 022, 024, 025, 026, 027
+(R3.6) remain open at their filed severities — none was blocking, and this addendum did not
+re-touch them.
 
 ---
 
