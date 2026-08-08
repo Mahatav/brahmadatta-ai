@@ -60,9 +60,13 @@ import sys
 from pathlib import Path
 
 #: Mismatches `contracts/model_policy.py` is known to have, measured 2026-08-08 against
-#: `main` at 66c3057. Lower it in the same commit that fixes cases; the script fails if it
-#: is stale in either direction. Goes to 0 when D-050's consolidation lands.
-CONTROL_BASELINE = 34
+#: `main` at 66c3057 (34 of the original 60 cases), then re-measured the same day against
+#: `main` after adding the SEC-24 and SEC-25 regression cases (39 of 68 — the file has
+#: neither the translation-wrapper fix nor a length guard, so 5 of the 8 new cases are
+#: additional, expected mismatches, not new discoveries). Lower it in the same commit that
+#: fixes cases; the script fails if it is stale in either direction. Goes to 0 when D-050's
+#: consolidation lands.
+CONTROL_BASELINE = 39
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GATEWAY = REPO_ROOT / "services" / "model-gateway"
@@ -176,9 +180,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.quiet and "[FAIL]" not in gateway_cell + control_cell:
             continue
+        # SEC-25's own regression case is a ~60,000-character URL. Printed in full it would
+        # make every run of this script (and every CI log) balloon by tens of kilobytes for
+        # no benefit — the case is identified by its label, not by staring at the payload.
+        shown_url = (
+            case.url if len(case.url) <= 80 else f"{case.url[:60]}…[{len(case.url)} chars total]"
+        )
         print(
             f"{case.expected!s:7s} {gateway_cell:38s} {control_cell:13s} "
-            f"{case.label[:38]:38s} {case.url!r}"
+            f"{case.label[:38]:38s} {shown_url!r}"
         )
 
     print()

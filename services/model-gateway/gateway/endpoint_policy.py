@@ -50,6 +50,37 @@ two implementations are ever merged, and that should be a conversation, not a su
   also cannot serve a model. "Not globally routable" and "inside our trust boundary" are
   different properties and only the second one is the question being asked.
 
+## Round 3: SEC-24 and SEC-25
+
+Two findings from the security review's round-3 gate on PR #111, both fixed here.
+
+**SEC-24 — a 6to4/NAT64 literal was judged by its embedded address, and should never be.**
+`_unwrap` reduces `2002:0a00:0001::` (6to4) or `64:ff9b::a00:1` (NAT64) to the IPv4 address
+each carries, and the old code then ran that address through the *same* deny-then-allow
+logic as any other address — so an embedded private or loopback address reached
+`allowed-network`. That conflates two different claims: "the embedded address is private"
+is not "this destination is inside our trust boundary", because reaching either literal
+means a translation relay outside this policy's visibility rewrites the packet to the
+embedded destination. Per RFC 3056 §2 and RFC 6052 §3.1, neither mechanism is meant to
+carry a non-global address in the first place. Fix: `_unwrap` now reports *which* mechanism
+produced the effective address, and a 6to4/NAT64 result is refused outright
+(`translation-wrapper-non-global`) rather than handed to the allow loop — never reachable
+regardless of what is embedded. `ipv4_mapped` (`::ffff:x.y.z.w`) is unaffected: that is a
+notation a dual-stack socket layer uses for an address it already treats as local, not a
+translation path, and it is still judged by the address it carries.
+
+**SEC-25 — a single unbroken label of certain scripts is quadratic in `idna`.** `idna`'s
+`valid_contexto()` check (required for same-script constraints on characters like
+Arabic-Indic digits) is called once per codepoint in a label, each call scanning the label
+— O(N) per call, O(N²) per label — and it runs *before* `idna`'s own length validation.
+Reproduced through this exact call site at 99.8s-122.5s for a single ~60,000-character
+label of U+0660 (ARABIC-INDIC DIGIT ZERO) on the previously pinned `idna==3.10`
+(CVE-2026-45409 / PYSEC-2026-215). Two independent fixes, both required: `idna>=3.15`
+(pinned to 3.18) fixes the library, and `_oversized_hostname_reason` enforces RFC 1035's
+253-character / 63-per-label limits on the raw string *before* `idna.encode()` is ever
+called, in both `classify()` and `normalise_service_names()` — so the guard holds even
+against a future regression in `idna` itself.
+
 ## No DNS by default
 
 `classify()` performs no network call and no name resolution, so it is safe in a system
@@ -191,6 +222,39 @@ _KNOWN_HOSTED_INFERENCE_HOSTS: tuple[str, ...] = (
 
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
+#: RFC 1035 §3.1: a domain name is at most 253 characters, and no label exceeds 63.
+#: Enforced here for a second reason beyond correctness — **SEC-25**. `idna`'s ContextO
+#: check (`valid_contexto()`, used for scripts like Arabic-Indic digits that carry a
+#: same-script requirement) is called once per codepoint in a label, and each call scans
+#: the label — O(N) per call, O(N²) per label, checked *before* `idna`'s own length
+#: validation runs. A single unbroken label of the advisory's payload, U+0660 (ARABIC-INDIC
+#: DIGIT ZERO) repeated ~60,000 times with no dots, measured at 99.8s-122.5s through this
+#: exact call site on the pinned `idna==3.10`. `idna>=3.15` fixes the library; this guard is
+#: the second, independent half — reject before the codepoint loop ever runs, so the fix
+#: holds even against a future regression in the library itself. Applied to the raw string,
+#: before any IDNA processing, so it costs O(N) regardless of script.
+_MAX_HOSTNAME_LENGTH = 253
+_MAX_LABEL_LENGTH = 63
+
+
+def _oversized_hostname_reason(host: str) -> str | None:
+    """None if `host` is within RFC 1035 bounds, else why it is refused.
+
+    Splits on the literal `.` in the raw string — never on anything `idna` would produce —
+    because the SEC-25 payload is exactly one label with no dots at all, and a check that
+    ran IDNA processing first to find the labels would already have paid the cost this
+    guard exists to avoid.
+    """
+    if len(host) > _MAX_HOSTNAME_LENGTH:
+        return f"{len(host)} characters, exceeds the RFC 1035 limit of {_MAX_HOSTNAME_LENGTH}"
+    for label in host.split("."):
+        if len(label) > _MAX_LABEL_LENGTH:
+            return (
+                f"a label of {len(label)} characters, exceeds the RFC 1035 limit of "
+                f"{_MAX_LABEL_LENGTH} per label"
+            )
+    return None
+
 
 @dataclass(frozen=True)
 class EndpointDecision:
@@ -226,6 +290,16 @@ def normalise_service_names(names: Iterable[str]) -> frozenset[str]:
         name = raw.strip().lower().rstrip(".")
         if not name:
             continue
+
+        # Before IDNA touches it — SEC-25. A name this long cannot be a real service name
+        # and must not reach the ContextO scan regardless.
+        oversized = _oversized_hostname_reason(name)
+        if oversized is not None:
+            raise ExternalInferenceBlockedError(
+                f"MODEL_SERVICE_NAMES contains an entry of {oversized}. Refused before "
+                "IDNA processing, not after.",
+                details={"entry": raw[:80] + "…" if len(raw) > 80 else raw},
+            )
 
         try:
             encoded = idna.encode(name, uts46=True).decode("ascii")
@@ -320,6 +394,15 @@ def classify(url: str, *, service_names: Iterable[str] = ()) -> EndpointDecision
         return _classify_address(address, host)
 
     # --- names ------------------------------------------------------------------------
+    # Before IDNA touches it — SEC-25, and checked ahead of every other name rule below,
+    # not just the encode call: nothing about this host is trustworthy until it is a
+    # plausible hostname at all.
+    oversized = _oversized_hostname_reason(host)
+    if oversized is not None:
+        return EndpointDecision(
+            False, "host-too-long", f"host is {oversized}. Refused before IDNA processing.", host
+        )
+
     # Normalise before deciding. The HTTP client will do exactly this, so a decision made
     # on the un-normalised string is a decision about a different host than the one that
     # gets contacted.
@@ -496,26 +579,51 @@ def _is_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address |
         return None
 
 
+#: Which mechanism produced an unwrapped address, or None for "no unwrap happened".
+#: The distinction is the SEC-24 fix: `ipv4-mapped` is a *notation* — `::ffff:127.0.0.1` is
+#: how a dual-stack socket layer spells an IPv4 address, and no packet ever carries that
+#: wrapper on the wire. `nat64` and `6to4` are *translation paths* — an IPv6 literal in
+#: either range is delivered by a relay that rewrites it to the embedded IPv4 destination,
+#: a hop this policy has no visibility into and does not control.
+_UnwrapKind = str | None
+
+
 def _unwrap(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Reduce an IPv6 address that carries an IPv4 one to the IPv4 address inside it."""
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, _UnwrapKind]:
+    """Reduce an IPv6 address that carries an IPv4 one to the IPv4 address inside it.
+
+    Returns the effective address and which mechanism did it, so the caller can tell a
+    notation (safe to judge by the embedded address) from a translation path (never safe
+    to judge that way — see `_classify_address`).
+    """
     if address.version != 6:
-        return address
+        return address, None
     assert isinstance(address, ipaddress.IPv6Address)
     if address.ipv4_mapped is not None:
-        return address.ipv4_mapped
+        return address.ipv4_mapped, "ipv4-mapped"
     if address in _NAT64 or address in _NAT64_LOCAL:
-        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF), "nat64"
     if address in _SIXTOFOUR:
-        return ipaddress.IPv4Address((int(address) >> 80) & 0xFFFFFFFF)
-    return address
+        return ipaddress.IPv4Address((int(address) >> 80) & 0xFFFFFFFF), "6to4"
+    return address, None
+
+
+#: RFC 3056 §2 requires the IPv4 address 6to4 encodes to be a global unicast address; RFC
+#: 6052 §3.1 says the NAT64 well-known prefix "MUST NOT be used to represent non-global
+#: IPv4 addresses" — a network that needs to translate to RFC 1918 space must use a
+#: network-specific prefix instead, precisely so the well-known prefix cannot be confused
+#: with a local destination. An embedded address that is *not* global is therefore not a
+#: legitimate use of either mechanism — either malformed, or a deliberate attempt to make
+#: an externally-routed translation path read as a private one. Refused either way,
+#: regardless of what the embedded address is, unlike ipv4-mapped notation.
+_TRANSLATION_WRAPPERS = frozenset({"nat64", "6to4"})
 
 
 def _classify_address(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address, shown: str
 ) -> EndpointDecision:
-    effective = _unwrap(address)
+    effective, unwrap_kind = _unwrap(address)
     wrapped = effective != address
 
     for network, why in _DENIED:
@@ -532,6 +640,26 @@ def _classify_address(
         if wrapped:
             detail = f"{detail} ({effective}) carried inside {shown}"
         return EndpointDecision(False, "global-address", detail, shown)
+
+    # SEC-24. A 6to4 or NAT64 literal is a translation path, not a notation: the packet is
+    # delivered by a relay outside this policy's visibility, which rewrites it to the
+    # embedded IPv4 destination. Reaching here means the deny and global checks above did
+    # not refuse the embedded address — i.e. it looks private or loopback — and per RFC
+    # 3056 / RFC 6052 that is not a legitimate use of either mechanism. Refused outright,
+    # never handed to the allowlist below: "the embedded address is private" is not the
+    # same claim as "this destination is inside our trust boundary" when a relay sits
+    # between here and it.
+    if unwrap_kind in _TRANSLATION_WRAPPERS:
+        return EndpointDecision(
+            False,
+            "translation-wrapper-non-global",
+            f"{shown} is a {unwrap_kind} literal embedding {effective}, which is not a "
+            f"globally routable address. {unwrap_kind} exists to reach a global IPv4 "
+            "destination through a translation relay outside this policy's visibility; "
+            "an embedded private or loopback address is not a legitimate use of it and "
+            "is refused regardless, per RFC 3056 §2 / RFC 6052 §3.1.",
+            shown,
+        )
 
     for network in _ALLOWED:
         if effective.version == network.version and effective in network:

@@ -103,6 +103,21 @@ RULE_FOR = {
     # as 0.0.0.64 — so the packed-IPv4 rule is the one that catches it, and that is the
     # correct rule rather than a lucky one.
     "http://64:ff9b::808:808/v1": "packed-ipv4",
+    # SEC-24 — the point of the fix is that these are refused for what they are (a
+    # translation path with an illegitimate embedded address), not merely refused.
+    "http://[2002:a00:1::]/v1": "translation-wrapper-non-global",
+    "http://[2002:7f00:1::]/v1": "translation-wrapper-non-global",
+    "http://[64:ff9b::a00:1]/v1": "translation-wrapper-non-global",
+    "http://[64:ff9b::7f00:1]/v1": "translation-wrapper-non-global",
+    # The embedded address (169.254.169.254) is caught by the more specific deny-list
+    # entry before the translation-wrapper check runs — correctly: link-local/metadata is
+    # refused for what it is either way, and the deny list is checked first for exactly
+    # this reason (SEC-02's fix order, unchanged by SEC-24).
+    "http://[2002:a9fe:a9fe::]/v1": "denied-network",
+    # SEC-25 — refused before IDNA ever sees the string, not by idna-invalid or any other
+    # rule downstream of the codepoint scan.
+    "http://" + ("٠" * 60_000) + "/v1": "host-too-long",
+    "http://" + ("a" * 300) + "/v1": "host-too-long",
 }
 
 
@@ -265,3 +280,157 @@ def test_the_homograph_error_shows_what_the_client_would_have_contacted() -> Non
         "the operator has to be told that the string they typed becomes api.openai.com "
         "once the HTTP client normalises it — that is the whole finding"
     )
+
+
+# --------------------------------------------------------------------------------------
+# SEC-24 — a 6to4/NAT64 literal is a translation path, not a notation
+# --------------------------------------------------------------------------------------
+
+
+def test_6to4_and_nat64_are_refused_regardless_of_the_embedded_address() -> None:
+    """The fix in one sentence: unlike ipv4-mapped, these two never reach the allow loop.
+
+    `ipv4_mapped` stays judged by the embedded address — `::ffff:10.0.0.1` is a *notation*
+    for an address a dual-stack socket layer already treats as 10.0.0.1, with no relay in
+    the path. 6to4 and NAT64 are different: reaching either literal means a relay outside
+    this policy's visibility rewrites the packet to the embedded IPv4 destination, so
+    "the embedded address is private" was never the same claim as "this destination is
+    inside our trust boundary".
+    """
+    # A public embedded address was already denied before the fix (global-address, via
+    # the same effective-address check this fix does not touch) — kept as a control so a
+    # future edit cannot narrow the fix down to only the newly-added rule.
+    assert classify("http://[2002:808:808::1]/v1").rule == "global-address"
+
+    # The fix: a private or loopback embedded address no longer reaches "allowed-network".
+    for url in (
+        "http://[2002:a00:1::]/v1",  # 6to4 / 10.0.0.1
+        "http://[2002:7f00:1::]/v1",  # 6to4 / 127.0.0.1
+        "http://[64:ff9b::a00:1]/v1",  # NAT64 / 10.0.0.1
+        "http://[64:ff9b::7f00:1]/v1",  # NAT64 / 127.0.0.1
+    ):
+        decision = classify(url)
+        assert decision.allowed is False
+        assert decision.rule == "translation-wrapper-non-global"
+
+
+def test_ipv4_mapped_notation_is_unaffected_by_the_sec_24_fix() -> None:
+    """The one wrapper kind that is still judged by what it carries.
+
+    If this ever starts failing, the fix in `_classify_address` widened past what SEC-24
+    asked for — `ipv4_mapped` is a notation, and refusing it would break loopback and
+    private addresses reached through a dual-stack socket, which nothing in SEC-24's
+    finding asked for.
+    """
+    assert classify("http://[::ffff:127.0.0.1]/v1").allowed is True
+    assert classify("http://[::ffff:10.0.0.1]/v1").allowed is True
+    assert classify("http://[::ffff:169.254.169.254]/v1").allowed is False  # denied-network
+    assert classify("http://[::ffff:8.8.8.8]/v1").allowed is False  # global-address
+
+
+def test_the_translation_wrapper_error_names_the_mechanism_and_the_rfc() -> None:
+    decision = classify("http://[2002:a00:1::]/v1")
+    assert "6to4" in decision.reason
+    assert "10.0.0.1" in decision.reason
+    assert "RFC 3056" in decision.reason
+
+
+# --------------------------------------------------------------------------------------
+# SEC-25 — the idna ContextO quadratic-complexity DoS, and the fix that survives a
+# regression in the library itself
+# --------------------------------------------------------------------------------------
+
+
+def test_sec_25_long_host_does_not_hang() -> None:
+    """The advisory's own payload, timed. Refused, and refused fast.
+
+    Reported at 99.8s-122.5s through this exact call site on the previously pinned
+    `idna==3.10`. The bound below (2s) is generous by roughly two orders of magnitude —
+    tight enough to catch a reintroduction of the bug (by an idna downgrade, or a change
+    that calls idna before the length guard), loose enough not to flake on a slow CI
+    runner for a check that should complete in well under a millisecond.
+    """
+    import time
+
+    payload = "٠" * 60_000  # ARABIC-INDIC DIGIT ZERO, the advisory's payload
+
+    started = time.perf_counter()
+    decision = classify(f"http://{payload}/v1")
+    elapsed = time.perf_counter() - started
+
+    assert decision.allowed is False
+    assert decision.rule == "host-too-long", (
+        f"expected the length guard to refuse this before IDNA ever ran; got "
+        f"rule={decision.rule!r}. If IDNA processing ran at all on this payload, the "
+        "guard did not fire ahead of it, which is the exact ordering SEC-25 requires."
+    )
+    assert elapsed < 2.0, (
+        f"took {elapsed:.3f}s. The length guard is supposed to refuse this in the "
+        "microseconds before idna.encode() is ever called; a multi-second result here "
+        "means the guard fired too late, or not at all."
+    )
+
+
+def test_sec_25_the_length_guard_applies_before_idna_in_service_names_too() -> None:
+    """The second call site. `normalise_service_names` also calls `idna.encode`."""
+    import time
+
+    payload = "٠" * 60_000
+    started = time.perf_counter()
+    with pytest.raises(ExternalInferenceBlockedError, match="Refused before IDNA"):
+        normalise_service_names([payload])
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2.0, f"took {elapsed:.3f}s; the guard should make this near-instant"
+
+
+#: Two independent boundaries, kept independent in these cases on purpose. A single label
+#: over 63 characters is *also* over the 253-character total the moment it is long enough
+#: to matter for SEC-25, which made an earlier version of this test look like it was
+#: checking the total-length limit when it was only ever exercising the per-label one.
+#: Each case here isolates one boundary: the multi-label hosts stay under 63 per label
+#: while varying the total, and the single-label hosts stay under 253 total while varying
+#: the label.
+_FOUR_LABELS_AT = lambda total_extra: (  # noqa: E731 - local helper, not worth a def
+    "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * (58 + total_extra)
+)
+
+assert len(_FOUR_LABELS_AT(3)) == 253  # 63+1+63+1+63+1+61 — sanity, not a test in itself
+
+
+@pytest.mark.parametrize(
+    "host,should_be_refused_by_length",
+    [
+        # Total-length boundary, each label safely under 63 so only the total is on trial.
+        (_FOUR_LABELS_AT(3), False),  # 253 total — RFC 1035's limit, must pass through
+        (_FOUR_LABELS_AT(4), True),  # 254 total — one character over
+        # Per-label boundary, comfortably under 253 total so only the label is on trial.
+        ("a" * 63, False),  # exactly at the per-label limit
+        ("a" * 64, True),  # one character over, single label
+    ],
+)
+def test_the_length_guard_is_off_by_one_correct(
+    host: str, should_be_refused_by_length: bool
+) -> None:
+    """RFC 1035's limits are inclusive. Getting the boundary wrong in either direction is
+    either a functional regression (rejecting a legal hostname) or a reopened DoS window
+    (a label one character inside the limit still being long enough to matter, if idna's
+    own bound turns out to differ from RFC 1035's by one)."""
+    decision = classify(f"http://{host}/v1")
+    if should_be_refused_by_length:
+        assert decision.rule == "host-too-long", (
+            f"host of length {len(host)} (labels: {[len(p) for p in host.split('.')]}) "
+            f"should have been refused by length; got rule={decision.rule!r}"
+        )
+    else:
+        assert decision.rule != "host-too-long", (
+            f"host of length {len(host)} (labels: {[len(p) for p in host.split('.')]}) "
+            "is within RFC 1035's bounds and should not be refused by length"
+        )
+
+
+def test_a_host_at_the_length_boundary_that_is_otherwise_valid_is_not_penalised() -> None:
+    """The guard must not be so blunt that it refuses a legitimate long-but-legal name."""
+    declared = normalise_service_names(["a" * 63 + ".internal"])
+    decision = classify(f"http://{'a' * 63}.internal:8000/v1", service_names=declared)
+    assert decision.allowed is True
+    assert decision.rule != "host-too-long"

@@ -125,21 +125,48 @@ the two implementations were ever merged.
   serve a model, and "not globally routable" is a different property from "inside our trust
   boundary".
 
+### SEC-24 and SEC-25 — round-3 security review findings, both fixed
+
+**SEC-24 — a 6to4/NAT64 literal was judged by its embedded address.** `2002:0a00:0001::`
+(6to4) and `64:ff9b::a00:1` (NAT64) both carry 10.0.0.1, and the old code unwrapped either
+one and judged the result exactly like any other address — so a private or loopback
+embedded address was permitted. Wrong: reaching either literal means a translation relay
+outside this policy's visibility rewrites the packet to the embedded destination, so "the
+embedded address is private" was never the same claim as "this destination is inside the
+boundary". Neither mechanism is meant to carry a non-global address in the first place (RFC
+3056 §2, RFC 6052 §3.1). Fixed: a 6to4/NAT64-unwrapped address is refused outright,
+regardless of what it carries. `ipv4_mapped` (`::ffff:x.y.z.w`) is unaffected — that is a
+notation, not a translation path, and stays judged by the address it carries.
+
+**SEC-25 — a single unbroken label of certain Unicode scripts is quadratic in `idna`.**
+`idna`'s ContextO check (needed for same-script constraints, e.g. Arabic-Indic digits) is
+called once per codepoint in a label and scans the label each time — O(N²) per label —
+*before* `idna`'s own length check runs. The advisory's payload, a ~60,000-character label
+of U+0660 repeated, measured 99.8s-122.5s through this exact call site on the previously
+pinned `idna==3.10` (CVE-2026-45409). Two independent fixes, both required: `idna>=3.15`
+(now pinned to 3.18), and an RFC 1035 length guard (253 chars total, 63 per label) applied
+to the raw string before `idna.encode()` is called anywhere in this module — so the guard
+holds even against a future regression in the library.
+
 ### Re-running the bypass table
 
 ```
 python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py
 ```
 
-60 cases, every one of them written down by a reviewer — the security review's SEC-02
-proof blocks, its §12.2 re-run inside the built finale image, the QA report's 30-row attack
-table, and issue #78's own examples. Each row carries its source. The same table is the
-pytest parametrisation in `gateway/tests/test_endpoint_policy.py`, so the script and the
-suite cannot disagree about what "correct" means.
+68 cases, every one written down by a reviewer — the security review's SEC-02 proof blocks,
+its §12.2 re-run inside the built finale image, the QA report's 30-row attack table, issue
+#78's own examples, and the round-3 review's SEC-24 and SEC-25 regression cases. Each row
+carries its source. The same table is the pytest parametrisation in
+`gateway/tests/test_endpoint_policy.py`, so the script and the suite cannot disagree about
+what "correct" means.
 
-The script prints a column for **both** implementations. The control-API column is expected
-to fail: `contracts/model_policy.py` is not modified on this branch and is tracked on #93.
-See "What this does not do".
+The script gates **both** columns (CTO condition 2 on #111): the gateway column at zero, and
+the control-API column at exactly `CONTROL_BASELINE` — a recorded number, not zero, because
+`contracts/model_policy.py` is not modified on this branch (tracked on #93) and a hard zero
+would make every unrelated PR unmergeable for a defect none of them introduced. It fails in
+*both* directions: a regression breaks the build, and an unrecorded improvement does too,
+until `CONTROL_BASELINE` is lowered in the same commit. See "What this does not do".
 
 ## What this does **not** do
 

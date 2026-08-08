@@ -74,7 +74,6 @@ HTTP_CLIENT_ROOTS = frozenset(
         "requests",
         "aiohttp",
         "urllib3",
-        "http",  # http.client
         "openai",
         "anthropic",
         "cohere",
@@ -235,6 +234,34 @@ def test_the_scan_actually_reaches_the_gateway_package() -> None:
     )
 
 
+#: `http.client` is stdlib and holds both the classes that open a socket
+#: (`HTTPConnection`, `HTTPSConnection`) and a pile of things that do not
+#: (`responses` — a status-code-to-reason-phrase dict, exception classes, `HTTPMessage`).
+#: A root-level check on `http` would flag `from http.client import responses`, which is
+#: exactly what `apps/control-api/tools/export_openapi.py` does to render a schema and
+#: opens no socket. Checked by name instead, so the guard is precise about what it is
+#: guarding against rather than merely broad.
+_HTTP_CLIENT_CONNECTION_NAMES = frozenset({"HTTPConnection", "HTTPSConnection"})
+
+
+def _imports_http_client_connection(path: Path) -> bool:
+    """True if `path` imports `http.client.HTTPConnection`/`HTTPSConnection`, or the
+    whole `http.client` module by name — the shapes that can actually open a socket."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name in ("http.client", "http.client.*") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "http.client" and any(
+                alias.name in _HTTP_CLIENT_CONNECTION_NAMES for alias in node.names
+            ):
+                return True
+            if node.module == "http" and any(alias.name == "client" for alias in node.names):
+                return True
+    return False
+
+
 def test_only_declared_modules_may_construct_an_inference_client() -> None:
     """L3 — exactly one module may construct an inference client, and it must be declared.
 
@@ -253,6 +280,8 @@ def test_only_declared_modules_may_construct_an_inference_client() -> None:
             continue
         for root in sorted(_imported_roots(source) & HTTP_CLIENT_ROOTS):
             offenders.append(f"{relative} imports `{root}`")
+        if _imports_http_client_connection(source):
+            offenders.append(f"{relative} imports `http.client`'s connection classes")
 
     assert not offenders, (
         "A module that is not declared as the inference client imports an HTTP client:\n\n"

@@ -2,7 +2,7 @@
 
 Every case here was written down by a reviewer, not invented. `SOURCE` on each row says
 which one and where, so `cybersecurity` can map a row back to the finding it came from and
-check that nothing was quietly dropped. The three sources:
+check that nothing was quietly dropped. The sources:
 
   SEC-02   docs/09-company/08-security-review.md §2, "Executed proof — the policy function"
            (13 rows) and §12.2, the re-run inside the built finale image (11 rows, of which
@@ -11,6 +11,22 @@ check that nothing was quietly dropped. The three sources:
            confirming it" (30 rows, 19 mismatches, including the decimal-encoded public
            IPv4 that is not in the security review).
   #78      The issue body's own three examples.
+  SEC-24   PR #111 round-3 security review. `_classify_address` fed the unwrapped address
+           to the allow loop as well as the deny loop, so a 6to4/NAT64 literal wrapping a
+           private or loopback address was permitted while delivery actually goes through
+           a translation relay outside this policy's visibility — a claim about "the
+           embedded address is private" standing in for "this destination is inside our
+           trust boundary" when the two are not the same thing once a relay is involved.
+  SEC-25   PR #111 round-3 security review, then independently re-verified after an
+           orchestrator correction did not reproduce and was itself corrected. `idna`'s
+           ContextO check is O(N) per codepoint and is called once per codepoint in a
+           label — O(N²) — for scripts like Arabic-Indic digits, checked *before* idna's
+           own length validation runs. The advisory's payload (U+0660 repeated, no dots,
+           one label) measured 99.8s-122.5s through this exact call site on `idna==3.10`.
+           This table carries the verdict case (refused, and fast); the wall-clock
+           assertion is `test_sec_25_long_host_does_not_hang` in
+           `test_endpoint_policy.py`, since timing does not belong in a shared
+           cross-implementation table.
 
 `gateway/tests/test_endpoint_policy.py` runs it as pytest parameters.
 `infrastructure/scripts/testing/endpoint-policy-bypass-table.py` runs the same rows against
@@ -167,4 +183,36 @@ CASES: tuple[Case, ...] = (
     Case("https://model.svc.cluster.local/v1", False, "undeclared cluster DNS", "main tests"),
     Case("http://small-model.internal:8000/v1", False, "undeclared .internal", "main tests"),
     Case("http://model-host.local:8000/v1", False, "undeclared .local", "main tests"),
+    # -- SEC-24: 6to4/NAT64 wrapping a private or loopback address -------------------
+    # Previously allowed: _classify_address fed the unwrapped address to the allow loop
+    # as well as the deny loop, so these read as "a private address" when what they
+    # actually are is a translation path outside this policy's visibility.
+    Case("http://[2002:a00:1::]/v1", False, "6to4 wrapper around 10.0.0.1 (private)", "SEC-24"),
+    Case("http://[2002:7f00:1::]/v1", False, "6to4 wrapper around 127.0.0.1 (loopback)", "SEC-24"),
+    Case("http://[64:ff9b::a00:1]/v1", False, "NAT64 wrapper around 10.0.0.1 (private)", "SEC-24"),
+    Case(
+        "http://[64:ff9b::7f00:1]/v1",
+        False,
+        "NAT64 wrapper around 127.0.0.1 (loopback)",
+        "SEC-24",
+    ),
+    Case(
+        "http://[2002:a9fe:a9fe::]/v1",
+        False,
+        "6to4 wrapper around 169.254.169.254 (link-local/metadata)",
+        "SEC-24",
+    ),
+    Case(
+        "http://[::ffff:10.0.0.1]/v1",
+        True,
+        "ipv4-mapped notation around 10.0.0.1 — control, must stay allowed (SEC-24 fix "
+        "does not touch this mechanism)",
+        "SEC-24",
+    ),
+    # -- SEC-25: idna ContextO quadratic-complexity DoS -------------------------------
+    # The advisory's own payload: U+0660 (ARABIC-INDIC DIGIT ZERO) x 60000, no dots, one
+    # label. Verdict only here; the wall-clock assertion is a dedicated test, since
+    # timing does not belong in a table shared with the control-api comparison script.
+    Case("http://" + ("٠" * 60_000) + "/v1", False, "idna ContextO DoS payload (60k)", "SEC-25"),
+    Case("http://" + ("a" * 300) + "/v1", False, "300-char single label, ordinary ASCII", "SEC-25"),
 )
