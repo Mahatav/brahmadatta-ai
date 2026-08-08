@@ -448,19 +448,90 @@ def test_an_archive_digest_already_claimed_by_another_mission_is_refused(
     assert Snapshot.objects.filter(mission=other).count() == 0
 
 
+def test_a_toctou_race_on_the_artifact_claim_is_refused_not_a_500(
+    client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path, monkeypatch
+):
+    """SEC-27 (round-4 security review). The mission-row lock only ever protects one
+    mission's row, so the read-then-write pair that claims an `Artifact` for a digest
+    is not atomic across *different* missions' transactions — under real concurrent
+    Postgres writers, the review reproduced a losing request getting an unhandled
+    `IntegrityError` (500) instead of the documented `SnapshotArtifactClaimedError`
+    (409).
+
+    Reproduced deterministically here, without needing live threads or a Postgres
+    container: another mission's `Artifact` row for this digest is written directly —
+    simulating a concurrent winner — and `Artifact.objects.filter(...).first()` is
+    patched to return `None` for exactly the query `create_mission_snapshot` makes,
+    simulating the read that ran *before* the winner's row was visible. This is the
+    same window the review found; the only difference is how the interleaving is
+    forced. The unpatched `Artifact.objects.create(...)` then hits the real unique
+    constraint on `sha256` for real, against the real (SQLite) database — the
+    `IntegrityError` this test observes is genuine, not simulated.
+    """
+    _authorize(client, mission)
+    digest = expected_digest(repo_dir, tmp_path)
+
+    other = Mission.objects.create(
+        name="pktcfg-racer",
+        repository_ref="file:///demo/repositories/pktcfg-racer",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    Artifact.objects.create(
+        sha256=digest, kind="snapshot", size_bytes=29, mission=other
+    )
+
+    from authorization import service as service_module
+
+    real_filter = service_module.Artifact.objects.filter
+
+    def _filter_that_misses_the_concurrent_winner(*args, **kwargs):
+        if kwargs.get("pk") == digest:
+            return service_module.Artifact.objects.none()
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service_module.Artifact.objects, "filter", _filter_that_misses_the_concurrent_winner
+    )
+
+    response = post(
+        client,
+        f"/api/v1/missions/{mission.id}/snapshot",
+        {"source": "git", "archive_sha256": digest},
+        OPERATOR,
+    )
+    monkeypatch.undo()  # assertions below must see the real, unpatched query
+
+    assert response.status_code == 409, (
+        f"expected the documented 409, got {response.status_code}: {response.content!r}"
+    )
+    assert response.json()["error"]["code"] == "CONFLICT"
+    assert Snapshot.objects.filter(mission=mission).count() == 0
+    # Exactly one Artifact row for this digest, still owned by the original winner —
+    # the race did not corrupt or duplicate the claim, only (before the fix) the
+    # error surfaced on the loser was wrong.
+    assert Artifact.objects.filter(pk=digest).count() == 1
+    assert Artifact.objects.get(pk=digest).mission_id == other.id
+
+
 def test_repository_ref_with_an_unsupported_scheme_is_refused(client: Client, roots):
+    """SEC-28 (round-4 security review): this refusal fires only *after* authorize
+    has already succeeded, so its code must not claim the authorization is what
+    failed — UNSUPPORTED_REPOSITORY, matching UnreadableArchiveError's sibling case
+    in the same module, not INVALID_AUTHORIZATION."""
     mission = Mission.objects.create(
         name="remote",
         repository_ref="https://example.com/some/repo.git",
         adapter=LanguageAdapter.C_CMAKE_CTEST.value,
         policy={},
     )
-    post(
+    authorize_response = post(
         client,
         f"/api/v1/missions/{mission.id}/authorize",
         authorize_payload(repository_ref="https://example.com/some/repo.git"),
         OPERATOR,
     )
+    assert authorize_response.status_code == 201  # the authorization itself is valid
     response = post(
         client,
         f"/api/v1/missions/{mission.id}/snapshot",
@@ -468,7 +539,7 @@ def test_repository_ref_with_an_unsupported_scheme_is_refused(client: Client, ro
         OPERATOR,
     )
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == "INVALID_AUTHORIZATION"
+    assert response.json()["error"]["code"] == "UNSUPPORTED_REPOSITORY"
 
 
 # === Validation ===================================================================

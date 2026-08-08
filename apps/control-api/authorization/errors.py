@@ -111,12 +111,27 @@ class RepositoryOutOfScopeError(ContractError):
     boundary: authorized repositories and isolated environments only — a mission
     cannot point itself at an arbitrary path on the host and have the control API
     read it.
+
+    SEC-28 (round-4 security review). This is raised from `_resolve_repository_ref`,
+    which only ever runs *after* `authorization.guard.require_active_authorization`
+    has already confirmed an active, unrevoked, unexpired authorization covers this
+    stage — so by the time a caller can hit this error, the authorization is not in
+    question. `ErrorCode.INVALID_AUTHORIZATION` told the operator the opposite of what
+    had just been established. `UNSUPPORTED_REPOSITORY` is what `UnreadableArchiveError`
+    two classes below already uses for the identical class of failure — the source
+    material can't be read, not the authorization — and this now matches it. `403` is
+    kept rather than following that sibling to `422`: this is a scope/permission
+    refusal (the deployment's allowlist does not cover this reference at all) rather
+    than a content-validity one (the archive was read and could not be parsed), and
+    403 is the better fit for "you may not point this endpoint here," independent of
+    the code fix above.
     """
 
-    code = ErrorCode.INVALID_AUTHORIZATION
+    code = ErrorCode.UNSUPPORTED_REPOSITORY
     http_status = 403
     default_message = (
-        "The repository reference does not resolve to an authorized local path."
+        "The repository reference does not resolve to a repository this deployment "
+        "is configured to read."
     )
 
 

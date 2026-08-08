@@ -29,8 +29,18 @@ named beside it. Where a property is *intended* rather than demonstrated, it say
    business logic in the endpoints, and again inside
    `orchestrator.transitions.transition` under the mission row lock.
    — `::test_snapshot_without_an_authorization_is_refused`,
-     `::test_preflight_without_an_authorization_is_refused`,
-     `::test_start_without_an_authorization_is_refused`
+     `::test_snapshot_with_an_expired_authorization_is_refused`,
+     `::test_snapshot_with_a_revoked_authorization_is_refused`
+
+   **Demonstrated at exactly one stage: `INGEST`, via `/snapshot`.** SEC-31 (round-4
+   security review) caught this docstring citing two tests against `preflight`/`start`
+   that do not exist, and cannot yet — `preflight_mission` and `start_mission`
+   (`api/routers/missions.py`) are unconditional `NotImplementedYetError`; nothing in
+   them reaches the authorization gate, the orchestrator, or any business logic at
+   all. The property is *intended* to hold at every stage once each is wired to the
+   orchestrator (#12), and is proven, today, only at the one stage that already is.
+   Add each stage's own citation here as it lands — do not restore a citation for a
+   test that has not been written.
 
 ## The shape of every write in here
 
@@ -42,7 +52,15 @@ refused transition rolls the record back rather than leaving an orphan grant beh
 
 That ordering is deliberate. SEC-15 on PR #110 was not a forged record or a broken
 convention: it was an id accepted from a request and never compared to the thing it was
-supposed to belong to. Every id these endpoints accept — `mission_id`, `repository_ref`,
-`archive_sha256`, `archive_ref` — is checked against the locked mission row, and
-`archive_ref` is never used to locate bytes on disk at all.
+supposed to belong to. `mission_id`, `repository_ref` (the authorization-declaration
+check) and `archive_sha256`/`Artifact.sha256` are each checked against the locked
+mission row or the mission-scoped record it produced — see `service.py`'s own
+docstring for exactly where each check lives. **`archive_ref` is the one exception, not
+an instance of the pattern being closed:** it resolves under the fixed
+`SNAPSHOT_STAGING_ROOT` boundary but is never compared to the requesting mission at
+all — a real, filed gap (SEC-30, round-4 security review), tracked against the future
+upload endpoint rather than fixed here, since nothing populates `SNAPSHOT_STAGING_ROOT`
+outside a test fixture yet. An earlier draft of this docstring claimed `archive_ref` is
+"never used to locate bytes on disk at all" — that was wrong the moment
+`_materialize_source` shipped; it is exactly what locates them for `source="upload"`.
 """

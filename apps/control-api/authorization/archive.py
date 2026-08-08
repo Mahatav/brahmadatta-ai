@@ -5,19 +5,37 @@ Two directions:
 * `enumerate_members` — the archive already exists (an uploaded file, or an already
   materialized export); this reads it well enough to report honest `file_count` and
   `bytes_total`, and refuses one it cannot safely account for. It never extracts a
-  member to disk, so zip-slip / tar path-traversal member names cannot write anywhere
-  — but a member name outside its own archive is still refused outright, because a
-  downstream stage that *does* extract this archive should never have to make that
-  judgement call again with less context than this one has.
+  member to disk itself, so nothing here writes anywhere — but the refusal is the
+  promise this module makes to whatever *does* extract this archive later (the
+  BASELINE stage, not yet built): an archive `enumerate_members` accepts is meant to
+  be extractable the ordinary way without a downstream consumer having to re-derive
+  its own safety checks with less context than this one has.
 * `build_tar_from_directory` — the archive does not exist yet; the mission's own
   repository is a local, allowlisted directory (`source="git"` with no `archive_ref`),
   and this walks it into a deterministic tar. No `git` subprocess, no shell, no network
   — plain file I/O over a path that `authorization.service` has already checked resolves
   inside the allowlisted source root.
+
+## SEC-26 — link-following is a distinct defect from path-traversal, and both are refused
+
+`_is_safe_member_name` defends the *name* a member is written at — the classic zip-slip
+path-traversal shape (`../../etc/passwd`, an absolute path). It says nothing about a
+member's *type*. A tar symlink or hardlink member can carry a fully safe `name` while its
+`linkname` points anywhere the extracting process can reach; `enumerate_members` counting
+such a member as an ordinary file does not make it one, and Python's own
+`tarfile.extractall` does not filter this by default on this project's target interpreter
+(3.12 — PEP 706's `extraction_filter` only defaults to a filtering mode starting in 3.14).
+A snapshot archive has no legitimate reason to contain a symlink or hardlink —
+`build_tar_from_directory`, the only writer this module ships, never produces one — so
+`_enumerate_tar` refuses every symlink and hardlink member outright rather than trying to
+validate where they point. The zip case gets the analogous check for the same reason,
+even though `zipfile.extractall` does not itself materialize symlinks from Unix mode bits
+the way `tarfile.extractall` does — the archive is refused before that distinction matters.
 """
 
 from __future__ import annotations
 
+import stat
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -67,6 +85,17 @@ def _enumerate_tar(path: Path) -> ArchiveInfo:
                         "The snapshot archive contains an unsafe member path.",
                         details={"member": member.name},
                     )
+                # SEC-26: a symlink or hardlink member's `name` can be perfectly safe
+                # while its `linkname` points anywhere the extracting process can
+                # reach. `_is_safe_member_name` above never looks at `linkname`, so
+                # link members are refused by type rather than validated by target —
+                # a repository snapshot has no legitimate reason to contain one, and
+                # `build_tar_from_directory` never produces one.
+                if member.issym() or member.islnk():
+                    raise UnreadableArchiveError(
+                        "The snapshot archive contains a symlink or hardlink member.",
+                        details={"member": member.name, "linkname": member.linkname},
+                    )
                 if member.isfile():
                     file_count += 1
                     bytes_total += member.size
@@ -93,6 +122,16 @@ def _enumerate_zip(path: Path) -> ArchiveInfo:
                 if not _is_safe_member_name(info.filename):
                     raise UnreadableArchiveError(
                         "The snapshot archive contains an unsafe member path.",
+                        details={"member": info.filename},
+                    )
+                # SEC-26, the zip half. `zipfile.extractall` does not itself turn a
+                # POSIX symlink mode bit into a filesystem symlink, but the archive is
+                # refused before that distinction gets to matter — the same "no
+                # legitimate reason for one to exist here" reasoning as the tar case.
+                unix_mode = info.external_attr >> 16
+                if stat.S_ISLNK(unix_mode):
+                    raise UnreadableArchiveError(
+                        "The snapshot archive contains a symlink member.",
                         details={"member": info.filename},
                     )
                 if not info.is_dir():

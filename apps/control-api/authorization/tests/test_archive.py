@@ -71,6 +71,81 @@ def test_a_zip_with_an_absolute_member_path_is_refused(tmp_path: Path):
         enumerate_members(zip_path)
 
 
+def test_a_tar_symlink_with_a_safe_name_but_an_escaping_target_is_refused(tmp_path: Path):
+    """SEC-26: the exact PoC shape from the round-4 security review. A symlink member
+    can carry a fully safe `name` while its `linkname` points anywhere the extracting
+    process can reach — `_is_safe_member_name` only ever looks at `name`, so this has
+    to be caught by member type, not by re-checking the name a second way.
+
+    Injected as the review found it: a symlink member named "innocuous_link" whose
+    target escapes several directories up, plus a regular member that writes through
+    it. `enumerate_members` must refuse the archive outright rather than report it as
+    two ordinary, safely-named files.
+    """
+    tar_path = tmp_path / "evil-symlink.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        link = tarfile.TarInfo("innocuous_link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../../../etc"
+        tar.addfile(link)
+
+        import io
+
+        victim = tarfile.TarInfo("innocuous_link/passwd")
+        victim.size = 14
+        tar.addfile(victim, io.BytesIO(b"attacker bytes"))
+
+    with pytest.raises(UnreadableArchiveError):
+        enumerate_members(tar_path)
+
+
+def test_a_tar_hardlink_member_is_refused(tmp_path: Path):
+    tar_path = tmp_path / "evil-hardlink.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        real = tarfile.TarInfo("real.txt")
+        real.size = 4
+        import io
+
+        tar.addfile(real, io.BytesIO(b"data"))
+
+        link = tarfile.TarInfo("link.txt")
+        link.type = tarfile.LNKTYPE
+        link.linkname = "/etc/shadow"
+        tar.addfile(link)
+
+    with pytest.raises(UnreadableArchiveError):
+        enumerate_members(tar_path)
+
+
+def test_a_zip_symlink_member_is_refused(tmp_path: Path):
+    import stat as stat_module
+
+    zip_path = tmp_path / "evil-symlink.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        info = zipfile.ZipInfo("innocuous_link")
+        info.external_attr = (stat_module.S_IFLNK | 0o777) << 16
+        zf.writestr(info, "../../../../etc/passwd")
+
+    with pytest.raises(UnreadableArchiveError):
+        enumerate_members(zip_path)
+
+
+def test_a_tar_with_a_safe_regular_file_is_still_accepted(tmp_path: Path):
+    """The symlink/hardlink refusal must not become a blanket refusal of every
+    archive — an ordinary file-only tar is still accepted, same as before SEC-26."""
+    tar_path = tmp_path / "fine.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        info = tarfile.TarInfo("ordinary.txt")
+        info.size = 3
+        import io
+
+        tar.addfile(info, io.BytesIO(b"abc"))
+
+    result = enumerate_members(tar_path)
+    assert result.file_count == 1
+    assert result.bytes_total == 3
+
+
 def test_build_tar_from_directory_excludes_git_metadata(tmp_path: Path):
     source = tmp_path / "repo"
     (source / ".git").mkdir(parents=True)

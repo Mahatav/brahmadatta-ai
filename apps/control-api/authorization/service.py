@@ -30,7 +30,7 @@ from datetime import timedelta
 from pathlib import Path, PurePosixPath
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from authorization import archive, store
@@ -172,12 +172,46 @@ def create_mission_snapshot(
         if existing_artifact is not None and existing_artifact.mission_id != mission.id:
             raise SnapshotArtifactClaimedError(details={"sha256": result.sha256})
         if existing_artifact is None:
-            Artifact.objects.create(
-                sha256=result.sha256,
-                kind="snapshot",
-                size_bytes=info.bytes_total,
-                mission=mission,
-            )
+            # SEC-27. The mission-row lock only ever protects *one* mission's row, so
+            # two different missions' transactions never contend for the same lock —
+            # the read above and this write are a check-then-act pair with nothing
+            # spanning both for the cross-mission case specifically. Under real
+            # concurrent writers the loser here does not lose the *property*
+            # (`artifact.sha256` is the primary key, so exactly one Artifact row can
+            # ever exist for a digest regardless of the race) — it loses the
+            # *documented refusal*: without this catch, the loser gets a raw
+            # `IntegrityError` off the unique-violation, which `api.errors` renders as
+            # an unhandled 500 rather than the already-named, already-tested 409 this
+            # exact condition has an exception class for three lines above. Catching
+            # it here turns "correct in outcome, wrong in the telling" into "correct
+            # in both" without changing behavior in the non-racing case at all.
+            #
+            # The `create` runs inside its own nested `atomic()` — a savepoint, not a
+            # new transaction — deliberately: on Postgres, an `IntegrityError` marks
+            # the *enclosing* transaction as unusable for every statement that
+            # follows, even if the exception itself is caught in Python. Without the
+            # savepoint here, catching the error would stop the 500 but the next
+            # statement (the `Snapshot.objects.create` below, still inside the outer
+            # `transaction.atomic()` from `create_mission_snapshot`) would raise
+            # `TransactionManagementError` instead — trading one unhandled exception
+            # for another. The savepoint rolls back only this `create`, leaving the
+            # mission-row lock and everything already written under it intact.
+            try:
+                with transaction.atomic():
+                    Artifact.objects.create(
+                        sha256=result.sha256,
+                        kind="snapshot",
+                        size_bytes=info.bytes_total,
+                        mission=mission,
+                    )
+            except IntegrityError:
+                winner = Artifact.objects.get(pk=result.sha256)
+                if winner.mission_id != mission.id:
+                    raise SnapshotArtifactClaimedError(
+                        details={"sha256": result.sha256}
+                    ) from None
+                # The winner is this same mission's own row — a second, harmless race
+                # against itself (e.g. a retried request). Nothing to refuse.
 
         snapshot_row = Snapshot.objects.create(
             mission=mission,
