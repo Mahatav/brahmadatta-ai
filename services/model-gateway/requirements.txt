@@ -1,0 +1,14 @@
+# Model gateway runtime dependencies.
+# Pinned exactly and resolved on 2026-08-07, for the same reason as the rest of the tree:
+# a floating version means a pull request can go red because a package released overnight.
+
+# Same major/minor as apps/control-api/requirements.txt. The two provenance models are
+# defined separately — the ASGI process must not import this package (C5) — so they must at
+# least be validated by the same pydantic. gateway/tests/test_contract_alignment.py feeds
+# one to the other and fails if they drift.
+pydantic==2.13.4
+
+# The library httpx and requests both use to encode a hostname. The endpoint policy
+# normalises with it *before* deciding, so the host that is validated is the host that
+# would be contacted — SEC-02's first required fix.
+idna==3.10
