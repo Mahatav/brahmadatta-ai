@@ -2400,3 +2400,114 @@ instead of re-discovered from scratch.
 
 **Final approval authority** — CTO (technical); this is process guidance, not a technical
 control, and does not require `cybersecurity` sign-off the way D-053/D-054 do.
+
+---
+
+## D-056 · #113 merges now; SEC-38 and SEC-35 are binding conditions on #28, not on this PR · 2026-08-08 · CTO
+
+**Decision** — `packages/sandbox` merges with SEC-38 (MEDIUM) and SEC-35 (MEDIUM) open,
+tracked as **blocking Definition-of-Done items on #28** rather than as a reason for a third
+fix-and-reverify pass on #113. `cybersecurity`'s round-3 verdict is PASS WITH CONDITIONS, no
+Critical, and the seat that found both explicitly routed the timing call here rather than
+asserting a block — that is the correct use of the veto: it is held for Criticals, not spent
+gating a merge order it has no better information than the CTO to decide.
+
+**What was actually re-verified, read in full before ruling, not summarized from the
+coordinator's message.** `docs/09-company/08-security-review.md` §18, on
+`review/security-sandbox-jail`:
+
+- **SEC-33, the reason D-053 chose this implementation, is closed for its primary vector** —
+  the original `os.setsid()` PoC, rerun with and without a real reaper (`docker run --init`),
+  plus four lifecycle-timing variants (immediate, mid-flight, near-boundary, at-boundary). All
+  held. The fix's own account of a zombie-vs-alive false positive was independently reproduced
+  by polling `/proc/<pid>/stat` for six seconds, not accepted on the strength of the report.
+- **SEC-34, SEC-36 — closed, re-run against the actual CI shell block and the actual test,
+  not re-read.**
+- **SEC-38 (new) — a probabilistic race under rapid, repeated fork-and-detach**, roughly
+  1-in-10 to 1-in-15 iterations, reproducing at the module's real default
+  `kill_grace_seconds=5.0`. Root cause: the final sweep's re-walk is anchored on the jail's own
+  child pid, which is itself already dead by the time of that walk, so a descendant that
+  reparents in the gap between two 0.1s poll iterations can go briefly invisible — one level
+  deeper than the bug SEC-33's fix closed, found by attacking the fix's own retry mechanism
+  rather than the original vector again.
+- **SEC-35 (reopened) — the fix's own test uses `dd`, which does not ignore `SIGXFSZ`; CPython
+  does, by default, confirmed both inside and outside the jail** (`signal.getsignal(SIGXFSZ) ==
+  SIG_IGN` at interpreter start). A real `RLIMIT_FSIZE` stop against a Python-based target
+  produces a plain `OSError`, not the signal, and `limit_hit` falls through to `NONE` — the
+  original bug, for a target class this project's own stack makes plausible rather than exotic.
+
+**Why merge-now-gate-on-#28 is correct, not merely convenient.**
+
+1. **Neither finding is reachable on the path that is waiting to merge.** Confirmed by
+   inspection: nothing on `main` calls `packages.sandbox` today. `#16`/`#17`/`#27`'s repointed
+   `adapters/cpp/pipeline.py` and `workers/baseline/run.py` invoke `Jail.run()` against
+   `cmake`/`ctest` — an authored, non-adversarial build, not a process that forks a detached
+   child every 20ms for the specific pattern SEC-38 needs, and not one that writes past the
+   512 MiB `max_file_bytes` default in ordinary operation, which is what SEC-35's
+   misclassification requires as a precondition. `#28`, the fuzzing worker, is exactly the
+   context where a target's behavior is adversarial by construction and both preconditions
+   become live. Neither issue is exploitable on the merged path; both are exploitable on the
+   path that has not been built yet.
+2. **SEC-35 does not weaken the isolation invariant.** The jail still stops the process at the
+   limit — the property `#81`/D-053 exist to guarantee is intact. What is wrong is the
+   *evidence*: a run correctly stopped is misreported as stopped for no recorded reason. That
+   is an accuracy defect in the gate-matrix-adjacent telemetry, not an escape, and it belongs in
+   the same category D-049's standing rule already treats seriously without treating as a merge
+   blocker — a claim can be wrong without being a security hole.
+3. **Cost of waiting is not free.** `#16`/`#17`/`#27`'s toolchain repoint and `#71`/`#81`'s
+   fixture work are both idle behind this PR while D3 runs. A third fix-and-reverify cycle for
+   two findings that require a precondition nothing on the critical path produces is schedule
+   spent defending against a threat that does not yet exist, at the direct cost of the day it
+   does need to exist by.
+
+**Conditions, and they are binding rather than advisory — the same standard D-046 set for
+`contracts/` and D-052 set for the gateway's package location.**
+
+1. **`#28`'s Definition of Done includes closing SEC-38 and SEC-35, re-verified by
+   `cybersecurity` specifically, not merely fixed and self-reported.** A named regression test
+   for **rapid repeated** detachment (not a single-detachment case — that is what closed SEC-33
+   and is insufficient here by the review's own finding) and one for a **Python-based** target
+   hitting `RLIMIT_FSIZE` (not `dd` — that is what closed the wrong half of SEC-35). `#28`
+   cannot merge without both. This is filed on the issue directly, not left to be rediscovered
+   from a security-review doc a future implementer may not open.
+2. **The module says so at the point of use.** `packages/sandbox/jail.py`'s own docstring
+   already carries a "read this before using it for anything" section with a property→test
+   table (the discipline D-049 named as the standing rule and this module was the first to
+   follow). Two rows are added: SEC-38 and SEC-35, each pointing at the tracking issue, each
+   stating in one line what is not yet true. A caller reads the risk where the code is, not
+   only in a document three links away.
+3. **No caller may invoke this jail against generated or fuzzer-derived input before #28
+   closes both.** This is already true by construction — `#28` is the only thing that would do
+   so and it is the thing gated — but stating it here means a future shortcut ("just point the
+   fuzz worker at the existing jail for now, we'll fix the race later") is a decision that has
+   to be argued against this record, not made quietly.
+
+**On the review process itself, worth naming rather than passing over.** This is the second
+time in this project that a re-verification pass has caught its own first-pass overclaim before
+it reached a decision — the fix report said "all four fixed"; the review's own re-attack found
+two of four only partially true, and said so in its own verdict rather than letting the stronger
+claim stand. That is D-049's standing rule operating exactly as intended, on the reviewer's own
+prior work as readily as on anyone else's. Worth pointing at when the next seat asks whether the
+rule is real.
+
+**Options considered** — (a) third fix pass, re-verify, merge after; (b) merge now, SEC-38/
+SEC-35 tracked informally as follow-up issues with no binding relationship to #28; (c) merge
+now, SEC-38/SEC-35 as hard Definition-of-Done gates on #28 specifically, stated in the module
+and on the issue.
+
+**Pros and cons** — (a) is correct in the abstract and wrong for this schedule: it spends D3
+time defending a precondition that does not exist on the path waiting to merge. (b) is the
+failure mode D-045's "an unruled condition is not a legitimate answer" reasoning was written
+against — a follow-up issue with no merge relationship to the thing that makes it dangerous is
+exactly how a condition survives as a comment and not as a gate. (c) costs two sentences in a
+docstring and one line on an issue, and it is what makes "gate on #28" true rather than stated.
+
+**Cost implications** — none beyond the docstring note and the issue update, both today.
+
+**Security implications** — this is the decision. Both findings are real and neither is
+downgraded in severity by this ruling; what changes is when they must be closed, not whether.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical); `cybersecurity`'s PASS WITH CONDITIONS stands
+and this record is the disposition of those conditions it asked the CTO to make.
