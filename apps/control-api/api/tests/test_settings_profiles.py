@@ -110,3 +110,29 @@ def test_unsupported_database_scheme_is_refused():
 
     with pytest.raises(ImproperlyConfigured):
         database_from_url("mysql://user:pw@localhost/brahmadatta")
+
+
+# --- BUG-010: the SQLite DSN spellings, now that migrations exist -----------------
+
+
+@pytest.mark.parametrize(
+    ("dsn", "expected"),
+    [
+        ("sqlite://", ":memory:"),
+        ("sqlite://:memory:", ":memory:"),
+        ("sqlite:///:memory:", ":memory:"),
+        ("sqlite:///ci.sqlite3", "ci.sqlite3"),
+        ("sqlite:///qa.sqlite3", "qa.sqlite3"),
+        ("sqlite:////tmp/abs.sqlite3", "/tmp/abs.sqlite3"),
+    ],
+)
+def test_sqlite_dsn_spellings(dsn: str, expected: str):
+    """`sqlite:///relative.db` is the standard SQLAlchemy / dj-database-url spelling for
+    a *relative* path, and it is what this repository's own `ci.yml` uses. It used to
+    resolve to `/relative.db` — an absolute path at the filesystem root, unwritable on a
+    CI runner. Harmless while nothing touched the database; a broken CI job the moment
+    migrations landed, which is this change.
+    """
+    from config.env import database_from_url
+
+    assert database_from_url(dsn)["NAME"] == expected

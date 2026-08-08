@@ -61,6 +61,41 @@ def get_list(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _sqlite_name(parsed) -> str:
+    """Resolve a SQLite DSN to a Django `NAME`.
+
+    The spellings, and what each means — this is the standard SQLAlchemy /
+    `dj-database-url` reading, and the repository's own `ci.yml` and `.env.example`
+    both use the relative form:
+
+        sqlite://                    in-memory
+        sqlite://:memory:            in-memory
+        sqlite:///:memory:           in-memory
+        sqlite:///relative.db        relative to the working directory
+        sqlite:////absolute/path.db  absolute
+
+    Previously `sqlite:///ci.sqlite3` produced `NAME=/ci.sqlite3` — an absolute path at
+    the filesystem root, which is unwritable on a CI runner. Nothing noticed because
+    nothing in the suite touched the database (QA, BUG-010). The models in this change
+    are what make it bite, so it is fixed here rather than filed.
+    """
+    netloc = parsed.netloc or ""
+    path = parsed.path or ""
+
+    if netloc in {"", ":memory:"} and path in {"", "/:memory:", ":memory:"}:
+        return ":memory:"
+    if netloc == ":memory:" or path == "/:memory:":
+        return ":memory:"
+
+    if path.startswith("//"):
+        # sqlite:////absolute/path -> path == "//absolute/path"
+        return path[1:]
+    if path.startswith("/"):
+        # sqlite:///relative.db -> path == "/relative.db", meaning "relative.db"
+        return path[1:]
+    return path or ":memory:"
+
+
 def database_from_url(url: str) -> dict[str, object]:
     """Translate a `postgresql://` DSN into a Django DATABASES entry.
 
@@ -75,8 +110,7 @@ def database_from_url(url: str) -> dict[str, object]:
     parsed = urlparse(url)
 
     if parsed.scheme in {"sqlite", "sqlite3"}:
-        name = parsed.path or ":memory:"
-        return {"ENGINE": "django.db.backends.sqlite3", "NAME": name}
+        return {"ENGINE": "django.db.backends.sqlite3", "NAME": _sqlite_name(parsed)}
 
     if parsed.scheme not in {"postgres", "postgresql", "psql"}:
         raise ImproperlyConfigured(

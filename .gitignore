@@ -84,3 +84,6 @@ slow-unit-*
 # Claude local state
 .claude/settings.local.json
 .project/state.local.json
+
+# Astro generated types cache
+apps/command-center/.astro/
