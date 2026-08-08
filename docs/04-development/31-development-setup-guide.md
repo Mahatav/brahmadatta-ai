@@ -149,6 +149,9 @@ docker compose -f infrastructure/compose/docker-compose.yml down -v    # DELETE 
 | Django builds `http://` URLs | `USE_X_FORWARDED_HOST` / `SECURE_PROXY_SSL_HEADER` are not set — section 3 of the ingress contract |
 | A port is already bound | Only 8080 and 8443 are published, on 127.0.0.1 |
 | A container cannot reach the internet | Working as designed (C4). Only nginx has a route off the host. If `npm ci` needs to run, that is the `command-center-deps` service's job |
+| `MODEL_ENDPOINT points at 'small-model' and it is a single label that is not declared` | Working as designed (D-051). Loopback and the private ranges need no declaration; a *name* does. Add it to `MODEL_SERVICE_NAMES` in `.env` — see the model-routing block in `.env.example` |
+| `... carries a private suffix, but nobody owns those namespaces` | Same rule. `.internal`, `.local`, `.svc` and `.test` no longer pass on the suffix alone, because `evil.internal` and `api.openai.com.evil.test` used to. Declare the exact host in `MODEL_SERVICE_NAMES` |
+| `MODEL_GATEWAY_MODE is not set. It has no default` | Deliberate. `live` and `replay` make different claims about where a patch came from, so the gateway does not choose for you (D-049). Set one |
 
 ---
 

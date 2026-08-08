@@ -184,21 +184,47 @@ def test_a_complete_live_record_is_the_only_thing_that_claims_live_inference() -
     assert describe(LIVE) == "model-generated (live inference 2026-08-13)"
 
 
-def test_the_contract_dict_always_states_all_three_replay_fields() -> None:
-    """Mitigation for BUG-007, which is open and not ours to fix.
+def test_the_contract_dict_states_the_mode_and_all_three_replay_fields() -> None:
+    """Belt and braces beside #110's fix, which makes `inference_mode` required.
 
-    `ModelProvenance`'s replay fields default to the *stronger* claim on `main`. A gateway
-    record therefore never omits them — for a live response it states three explicit
-    `None`s rather than relying on a default that points at "live".
+    A gateway record never omits a provenance key, so it does not depend on a contract
+    default in either direction. `OPERATOR_SUPPLIED` is excluded because it gets no
+    `ModelProvenance` at all — see `test_an_operator_supplied_candidate_gets_no_model_record`.
     """
-    for provenance in (LIVE, REPLAYED, OPERATOR):
+    for provenance in (LIVE, REPLAYED):
         contract = provenance.to_contract_dict()
-        for field in ("replayed_from_transcript", "captured_at", "transcript_sha256"):
+        for field in (
+            "inference_mode",
+            "replayed_from_transcript",
+            "captured_at",
+            "transcript_sha256",
+        ):
             assert field in contract, f"{field} omitted for {provenance.source}"
+
+    assert LIVE.to_contract_dict()["inference_mode"] == "LIVE_INFERENCE"
+    assert REPLAYED.to_contract_dict()["inference_mode"] == "REPLAYED_TRANSCRIPT"
 
     assert LIVE.contract_patch_provenance() == "MODEL_GENERATED"
     assert REPLAYED.contract_patch_provenance() == "MODEL_GENERATED"
     assert OPERATOR.contract_patch_provenance() == "OPERATOR_SUPPLIED"
+
+
+def test_an_operator_supplied_candidate_gets_no_model_record() -> None:
+    """`InferenceMode` has two values and neither of them is "a person wrote it"."""
+    with pytest.raises(ValueError, match="no ModelProvenance"):
+        OPERATOR.to_contract_dict()
+
+
+def test_an_unattested_record_refuses_to_write_a_mode_it_cannot_justify() -> None:
+    """What `describe()` refuses to say, `to_contract_dict()` refuses to write.
+
+    Otherwise the bundle and the label can disagree, and the bundle is the one a judge
+    keeps.
+    """
+    incomplete = LIVE.model_copy(update={"served_from": ""})
+    assert claim_for(incomplete) is ProvenanceClaim.NOT_ATTESTED
+    with pytest.raises(ValueError, match="does not attest live inference"):
+        incomplete.to_contract_dict()
 
 
 def test_confidence_travels_but_is_never_a_gate(

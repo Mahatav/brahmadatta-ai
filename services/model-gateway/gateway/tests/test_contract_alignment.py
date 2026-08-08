@@ -89,12 +89,35 @@ LIVE = ResponseProvenance(
 )
 
 
+OPERATOR = ResponseProvenance(
+    source=ResponseSource.OPERATOR_SUPPLIED,
+    generated_at=datetime(2026, 8, 13, tzinfo=UTC),
+)
+
+
+def _payload(provenance: ResponseProvenance, ModelProvenance) -> dict:
+    """The gateway record, adapted to whichever contract version is checked out.
+
+    `inference_mode` is #110's field and is not on `main` yet. The gateway emits it
+    unconditionally because that is the shape the contract is moving to; this strips it
+    when the installed contract predates #110, so the rest of the alignment is still being
+    asserted in the meantime rather than skipped wholesale.
+
+    `test_the_contract_requires_inference_mode` is the one that notices the transition, and
+    it skips loudly until then.
+    """
+    payload = provenance.to_contract_dict()
+    if "inference_mode" not in ModelProvenance.model_fields:
+        payload.pop("inference_mode", None)
+    return payload
+
+
 @pytest.mark.parametrize("provenance", [LIVE, REPLAYED], ids=["live", "replayed"])
 def test_the_gateway_record_validates_against_the_real_contract(
     provenance: ResponseProvenance,
 ) -> None:
     ModelProvenance = _model_provenance()
-    contract = ModelProvenance.model_validate(provenance.to_contract_dict())
+    contract = ModelProvenance.model_validate(_payload(provenance, ModelProvenance))
 
     assert contract.replayed_from_transcript == provenance.replayed_from_transcript
     assert contract.transcript_sha256 == provenance.transcript_sha256
@@ -115,23 +138,74 @@ def test_the_contract_rejects_a_half_declared_replay() -> None:
     a live one, and both sides refuse it.
     """
     ModelProvenance = _model_provenance()
-    half = REPLAYED.to_contract_dict() | {"captured_at": None}
+    half = _payload(REPLAYED, ModelProvenance) | {"captured_at": None}
     with pytest.raises(Exception):  # noqa: B017 - pydantic ValidationError
         ModelProvenance.model_validate(half)
 
 
 def test_a_gateway_record_never_relies_on_the_contract_default() -> None:
-    """BUG-007 mitigation, asserted against the real contract.
+    """Belt and braces beside #110's real fix.
 
-    `ModelProvenance`'s replay fields default to the *stronger* claim (D-049 Part 1, open
-    on #6). A gateway record states all three explicitly, so what the contract defaults to
-    cannot change what a gateway-produced record says. This does not fix BUG-007 for
-    records built anywhere else, and it is not claimed to.
+    BUG-007 is fixed in #110 by making `inference_mode` required with no default, which is
+    the right fix and better than what this method does alone. The gateway still states
+    every replay key explicitly on every record, so what the contract defaults to cannot
+    change what a gateway-produced record says. The CTO asked for both; this is the
+    assertion for the gateway half.
     """
     ModelProvenance = _model_provenance()
-    payload = LIVE.to_contract_dict()
+    payload = _payload(LIVE, ModelProvenance)
     assert set(payload) >= {"replayed_from_transcript", "captured_at", "transcript_sha256"}
 
     contract = ModelProvenance.model_validate(payload)
     assert contract.is_replayed is False
     assert contract.replayed_from_transcript is None
+
+
+def test_the_contract_requires_inference_mode() -> None:
+    """#110 makes the claim explicit rather than inherited. Skips loudly until it lands.
+
+    When this stops skipping, `inference_mode` is real and the gateway's value for it is
+    being checked against the contract's own enum.
+    """
+    ModelProvenance = _model_provenance()
+    if "inference_mode" not in ModelProvenance.model_fields:
+        pytest.skip(
+            "contracts.ModelProvenance has no inference_mode yet — #110 is not merged. "
+            "The gateway already emits it; this assertion activates on merge."
+        )
+
+    field = ModelProvenance.model_fields["inference_mode"]
+    assert field.is_required(), (
+        "inference_mode acquired a default. D-049 Part 1: a default is a claim the system "
+        "makes on your behalf when you say nothing, and there is no safe default here."
+    )
+
+    assert (
+        ModelProvenance.model_validate(LIVE.to_contract_dict()).inference_mode == "LIVE_INFERENCE"
+    )
+    assert (
+        ModelProvenance.model_validate(REPLAYED.to_contract_dict()).inference_mode
+        == "REPLAYED_TRANSCRIPT"
+    )
+
+
+def test_an_operator_supplied_candidate_gets_no_model_provenance() -> None:
+    """`InferenceMode` has two values and neither of them is "a person wrote it".
+
+    The contract's field for that case is `PatchProvenance.OPERATOR_SUPPLIED`. Emitting a
+    `ModelProvenance` of blanks instead would read as a model that produced nothing.
+    """
+    with pytest.raises(ValueError, match="no ModelProvenance"):
+        OPERATOR.to_contract_dict()
+    assert OPERATOR.contract_patch_provenance() == "OPERATOR_SUPPLIED"
+
+
+def test_a_record_that_cannot_attest_live_inference_refuses_to_become_one() -> None:
+    """The bundle and the label must not be able to disagree.
+
+    A record that `describe()` renders as "provenance not attested" has no honest
+    `inference_mode`, so it raises rather than quietly writing `LIVE_INFERENCE`.
+    """
+    incomplete = LIVE.model_copy(update={"generated_at": None})
+    with pytest.raises(ValueError, match="does not attest live inference"):
+        incomplete.to_contract_dict()

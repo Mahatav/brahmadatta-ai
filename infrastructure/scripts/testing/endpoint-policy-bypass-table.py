@@ -24,13 +24,33 @@ the script and the test cannot disagree about what "correct" means.
     python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py --only gateway
 
 Exit codes:
-    0  the gateway policy matches the table on every case
-    1  the gateway policy has at least one mismatch
+    0  both columns are where they are declared to be
+    1  either column moved
     2  the table itself could not be loaded
 
-The control-API column never affects the exit code. Making this script red for a defect
-that is tracked on another issue and owned by another seat would make it useless as a gate
-on this one.
+## Both columns gate — CTO condition 2 on #111
+
+The gateway column gates at **zero**: it is the function that opens the socket.
+
+The control-API column gates at **exactly `CONTROL_BASELINE`**, a recorded number rather
+than zero, and it fails in *both* directions.
+
+That reading is deliberate and it is worth stating, because "gates" could also mean "must
+be zero today". It cannot mean that here: `contracts/model_policy.py` has 34 known
+mismatches tracked on #93 and owned by another seat, so a hard zero would make this PR —
+and every unrelated PR — unmergeable for a defect none of them introduced. What the CTO's
+objection was actually about is that the number could not fail, and now it can:
+
+  - **A regression fails.** Re-opening a bypass in the control API's validator breaks the
+    build. That file is wired to a Django system check that stops startup, so a regression
+    there means an endpoint boots clean that this gateway would refuse mid-mission — the
+    inverted-gate problem D-050 was raised about.
+  - **An improvement also fails**, until the baseline is lowered in the same commit. That
+    keeps the number in this file true rather than stale, and makes every step of #93
+    visible as a diff.
+
+When the consolidation lands there is one implementation, the baseline is 0, and this is a
+plain gate with nothing to explain.
 """
 
 from __future__ import annotations
@@ -38,6 +58,11 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+#: Mismatches `contracts/model_policy.py` is known to have, measured 2026-08-08 against
+#: `main` at 66c3057. Lower it in the same commit that fixes cases; the script fails if it
+#: is stale in either direction. Goes to 0 when D-050's consolidation lands.
+CONTROL_BASELINE = 34
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GATEWAY = REPO_ROOT / "services" / "model-gateway"
@@ -107,6 +132,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--only", choices=["gateway", "control"], default=None)
     parser.add_argument("--quiet", action="store_true", help="print mismatches only")
+    parser.add_argument(
+        "--control-baseline",
+        type=int,
+        default=CONTROL_BASELINE,
+        help="exact number of mismatches contracts/model_policy.py is expected to have. "
+        "Anything else fails, in either direction.",
+    )
     args = parser.parse_args(argv)
 
     cases, declared = _load_table()
@@ -153,15 +185,42 @@ def main(argv: list[str] | None = None) -> int:
     if gateway is not None:
         print(f"GATEWAY  mismatches: {gateway_mismatches} of {len(cases)}")
     if control is not None:
-        print(f"CONTROL  mismatches: {control_mismatches} of {len(cases)}")
         print(
-            "\nThe control-api column is contracts/model_policy.py, which this branch does\n"
-            "not modify — C5 forbids the ASGI process importing the gateway, and that file\n"
-            "belongs to the control-api seat. Its mismatches are tracked on issue #93 and\n"
-            "do not affect this script's exit code."
+            f"CONTROL  mismatches: {control_mismatches} of {len(cases)}  "
+            f"(gated at exactly {args.control_baseline})"
         )
 
-    return 0 if gateway_mismatches == 0 else 1
+    failed = False
+
+    if gateway is not None and gateway_mismatches != 0:
+        print(
+            f"\nFAIL: the gateway policy has {gateway_mismatches} mismatch(es). It is the "
+            "function that opens the socket; it gates at zero.",
+            file=sys.stderr,
+        )
+        failed = True
+
+    if control is not None and control_mismatches != args.control_baseline:
+        direction = "REGRESSED" if control_mismatches > args.control_baseline else "improved"
+        print(
+            f"\nFAIL: contracts/model_policy.py has {control_mismatches} mismatches, "
+            f"expected exactly {args.control_baseline} — it {direction}.\n"
+            + (
+                "Something re-opened a bypass in the control API's validator. That file is\n"
+                "wired to a Django system check that stops startup, so a regression there\n"
+                "means an endpoint boots clean that this gateway would refuse mid-mission."
+                if control_mismatches > args.control_baseline
+                else "That is good news and it still fails, on purpose. Lower\n"
+                f"CONTROL_BASELINE in this script to {control_mismatches} in the same commit\n"
+                "that fixed the cases, so the number in the file stays true. When the\n"
+                "consolidation lands (D-050) there is one implementation, the baseline is 0,\n"
+                "and this becomes a plain gate."
+            ),
+            file=sys.stderr,
+        )
+        failed = True
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

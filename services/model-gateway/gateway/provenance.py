@@ -169,18 +169,41 @@ class ResponseProvenance(BaseModel):
     def to_contract_dict(self) -> dict[str, object]:
         """The subset the control API's `ModelProvenance` accepts.
 
-        Every replay key is present in the returned mapping, explicitly, including when it
-        is `None`. That is deliberate and it is a mitigation, not a style choice: the
-        contract's replay fields default to the *stronger* claim (BUG-007, D-049 Part 1,
-        still open on #6), so a gateway that omitted a key would be relying on a default
-        that points at "live". Emitting all three every time means a gateway-produced
-        record never depends on that default in either direction.
+        `inference_mode` is stated explicitly. #110 makes it **required with no default**,
+        which is the real fix for BUG-007 and is better than what this method was doing on
+        its own — the claim now has to be made rather than inherited.
+
+        Every replay key is also present, explicitly, including when it is `None`. That
+        stays: it costs nothing, and it means a gateway-produced record does not depend on
+        any contract default in either direction. Belt and braces, per the CTO's note on
+        this PR.
+
+        Raises for an operator-supplied candidate. A `ModelProvenance` describing a diff a
+        person wrote is a category error, not a record with some blank fields — the
+        contract's own field for that case is `PatchProvenance.OPERATOR_SUPPLIED`, which
+        `contract_patch_provenance()` returns.
 
         `confidence` is carried because the contract carries it, and for the same reason:
         recorded so the evidence bundle shows what the model claimed alongside what the
         tools proved.
         """
+        if self.source is ResponseSource.OPERATOR_SUPPLIED:
+            raise ValueError(
+                "an operator-supplied candidate has no ModelProvenance — no model ran. "
+                "Set PatchProvenance.OPERATOR_SUPPLIED (contract_patch_provenance()) and "
+                "omit the model record entirely; a ModelProvenance full of blanks reads "
+                "as a model that produced nothing, which is not what happened."
+            )
+        if claim_for(self) is ProvenanceClaim.NOT_ATTESTED:
+            raise ValueError(
+                "this record does not attest live inference and is not a replay, and "
+                "InferenceMode has no third value. Writing LIVE_INFERENCE here would make "
+                "the bundle claim what the label refuses to claim — the two must not be "
+                "able to disagree. Complete the record (served_from, model_name, "
+                "generated_at) or do not write one."
+            )
         return {
+            "inference_mode": ("REPLAYED_TRANSCRIPT" if self.is_replayed else "LIVE_INFERENCE"),
             "model_name": self.model_name,
             "model_revision": self.model_revision,
             "served_from": self.served_from,
