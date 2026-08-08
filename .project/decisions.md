@@ -2215,3 +2215,299 @@ to cover `services/` in the meantime as a one-line stopgap — **that widening i
 and lands with #111**, because it is the part that is actually load-bearing.
 
 **Final approval authority** — CTO (technical).
+
+---
+
+## D-053 · One subprocess jail, in `packages/sandbox/`, built from #113's implementation · 2026-08-08 · CTO
+
+**Decision** — `services/sandbox/jail.py` (PR #113) is the canonical implementation. It moves
+to `packages/sandbox/` rather than staying in `services/`. `adapters/cpp/jail.py` (PR #120) is
+retired; `adapters/cpp/pipeline.py` and `workers/baseline/run.py` import the consolidated
+module instead. `#120`'s D3 critical-path work — #16/#17/#27, everything except its own
+`jail.py` and `tests/test_jail.py` — is **not blocked** and merges on its own schedule.
+
+**Read by direct comparison, not a bypass table.** This is not last night's `model_policy` /
+`endpoint_policy` split — there is no 60-case adversarial table to run, because a resource
+jail is not an allowlist and "wrong" here mostly means "untested" rather than "bypassed". So
+the ruling rests on reading both, and the difference is not close:
+
+| | #113 (`services/sandbox/`) | #120 (`adapters/cpp/`) |
+|---|---:|---:|
+| `jail.py` | 548 lines | 351 lines |
+| `test_jail.py` | 370 lines, 23 tests | 123 lines, 10 tests |
+| Error taxonomy | `LimitKind` enum; distinct `CpuExceededError` / `MemoryExceededError` / `WallClockExceededError` / `CancelledError`, each independently raisable and testable | one `JailEscape`, the rest generic `AdapterError` subclasses for build/toolchain concerns unrelated to the jail |
+| Escape coverage | path outside jail, symlink escape, cwd outside jail — each its own test | cwd outside jail, symlink escape — parity on the two that matter most |
+| Cleanup / cancellation | tested on success, on failure, on cancel, cancel-from-another-thread, and refusal to accept further commands after cancel or close | not covered |
+| Orphan handling | `test_timeout_kills_grandchildren_leaving_no_orphans` — the property the module's own header calls out as the reason for `os.setsid()` | forked-child killed, not specifically tested for grandchildren |
+| Documented property→test table | yes, in the module docstring, matching D-049's standing rule verbatim: *"every property below is claimed only where a named test demonstrates it"* | described in prose, not tabulated against tests |
+| `contracts` coupling | none — `ISOLATION_MODE` is a **mirrored string constant** with a comment explaining why, matching D-050's condition exactly | none — same discipline, correctly anticipates D-026 in a comment |
+
+Both are careful, both are Django-free, both correctly treat this as the #81 fallback and not
+the #15 container path. #113 is simply the more complete implementation of the same design,
+and it is also the one actually filed against #81's scope. There is no case here for keeping
+#120's as the base and porting properties into it; it is the smaller document.
+
+**On location — this is not a repeat of D-052.** D-052 moved the model gateway *into*
+`apps/control-api/` because the gateway is the module that must live inside the
+single-inference-client enforcement boundary (C5) — a security argument tied to one specific
+process. The jail has no such tie. Its consumers are `adapters/cpp/` and, next,
+`workers/fuzzing/` (#28) — both worker-side, neither inside the Django project, and forcing
+them to import out of `apps/control-api/` would be backwards: primitive OS-level isolation
+should not depend on a specific web application's package layout.
+
+`packages/` is the existing answer to exactly this shape of problem — `packages/schemas/` is
+already the shared dependency root for `apps/command-center/`, and this very PR (#113) already
+puts Python utilities in `packages/test-fixtures/` without a Django dependency. The original
+`docs/04-development/35-project-folder-structure.md` even reserved a `packages/policy/` slot
+for a cross-cutting concern of this shape — not renamed, because "policy" already denotes two
+other things in this codebase (`contracts/model_policy.py`'s successor and patch policy), and
+reusing established vocabulary (`services/sandbox/`, `SANDBOX_POLICY`, #81, #15) costs nothing
+and avoids a collision. `packages/sandbox/` is also the right home for #15's container path
+when it lands, per #113's own README, which already frames the split as one component with two
+implementations behind `IsolationMode`.
+
+**Options considered** — (a) keep both, #120 wins because it merges first; (b) keep both,
+#113 wins because it is more complete, #120's jail.py deleted in place at `adapters/cpp/`;
+(c) consolidate into `packages/sandbox/`, built from #113.
+
+**Pros and cons** — (a) throws away the better-tested implementation for the accident of merge
+order. (b) fixes the completeness problem and leaves the location problem: `services/sandbox/`
+is a name this project has already twice discovered means "an ASGI-adjacent Django-project
+module" (`services/model-gateway/` → `apps/control-api/gateway/`, D-026), and a bare resource
+jail imported by two worker-side packages does not belong inside `services/` any more than
+inside `apps/`. (c) fixes both at once and costs a directory move.
+
+**Cost implications** — a directory move, an import-path update in two files
+(`adapters/cpp/pipeline.py`, `workers/baseline/run.py`), and one CI path update. Hours.
+
+**Security implications** — neutral to positive. Consolidating onto the more thoroughly tested
+implementation, with its orphan-process and cancellation guarantees, is a strict improvement
+for the same reason D-050 was: a weaker implementation sitting anywhere reachable is a weaker
+implementation someone will eventually reach.
+
+**Scalability implications** — none.
+
+**Sequencing, so #120's critical-path work is not held hostage.** `packages/sandbox/` is a
+move plus one field addition (D-054) on top of already-merged-quality code — it is the smaller
+and faster-moving piece. It merges first. `#120` then drops `adapters/cpp/jail.py` and
+`adapters/cpp/tests/test_jail.py` and repoints its two call sites before merging. If that
+reordering costs more than a few hours because of D3 schedule pressure, `#120` may merge with
+its own `jail.py` as a **declared interim measure**, with a same-day follow-up issue to delete
+it and repoint the imports — the same standard D-052 set for its own packaging divergence, not
+a looser one for someone else's.
+
+**One integration detail flagged, not resolved here.** The two implementations use different
+vocabularies at the API surface — `JailPolicy` vs `JailLimits`, a `LimitKind` enum vs plain
+result fields. Reconciling `adapters/cpp/pipeline.py`'s and `workers/baseline/run.py`'s call
+sites to the surviving shape is real work, not a rename, and it is `security-research-engineer`'s
+and `compiler-toolchain-engineer`'s to do together — the public API of the surviving module is
+not something I am dictating past what D-054 requires of it.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-054 · `limits_applied` is adopted, and it is computed by trying, not by naming the platform · 2026-08-08 · CTO
+
+**Decision** — #120's design — a queryable field on the result reporting which resource
+limits actually took effect, rather than a hard `skipif` in the test suite — is adopted and
+folded into the surviving implementation from D-053. Its **computation method is not**
+adopted as written and is replaced with #113's already-existing attempt-and-catch pattern,
+made visible per run instead of only through a separate diagnostic call.
+
+**Why the field is worth keeping — the coordinator's instinct is correct.** #113's own author
+independently found the same fact #120 documents — `RLIMIT_AS` does not reliably apply on
+Darwin — and encoded it as `pytest.mark.skipif(IS_DARWIN, ...)` with a comment asking a future
+reader to remove the skip if Darwin ever starts honouring the limit. That is honest about the
+test, and it is invisible in the one place a judge or an operator would actually look: the
+evidence bundle from an actual run. A skip in a test file answers "does this repository know
+about the platform gap"; a field on the result answers "did *this run* have the protection it
+claims to have" — and only the second question is the one D-049's standing rule cares about.
+
+**Why the computation is wrong as submitted.** `_limit_names()` in #120 derives its answer
+from `sys.platform != "darwin"` — a static fact about the machine, checked before any
+`setrlimit` call is attempted. That is the same category of error #113's own module docstring
+calls out about `setrlimit`'s return value: *"setrlimit succeeding proves nothing."* The
+platform-name check is one level worse — it does not even call `setrlimit` and check the
+outcome, it assumes the outcome from the platform string. Two concrete cases it gets wrong:
+
+- **A locked-down Linux CI runner** (a container with a parent cgroup or an already-lowered
+  hard limit) can refuse `RLIMIT_AS` or `RLIMIT_NPROC` for reasons that have nothing to do with
+  Darwin. `_limit_names()` reports these as applied because the platform is not `"darwin"`.
+  That is a false claim of protection, which is the direction this project has spent the last
+  two rulings closing off, not opening.
+- Conversely, if a future macOS release does start honouring `RLIMIT_AS` — #113's own skip
+  comment anticipates exactly this — `_limit_names()` would keep reporting it as *not* applied
+  on Darwin, understating a protection that is actually there. Less dangerous than the first
+  case, but it is the same root cause: a name is not a measurement.
+
+**The fix, and it is small.** #113's `_run_command` already attempts `RLIMIT_AS` and
+`RLIMIT_NPROC` per limit inside a `try`/`except (ValueError, OSError): pass` in the child, with
+a comment pointing the caller at the separate `probe_limits()` function for exactly this
+question. Change the child to record which of those attempts succeeded — a bitmask or a small
+tuple written to the pipe already carrying the exit status back to the parent — and populate
+`JailResult.limits_applied` from it, rather than from a platform check. `probe_limits()` stays
+as the pre-flight, ahead-of-any-mission diagnostic; `limits_applied` becomes the per-run,
+after-the-fact record. They answer different questions and both are worth having.
+
+**Options considered** — (a) adopt #120's field and its platform-name computation as written;
+(b) keep #113's design, add `limits_applied` computed from the real attempt outcome;
+(c) drop the field, keep only `probe_limits()`.
+
+**Pros and cons** — (a) ships a field whose name promises more than a platform check can
+deliver, and the CI runner case above is not hypothetical — several of this project's own
+runners are containerized. (c) loses exactly the property the coordinator is right to want
+kept: a reader of one run's evidence, not the test suite, learning what protected that run.
+(b) costs recording one already-computed fact instead of discarding it.
+
+**Cost implications** — under an hour: the try/except already exists, only the outcome needs
+to survive the child-to-parent boundary it already crosses for the exit code.
+
+**Security implications** — this is the same principle as D-049's standing rule applied to a
+resource limit instead of a provenance claim: a property is reported as held only when it was
+actually observed to hold, not inferred from a fact adjacent to it.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical).
+
+---
+
+## D-055 · The rule that produced yesterday's `model_policy` consolidation now has a name, and it applies going forward · 2026-08-08 · CTO
+
+Recorded because this is the second time in one day the same shape has appeared, and the
+second occurrence is what makes it a pattern rather than an incident.
+
+**The shape:** two seats, working from the same issue or the same invariant, in parallel
+branches neither can see, produce two implementations of one boundary-enforcing rule. Both are
+careful. Neither is wrong in isolation. The danger is not either implementation — it is that
+the system as merged would enforce **whichever one is imported from the call site that happens
+to run first**, which is not a decision anyone made.
+
+**Standing instruction, effective now, for every seat:** before implementing a boundary-shaped
+concern that D-026 or D-028 already named as cross-cutting — egress policy, isolation,
+authorization, verification gating, provenance labelling — check `.project/decisions.md` and
+the open PR list for an existing or in-flight implementation before writing a second one.
+Where two exist anyway despite that check, as here, **flag the duplication in the PR body
+rather than silently choosing a side**, exactly as both seats did today. That habit is what
+turned two potential silent regressions into two cheap rulings instead of two retrofit costs
+discovered on D6.
+
+**Not a new process, a naming of the existing one.** D-050 through D-052 already did this for
+`model_policy`. This record exists so the *next* occurrence — and there will be one, this is
+the third boundary-shaped module in as many days — gets checked against a named precedent
+instead of re-discovered from scratch.
+
+**Final approval authority** — CTO (technical); this is process guidance, not a technical
+control, and does not require `cybersecurity` sign-off the way D-053/D-054 do.
+
+---
+
+## D-056 · #113 merges now; SEC-38 and SEC-35 are binding conditions on #28, not on this PR · 2026-08-08 · CTO
+
+**Decision** — `packages/sandbox` merges with SEC-38 (MEDIUM) and SEC-35 (MEDIUM) open,
+tracked as **blocking Definition-of-Done items on #28** rather than as a reason for a third
+fix-and-reverify pass on #113. `cybersecurity`'s round-3 verdict is PASS WITH CONDITIONS, no
+Critical, and the seat that found both explicitly routed the timing call here rather than
+asserting a block — that is the correct use of the veto: it is held for Criticals, not spent
+gating a merge order it has no better information than the CTO to decide.
+
+**What was actually re-verified, read in full before ruling, not summarized from the
+coordinator's message.** `docs/09-company/08-security-review.md` §18, on
+`review/security-sandbox-jail`:
+
+- **SEC-33, the reason D-053 chose this implementation, is closed for its primary vector** —
+  the original `os.setsid()` PoC, rerun with and without a real reaper (`docker run --init`),
+  plus four lifecycle-timing variants (immediate, mid-flight, near-boundary, at-boundary). All
+  held. The fix's own account of a zombie-vs-alive false positive was independently reproduced
+  by polling `/proc/<pid>/stat` for six seconds, not accepted on the strength of the report.
+- **SEC-34, SEC-36 — closed, re-run against the actual CI shell block and the actual test,
+  not re-read.**
+- **SEC-38 (new) — a probabilistic race under rapid, repeated fork-and-detach**, roughly
+  1-in-10 to 1-in-15 iterations, reproducing at the module's real default
+  `kill_grace_seconds=5.0`. Root cause: the final sweep's re-walk is anchored on the jail's own
+  child pid, which is itself already dead by the time of that walk, so a descendant that
+  reparents in the gap between two 0.1s poll iterations can go briefly invisible — one level
+  deeper than the bug SEC-33's fix closed, found by attacking the fix's own retry mechanism
+  rather than the original vector again.
+- **SEC-35 (reopened) — the fix's own test uses `dd`, which does not ignore `SIGXFSZ`; CPython
+  does, by default, confirmed both inside and outside the jail** (`signal.getsignal(SIGXFSZ) ==
+  SIG_IGN` at interpreter start). A real `RLIMIT_FSIZE` stop against a Python-based target
+  produces a plain `OSError`, not the signal, and `limit_hit` falls through to `NONE` — the
+  original bug, for a target class this project's own stack makes plausible rather than exotic.
+
+**Why merge-now-gate-on-#28 is correct, not merely convenient.**
+
+1. **Neither finding is reachable on the path that is waiting to merge.** Confirmed by
+   inspection: nothing on `main` calls `packages.sandbox` today. `#16`/`#17`/`#27`'s repointed
+   `adapters/cpp/pipeline.py` and `workers/baseline/run.py` invoke `Jail.run()` against
+   `cmake`/`ctest` — an authored, non-adversarial build, not a process that forks a detached
+   child every 20ms for the specific pattern SEC-38 needs, and not one that writes past the
+   512 MiB `max_file_bytes` default in ordinary operation, which is what SEC-35's
+   misclassification requires as a precondition. `#28`, the fuzzing worker, is exactly the
+   context where a target's behavior is adversarial by construction and both preconditions
+   become live. Neither issue is exploitable on the merged path; both are exploitable on the
+   path that has not been built yet.
+2. **SEC-35 does not weaken the isolation invariant.** The jail still stops the process at the
+   limit — the property `#81`/D-053 exist to guarantee is intact. What is wrong is the
+   *evidence*: a run correctly stopped is misreported as stopped for no recorded reason. That
+   is an accuracy defect in the gate-matrix-adjacent telemetry, not an escape, and it belongs in
+   the same category D-049's standing rule already treats seriously without treating as a merge
+   blocker — a claim can be wrong without being a security hole.
+3. **Cost of waiting is not free.** `#16`/`#17`/`#27`'s toolchain repoint and `#71`/`#81`'s
+   fixture work are both idle behind this PR while D3 runs. A third fix-and-reverify cycle for
+   two findings that require a precondition nothing on the critical path produces is schedule
+   spent defending against a threat that does not yet exist, at the direct cost of the day it
+   does need to exist by.
+
+**Conditions, and they are binding rather than advisory — the same standard D-046 set for
+`contracts/` and D-052 set for the gateway's package location.**
+
+1. **`#28`'s Definition of Done includes closing SEC-38 and SEC-35, re-verified by
+   `cybersecurity` specifically, not merely fixed and self-reported.** A named regression test
+   for **rapid repeated** detachment (not a single-detachment case — that is what closed SEC-33
+   and is insufficient here by the review's own finding) and one for a **Python-based** target
+   hitting `RLIMIT_FSIZE` (not `dd` — that is what closed the wrong half of SEC-35). `#28`
+   cannot merge without both. This is filed on the issue directly, not left to be rediscovered
+   from a security-review doc a future implementer may not open.
+2. **The module says so at the point of use.** `packages/sandbox/jail.py`'s own docstring
+   already carries a "read this before using it for anything" section with a property→test
+   table (the discipline D-049 named as the standing rule and this module was the first to
+   follow). Two rows are added: SEC-38 and SEC-35, each pointing at the tracking issue, each
+   stating in one line what is not yet true. A caller reads the risk where the code is, not
+   only in a document three links away.
+3. **No caller may invoke this jail against generated or fuzzer-derived input before #28
+   closes both.** This is already true by construction — `#28` is the only thing that would do
+   so and it is the thing gated — but stating it here means a future shortcut ("just point the
+   fuzz worker at the existing jail for now, we'll fix the race later") is a decision that has
+   to be argued against this record, not made quietly.
+
+**On the review process itself, worth naming rather than passing over.** This is the second
+time in this project that a re-verification pass has caught its own first-pass overclaim before
+it reached a decision — the fix report said "all four fixed"; the review's own re-attack found
+two of four only partially true, and said so in its own verdict rather than letting the stronger
+claim stand. That is D-049's standing rule operating exactly as intended, on the reviewer's own
+prior work as readily as on anyone else's. Worth pointing at when the next seat asks whether the
+rule is real.
+
+**Options considered** — (a) third fix pass, re-verify, merge after; (b) merge now, SEC-38/
+SEC-35 tracked informally as follow-up issues with no binding relationship to #28; (c) merge
+now, SEC-38/SEC-35 as hard Definition-of-Done gates on #28 specifically, stated in the module
+and on the issue.
+
+**Pros and cons** — (a) is correct in the abstract and wrong for this schedule: it spends D3
+time defending a precondition that does not exist on the path waiting to merge. (b) is the
+failure mode D-045's "an unruled condition is not a legitimate answer" reasoning was written
+against — a follow-up issue with no merge relationship to the thing that makes it dangerous is
+exactly how a condition survives as a comment and not as a gate. (c) costs two sentences in a
+docstring and one line on an issue, and it is what makes "gate on #28" true rather than stated.
+
+**Cost implications** — none beyond the docstring note and the issue update, both today.
+
+**Security implications** — this is the decision. Both findings are real and neither is
+downgraded in severity by this ruling; what changes is when they must be closed, not whether.
+
+**Scalability implications** — none.
+
+**Final approval authority** — CTO (technical); `cybersecurity`'s PASS WITH CONDITIONS stands
+and this record is the disposition of those conditions it asked the CTO to make.

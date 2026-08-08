@@ -54,9 +54,24 @@ ignore = [
 "infrastructure/scripts/**" = ["T20"]
 # Django's generated entrypoint.
 "**/manage.py" = ["T20"]
+# Django model `Meta` classes declare `ordering`, `indexes` and `constraints` as class
+# attributes holding lists. RUF012 wants ClassVar on every one of them; Django's own
+# metaclass consumes them and `ClassVar` on a Meta attribute is not idiomatic Django.
+# Scoped to models.py so RUF012 keeps working everywhere it is a real finding.
+"**/models.py" = ["RUF012"]
 
 [lint.isort]
-known-first-party = ["api", "config", "contracts", "packages", "services", "workers"]
+known-first-party = [
+    "api",
+    "authorization",
+    "config",
+    "contracts",
+    "missions",
+    "orchestrator",
+    "packages",
+    "services",
+    "workers",
+]
 
 [format]
 quote-style = "double"

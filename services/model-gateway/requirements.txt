@@ -1,0 +1,27 @@
+# Model gateway runtime dependencies.
+# Pinned exactly and resolved on 2026-08-07, for the same reason as the rest of the tree:
+# a floating version means a pull request can go red because a package released overnight.
+
+# Same major/minor as apps/control-api/requirements.txt. The two provenance models are
+# defined separately — the ASGI process must not import this package (C5) — so they must at
+# least be validated by the same pydantic. gateway/tests/test_contract_alignment.py feeds
+# one to the other and fails if they drift.
+pydantic==2.13.4
+
+# The library httpx and requests both use to encode a hostname. The endpoint policy
+# normalises with it *before* deciding, so the host that is validated is the host that
+# would be contacted — SEC-02's first required fix.
+#
+# SEC-25: idna==3.10 (the version pinned here until 2026-08-08) has a quadratic-complexity
+# DoS — CVE-2026-45409 / PYSEC-2026-215 / GHSA-65pc-fj4g-8rjx — in the ContextO check used
+# for scripts like Arabic-Indic digits, called once per codepoint and scanning the label
+# each time. Reproduced through this exact call site at 99.8s-122.5s for a ~60,000-char
+# single-label host. Fixed in idna>=3.15; pinned to the latest available (3.18) rather than
+# the floor, since nothing here depends on 3.10's specific behaviour. `pip-audit` is not
+# yet in CI (DR-SEC-R3-2) — this pin was the gap it would have caught.
+#
+# The length guard in endpoint_policy.py (_oversized_hostname_reason, RFC 1035's 253/63
+# limits, checked before idna ever sees the string) is the second, independent half of the
+# fix and is not removed now that the library is patched: it holds even against a future
+# regression in idna itself.
+idna==3.18

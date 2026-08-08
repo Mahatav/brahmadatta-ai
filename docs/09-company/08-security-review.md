@@ -28,6 +28,8 @@ says so in §7 rather than being left out.
 | **Isolation substitution** — `--network none` + non-root instead of rootless Podman | **ACCEPTED, with eight binding conditions.** §6. |
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
+| **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-31 fixed at `b01755b` and independently re-verified in **§18** — including the Postgres-specific savepoint claim, reproduced both with and without the fix. SEC-29, SEC-30 remain open, correctly gated on #12/the upload endpoint. No Critical, no open condition on this PR. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -2415,3 +2417,1846 @@ unfalsifiable control is the kind people build on.
 
 **Final approval authority** — CTO for the parsing approach; cybersecurity for the severity and for
 the fail-closed requirement.
+
+---
+
+## 14. Round 3 — 2026-08-08 · PR #111 `feat/model-gateway` · the endpoint policy and replay mode
+
+This is the PR carrying my veto: it is the fix for **#78 / SEC-02**, the ten bypasses I rated in
+§2 and re-confirmed open in §12.2. Reviewed at `3cb12a5` in an isolated worktree.
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Two new findings (SEC-24, SEC-25) are merge
+conditions; both are small. **The gateway's egress function is correct and I reproduced that
+myself.** SEC-19 is **not** closed here and is re-targeted rather than waived — §14.4.
+
+### 14.1 The bypass table, re-run by me rather than read
+
+I said I do not sign off on someone else's script. I ran it:
+
+```
+$ python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py --quiet
+
+declared MODEL_SERVICE_NAMES: model-host.internal, small-model
+60 cases
+…
+GATEWAY  mismatches: 0 of 60
+CONTROL  mismatches: 34 of 60  (gated at exactly 34)
+```
+
+**0 of 60 reproduced independently.** Every case I rated in §2 and §12.2 is closed by the gateway
+implementation, each refused by a *named rule* rather than by a bare boolean — `denied-network`,
+`metadata-name`, `idna-mismatch`, `packed-ipv4`, `userinfo`, `undeclared-private-suffix`,
+`undeclared-bare-label`. A URL refused for the wrong reason fails the build. That is a better
+artifact than I asked for; the four fixes I specified in §2 are all present and two more besides.
+
+`CONTROL 34 of 60` is the honest state of `contracts/model_policy.py`, printed rather than
+asserted, and gated in both directions so it cannot drift silently.
+
+### 14.2 My own cases, which are not in the author's table
+
+Re-running the author's table proves the author's table. These are mine.
+
+Most of what I tried was already closed, and closed structurally rather than by enumeration —
+the name path is **allowlist-only** (`localhost`, `host.docker.internal`, or declared), so every
+name that is not explicitly permitted falls through to a refusal. That is why the following all
+failed to get through even though none of them is in the table:
+
+```
+  [ok] want=False got=False public-name       8.8.8.8 as a.b        'http://8.526344/v1'
+  [ok] want=False got=False public-name       8.8.8.8 as a.b.c      'http://8.8.2056/v1'
+  [ok] want=False got=False public-name       127.0.0.1 as a.b      'http://127.1/v1'
+  [ok] want=False got=False public-name       mixed hex dotted      'http://0x8.0x8.0x8.0x8/v1'
+  [ok] want=False got=False public-name       loopback octal dotted 'http://0177.0.0.1/v1'
+```
+
+`_looks_like_packed_ipv4` only inspects dotless hosts, so `inet_aton`'s partial-dotted forms
+(`8.526344` is 8.8.8.8) slip past it — and it does not matter, because the default for a name is
+deny. **That is the right shape and it is why this implementation is worth trusting**: the
+enumerated bypasses are a defence-in-depth layer over a deny-by-default decision, not the
+decision itself.
+
+I also confirmed rule ordering cannot be subverted by the operator's own allowlist — a name
+declared in `MODEL_SERVICE_NAMES` is still refused if it is a provider, a metadata name, a packed
+address or a denied network, because those checks run *before* the declared-name check:
+
+```
+  [ok] want=False got=False hosted-provider   declared 'api.openai.com' then used
+  [ok] want=False got=False metadata-name     declared 'metadata.google.internal' then used
+  [ok] want=False got=False packed-ipv4       declared '2130706433' then used
+  [ok] want=False got=False denied-network    declared '169.254.169.254' then used
+```
+
+and that `normalise_service_names` refuses a dangerous declaration at startup rather than
+widening the boundary quietly (`api.openai.com`, `metadata.google.internal`, `2130706433`,
+`127.0.0.1`, the U+3002 homograph and `evil.example.com` are all refused).
+
+All ten controls that must keep working, do:
+
+```
+  [ok] want=True got=True allowed-network  loopback / IPv6 loopback / all three RFC 1918 ranges
+  [ok] want=True got=True local-name       localhost
+  [ok] want=True got=True declared-service small-model, model-host.internal
+  [ok] want=True got=True allowed-network  IPv6 unique-local fd12:3456::1
+```
+
+---
+
+### SEC-24 · **MEDIUM** · The IPv6 unwrap is applied to the *allow* path as well as the *deny* path, so a globally routable literal is permitted for what is embedded in it
+
+**Location** — `services/model-gateway/gateway/endpoint_policy.py:515-547` (`_classify_address`),
+with `_unwrap` at `:499-512`. `effective = _unwrap(address)` is computed once and then used for
+**both** the deny loop at `:521` and the allow loop at `:536`.
+
+**Why unwrapping is right for denying and wrong for allowing.** Unwrapping is what catches
+`[::ffff:169.254.169.254]` and `[64:ff9b::808:808]` and `[2002:808:808::1]` — all three are in the
+author's table and all three are correctly refused. But `2002::/16` (6to4) and `64:ff9b::/96`
+(NAT64) are **globally routable IPv6 prefixes**. A packet addressed to `2002:7f00:1::1` does not
+go to 127.0.0.1; it leaves the host toward a 6to4 relay. Judging the *destination* by the address
+*embedded* in it is correct when the answer is "deny" and inverted when the answer is "allow".
+
+**Exploit scenario, executed — none of these are in the 60-case table:**
+
+```
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 127.0.0.1     'http://[2002:7f00:1::1]/v1'
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 10.0.0.1      'http://[2002:a00:1::1]/v1'
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 192.168.1.1   'http://[2002:c0a8:101::1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64 wrapping 127.0.0.1    'http://[64:ff9b::7f00:1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64 wrapping 10.0.0.1     'http://[64:ff9b::a00:1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64-local wrapping 192.168.0.1 'http://[64:ff9b:1::c0a8:1]/v1'
+```
+
+Each is reported as `allowed-network — loopback or private address (127.0.0.0/8)`. The policy
+says loopback; the socket goes to a global IPv6 destination.
+
+**The resolver check inherits the same asymmetry**, so the defence-in-depth layer does not catch
+it either:
+
+```
+  [ok  ] refused=True  want_refused=True   declared name -> 8.8.8.8
+  [ok  ] refused=True  want_refused=True   declared name -> 169.254.169.254
+  [ok  ] refused=True  want_refused=True   declared name -> [loopback, 8.8.8.8] (2nd answer poisoned)
+  [ok  ] refused=True  want_refused=True   declared name -> 6to4 wrapping 8.8.8.8
+  [FAIL] refused=False want_refused=True   declared name -> 6to4 wrapping 127.0.0.1
+  [FAIL] refused=False want_refused=True   declared name -> NAT64 wrapping 127.0.0.1
+```
+
+A declared name whose resolver answers `2002:7f00:1::1` passes both layers.
+
+**Two of my eight unexpected results are my expectation being wrong, not the code**, and I am
+recording that rather than inflating the count: `[::ffff:127.0.0.1]` and `[::ffff:10.0.0.1]` are
+IPv4-mapped, and connecting to those genuinely does reach 127.0.0.1 and 10.0.0.1 on a normal dual
+stack. Unwrapping those for the allow decision is **correct**. The finding is the six 6to4/NAT64
+cases only.
+
+**MEDIUM.** The input is `MODEL_ENDPOINT`, operator configuration — actor A3 from §1, the same
+actor as SEC-02 — not attacker-supplied data. SEC-01's topology means the finale has no default
+route regardless. It is the same class as the ten cases this PR just closed, in the code written
+to close them, and the table to pin it already exists.
+
+**Required fix** — keep `_unwrap` for the deny loop; for the allow loop, permit only when the
+address is *itself* in `_ALLOWED_NETWORKS`, with `ipv4_mapped` as the one sanctioned equivalence.
+Concretely, in `_classify_address`, refuse any address where `wrapped` is true and the wrapper was
+6to4 or NAT64 rather than IPv4-mapped. Add the six rows above to `bypass_table.py`, which makes
+them permanent.
+
+---
+
+### SEC-25 · **MEDIUM** · The new runtime pin `idna==3.10` carries CVE-2026-45409, in the exact function that is this PR's security control, and the documented workaround is not implemented
+
+**Location** — `services/model-gateway/requirements.txt` (`idna==3.10`), consumed at
+`gateway/endpoint_policy.py:327` (`idna.encode(host, uts46=True)`) and `:231` in
+`normalise_service_names`.
+
+**Executed:**
+
+```
+$ pip-audit -r services/model-gateway/requirements.txt
+Found 2 known vulnerabilities in 1 package
+Name Version ID             Fix Versions
+---- ------- -------------- ------------
+idna 3.10    PYSEC-2026-215 3.15
+```
+
+`PYSEC-2026-215` = `CVE-2026-45409` / `GHSA-65pc-fj4g-8rjx`. Quadratic resource consumption in
+`idna.encode()` on long inputs — *"the same issue as CVE-2024-3651, however the original
+remediation in 2024 was not a complete fix"*. Fixed in 3.15. The advisory names the workaround
+explicitly: **enforce the 253-character domain limit before calling `idna.encode()`.**
+
+`classify()` applies no length check before `idna.encode()`. **Executed reachability, through the
+public entry point:**
+
+```
+CVE-2026-45409 reachability through classify() — no length guard before idna.encode()
+RFC 1035 caps a domain at 253 chars; classify() does not enforce that.
+
+  host len   1000  -> idna-invalid   in    0.031s
+  host len   5000  -> idna-invalid   in    0.667s
+  host len  20000  -> idna-invalid   in   10.303s
+  host len  60000  -> idna-invalid   in  100.832s
+```
+
+One `classify()` call, 100 seconds. The verdict is still correct — it refuses — it just takes a
+minute and a half to say so.
+
+**MEDIUM, not High.** The host comes from `MODEL_ENDPOINT` today, so this is a configuration
+foot-gun rather than a remote DoS. Three things stop it staying that way, and they are why this is
+a condition rather than a follow-up: `classify()` is documented at `:53-59` as safe to call from a
+Django system check, and a 100-second system check is a failed deploy; **D-050 consolidates this
+module into `contracts/`**, where the next caller may well hand it a URL from a request body; and
+this CVE is a *recurrence* of a 2024 CVE whose first fix was incomplete, which is the strongest
+possible argument for not relying on the library alone.
+
+**Required fix** — both halves, because either alone leaves the other gap:
+
+1. `idna>=3.15` in `services/model-gateway/requirements.txt`.
+2. A length guard in `classify()` and `normalise_service_names` before `idna.encode()`: refuse a
+   host over 253 characters, or any label over 63, as `EndpointDecision(False, "host-too-long", …)`.
+   That is the advisory's own workaround, it is two lines, and it holds when this recurs a third
+   time.
+3. A row in `bypass_table.py` for an over-long host, so the guard is pinned.
+
+This is also a **dependency-policy** point for the CTO: `pip-audit` is not in CI. `apps/control-api`'s
+pins are clean today (§13.3), and this one was not, and nothing in the pipeline would have said so.
+Adding `pip-audit -r` for every `requirements.txt` as a CI step is the generalisation and I
+recommend it.
+
+---
+
+### 14.3 Two claims I verified by injection rather than by reading
+
+**The import-closure walk.** The author reports catching their own check passing by not looking —
+a subprocess-based test that **skipped** rather than failed when `import ninja` was injected — and
+replacing it with a static walk. I verified the replacement the same way:
+
+```
+########## CONTROL: clean tree ##########
+8 passed in 0.28s
+
+########## INJECT 'import ninja' into gateway/endpoint_policy.py ##########
+71:import ninja  # INJECTED VIOLATION
+
+E   AssertionError: gateway.endpoint_policy failed to import in a bare interpreter, and the
+    error names ['django', 'ninja', 'pydantic']. That is not a missing dependency, it is the
+    policy having acquired one
+2 failed, 6 passed in 0.37s
+```
+
+**Two failures, no skips.** The claim holds. The runtime check also correctly distinguishes "this
+dependency is missing" from "this module acquired a dependency", which is the distinction that
+made the first version useless. Injection reverted; worktree clean.
+
+This is the **fifth** instance of a check passing by not looking, across five seats, and the
+**first caught by its own author before review**. That is the standing rule starting to work, and
+it is worth saying so in the record.
+
+**"No code in this package opens a socket."** Load-bearing for the security section, so I checked
+rather than accepted it:
+
+```
+$ grep -rnE "^\s*(import|from) +(httpx|requests|aiohttp|urllib3|openai|anthropic|socket)" \
+    --include="*.py" gateway | grep -v "/tests/"
+gateway/endpoint_policy.py:65:import socket
+$ grep -n "socket\." gateway/endpoint_policy.py
+410:    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+```
+
+One `socket` import, used once, for name resolution in the opt-in resolver check. No HTTP client.
+The claim is accurate.
+
+**The `SYNTHETIC_FIXTURE` gate.** `transcripts/` contains only `.gitkeep` and `README.md` — no
+transcript is committed, as claimed. `CaptureKind.SYNTHETIC_FIXTURE` is refused at load unless
+`allow_synthetic` is set (`gateway/transcripts.py:243-245`), with
+`test_a_synthetic_fixture_cannot_be_served_as_model_output` naming it. A hand-written diff cannot
+be served wearing a model's provenance. Verified by reading; I did not attack the transcript store.
+
+### 14.4 SEC-19 — **not closed by #111.** Re-targeted, not waived
+
+In §13 I wrote that SEC-19 *"must not outlive #111"*. It has, and after reading why, **I am not
+blocking on it.**
+
+```
+$ git diff origin/main...HEAD --name-only | grep control-api
+  NO control-api file touched
+
+$ sed -n '16p' apps/control-api/contracts/checks.py
+from contracts.model_policy import assert_local_inference_endpoint
+
+$ manage.py check, on this branch
+https://my-llm-proxy.internal/v1     System check identified no issues (0 silenced).
+http://169.254.169.254/              System check identified no issues (0 silenced).
+https://api.openai.com.evil.test/v1  System check identified no issues (0 silenced).
+```
+
+The boot gate still binds to the 34-of-60 implementation and still boots clean on all three.
+
+**Why this is the right call and not a waiver.** The seat's decision record gives two reasons for
+not touching `contracts/model_policy.py`: it is another seat's file in a live worktree, and C5
+forbids the ASGI process importing `gateway`, so the gateway's implementation is not available to
+`checks.py` until D-050 consolidates it into `contracts/`. Both are correct. Demanding the fix
+here would be demanding either a hard-rule breach or a premature architectural move, and I do not
+get to require that by attaching it to a severity.
+
+**What changes instead.** SEC-19's impact today is materially lower than when I filed it: nothing
+in the tree opens a socket to a model, so the boot gate is currently validating a setting that no
+code uses to connect. It is a misleading green check, not a live egress path. **It becomes a live
+egress path the moment #35/#36 land a real backend.**
+
+**Ruling.** SEC-19 does not block #111. It is re-targeted at **#93 / D-050**, and it **blocks the
+first PR that introduces a live model backend** — that is the merge gate it moves to, and I will
+enforce it there. It stays MEDIUM and open.
+
+### 14.5 Can #78 close, and what happens to SEC-02
+
+**#78 can close, on the same condition I set in §12.3 and for the same reason.** The component
+that will actually open the socket now has a correct egress function — 0 of 60, reproduced by me,
+with a named-rule table and a two-column drift guard. SEC-01's topology holds underneath it. #78's
+second acceptance box — *"link-local, loopback-to-elsewhere and metadata addresses are explicitly
+rejected by the validator"* — is now genuinely ticked **for the gateway**.
+
+**Condition, and it is the same one as last time: SEC-02 and SEC-19 must be filed against #93 with
+an owner and a milestone before #78 is closed. Not after.** `contracts/model_policy.py` is at 34
+of 60 and is what the ASGI process boots on; closing #78 while that is true, with nothing tracking
+it, is exactly how the finding got lost the first time.
+
+**SEC-02 status: still open, still MEDIUM, owner #93.** It is not closed by this PR and this PR
+does not claim it is. What changed is that it is now *measured* — 34 of 60, in CI, gated in both
+directions — rather than assumed.
+
+### 14.6 D-051, recorded verbatim as the CTO asked
+
+The CTO adopted the gateway seat's sentence, and it **retires my own §5 wording** — the claim that
+the private-suffix name check *"proves the hostname is inside the boundary"*. It does not, and
+`api.openai.com.evil.test` settles it. The replacement:
+
+> **"not globally routable" and "inside our trust boundary" are different properties, and only
+> the second one is the question being asked.**
+
+Nobody owns `.internal`, `.local`, `.svc` or `.test`. Declaration grants trust; a suffix does not.
+I endorse both divergences in the gateway's decision record — private suffixes requiring
+declaration, and the reserved documentation ranges denied — and I confirmed the three cases they
+newly refuse (`small-model.internal`, `model.svc.cluster.local`, `198.51.100.7`) are all refusals
+I want. **My §5 wording is superseded; §13's copy of this sentence and this one are the record.**
+
+One inconsistency inside the divergence, recorded as informational rather than a finding:
+`_LOCAL_NAMES` at `:141` hardcodes `host.docker.internal` as trusted with no declaration, and it
+sits under `.internal` — the namespace the divergence refuses on the grounds that nobody owns it.
+Docker owns that specific name by convention, so it is defensible, and `evil.host.docker.internal`
+is correctly refused. It is one hardcoded exception to a rule made three lines earlier and the
+next reader should know it was deliberate.
+
+### 14.7 Dependency audit and secrets — **executed**
+
+```
+$ pip-audit -r services/model-gateway/requirements.txt
+Found 2 known vulnerabilities in 1 package
+idna 3.10    PYSEC-2026-215   fix: 3.15          <-- SEC-25
+
+$ pip-audit -r services/model-gateway/requirements-dev.txt
+  same single finding (dev file includes the runtime file)
+
+$ (secret-shaped literals across every file in the diff)
+.env.example:51:POSTGRES_PASSWORD=REPLACE_ME_LOCAL_DEV_PASSWORD
+.env.example:68:CONTROL_API_OPERATOR_TOKEN=REPLACE_ME_OPERATOR_TOKEN_MIN_32_CHARS
+```
+
+Two matches, both placeholders in the committed example file. No credential in code. Two new
+runtime dependencies, both pinned exactly: `pydantic==2.13.4` (matching control-api, deliberately)
+and `idna==3.10` (SEC-25).
+
+### 14.8 The suite, run by me — and a stale claim in the PR body
+
+```
+$ cd services/model-gateway && pytest -q -rs
+274 passed, 1 skipped in 0.39s
+SKIPPED [1] gateway/tests/test_contract_alignment.py:172: contracts.ModelProvenance has no
+  inference_mode yet — #110 is not merged. The gateway already emits it; this assertion
+  activates on merge.
+```
+
+The PR body reports **`270 passed`** and states **"No skips."** The branch is at 274 passed and
+one skip. The body's evidence block predates the CTO-conditions commit and was not refreshed.
+
+**The skip itself is fine and is the good kind** — it names its reason, it is visible because the
+suite runs with `-rs`, and it self-activates when #110 merges. But under the standing rule the
+*claim* has to match the run, and "No skips" is now false. **LOW**, no ID: refresh the evidence
+block before merge. Flagging it because the whole point of the rule is that stale evidence is how
+a green run stops meaning anything, and this PR is otherwise the best-evidenced one I have
+reviewed.
+
+Worth recording what that skip means substantively: `test_contract_alignment.py` does **not**
+currently validate the replay triple against the real `contracts.ModelProvenance`. That assertion
+is dormant until #110 lands. The cross-implementation guarantee is therefore *intended*, not
+demonstrated, today.
+
+### 14.9 What I did **not** review
+
+1. **No egress attempt from inside a running container.** Not re-run this session. §12's execution
+   stands and is unchanged by this diff. **NOT RUN.**
+2. **No live-resolver DNS test.** I exercised `assert_resolves_inside_boundary` with an injected
+   resolver only, as the author did. Against a real resolver: **NOT RUN.**
+3. **The transcript store's integrity path.** I read the `SYNTHETIC_FIXTURE` gate and the
+   self-hashing refusal and did not attack them — no path traversal, symlink, TOCTOU or
+   concurrent-write testing on `TranscriptStore`. Unreviewed.
+4. **The replay/provenance labelling half of the PR (#82).** I confirmed the chokepoint tests
+   exist and are scoped honestly. I did not independently attack the renderers, and the AST
+   chokepoint scan's completeness is unverified by me.
+5. **`gateway/service.py`, `backends.py`, `schemas.py`, `settings.py`, `tools/transcripts_cli.py`**
+   — read for socket use and for the endpoint-policy call sites only, not reviewed line by line.
+6. **`mypy` and `ruff`** — not run by me; the author's figures are unverified.
+7. **The CI additions** in this PR — not reviewed.
+
+### 14.10 Verdict
+
+**PASS WITH CONDITIONS.**
+
+This is the best security work in the repository. It does the thing I asked for in §12.2 — IDNA
+normalisation before deciding, an explicit metadata and link-local deny list rather than
+`is_global`, `metadata` refused by name and by leftmost label, and the bare-label pass replaced by
+a declared allowlist — and then goes past it with packed-IPv4, userinfo, the IPv6 wrappers and an
+opt-in resolver check. The deny-by-default name path is what makes it trustworthy, rather than the
+enumeration. It reports its own remaining gap as a number in CI. And its author caught their own
+check passing by not looking, which is the first time that has happened here.
+
+**Conditions on merge:**
+
+1. **SEC-24 (MEDIUM)** — the 6to4/NAT64 unwrap must not permit; six rows added to
+   `bypass_table.py`.
+2. **SEC-25 (MEDIUM)** — `idna>=3.15`, plus the 253-character guard before `idna.encode()`.
+
+**Condition on closing #78** — SEC-02 and SEC-19 filed against #93 / D-050 with an owner and a
+milestone **before** #78 closes, not after. Identical to §12.3, for identical reasons.
+
+**Before merge, not a finding** — refresh the PR body's evidence block; "270 passed / No skips" is
+now "274 passed, 1 skipped".
+
+**Carried:** SEC-19 re-targeted at #93 and now **blocks the first PR landing a live model backend**
+(#35/#36). SEC-02 remains MEDIUM and open, owned by #93, now measured rather than assumed.
+
+I will re-verify SEC-24 and SEC-25 personally, by re-running my own cases, before this merges.
+
+### 14.11 Decision records to fold into `.project/decisions.md`
+
+**DR-SEC-R3-1 · SEC-19 is re-targeted at #93 rather than blocking #111**
+
+**Decision** — SEC-19 does not block #111. It moves to #93 / D-050 and becomes a merge gate on the
+first PR introducing a live model backend.
+
+**Options considered** — (a) block #111 until `contracts/checks.py` is rewired; (b) re-target to
+#93 with a named future merge gate; (c) close it as fixed because the gateway is 0 of 60.
+
+**Pros and cons** — (a) requires either editing another seat's file in a live worktree (a hard-rule
+breach for that seat) or importing `gateway` from the ASGI process, which C5 forbids; I do not get
+to require a hard-rule breach by attaching it to a severity. (c) is false — the boot gate demonstrably
+still admits `169.254.169.254` and `api.openai.com.evil.test`, and I executed that on this branch.
+(b) is accurate: the impact today is a misleading green check rather than an egress path, because
+nothing in the tree opens a socket to a model yet, and it names the exact moment that stops being
+true.
+
+**Cost implications** — zero now; one import change plus a test when D-050 consolidates.
+
+**Security implications** — a boot gate looser than the runtime control teaches operators that a
+green `manage.py check` means something it does not. Tolerable only while no live backend exists.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), with the gate on #35/#36 written down rather than remembered.
+
+**Final approval authority** — cybersecurity (severity and gate placement are mine).
+
+**DR-SEC-R3-2 · `pip-audit` becomes a CI step for every `requirements.txt`**
+
+**Decision** — recommend `pip-audit -r` in CI for every pinned Python requirements file.
+
+**Options considered** — (a) fix the `idna` pin and move on; (b) add `pip-audit` to CI; (c) add
+Dependabot or Renovate.
+
+**Pros and cons** — (a) leaves the next vulnerable pin undetected, and this one was introduced by
+the most security-conscious PR in the repository, which is the strongest available evidence that
+review does not catch it. (c) is better long-term and is a larger decision about bot noise during a
+seven-day build. (b) is one step, fails the build on a known CVE in a pinned dependency, and would
+have caught SEC-25 before I did.
+
+**Cost implications** — one CI step, a few seconds. Some risk of a red build from a new advisory on
+an unrelated day, which is the intended behaviour.
+
+**Security implications** — closes the gap between "we pin exactly" and "we know what we pinned".
+Exact pinning without an audit step is a decision to freeze whatever was vulnerable on the day.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b) now, (c) after the finale.
+
+**Final approval authority** — CTO (technical/CI); cybersecurity sets the dependency policy
+requirement.
+
+---
+
+## 16. Round 4 — 2026-08-08 · PR #119 `feat/authorize-snapshot` · the authorization gate and snapshot ingest
+
+Reviewed at `2ae5173` (`origin/feat/authorize-snapshot`), in an isolated `git worktree` off
+`origin/main` (`/Users/manu/Documents/GitHub/brahmadatta-ai-pr119`, branch
+`review/security-authorize-snapshot`). No code edited, no other role's files changed. Two
+other agents were live in `services/model-gateway/`, `adapters/cpp/`, `infrastructure/` during
+this review; none of their trees were touched.
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Seven new findings (SEC-26…SEC-32), one High
+(SEC-26) and four Medium. The core claim — every id this gate accepts is checked against the
+*locked* mission row, not against what the caller merely asserts — holds everywhere I probed it,
+including under real concurrent writers on Postgres. What does not fully hold is two things one
+level down from that claim: an archive-safety check that covers path-shaped traversal but not
+link-shaped traversal, and a cross-mission uniqueness check that is correct in outcome but not
+atomic under real concurrency. Full reasoning in §15.4–§15.6.
+
+### 15.1 Scope and what I ran, for real, this session
+
+```
+$ cd apps/control-api && python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+$ DJANGO_SETTINGS_MODULE=config.settings.test .venv/bin/python -m pytest -o addopts=""
+======================= 294 passed, 2 warnings in 1.90s ========================
+
+$ source .venv/bin/activate && python manage.py check
+System check identified no issues (0 silenced).
+$ python manage.py makemigrations --check --dry-run
+No changes detected
+
+$ bash infrastructure/scripts/openapi-contract-check.sh
+openapi contract: PASS — the committed dump matches the live schema
+
+$ .venv/bin/ruff check apps/control-api/authorization apps/control-api/api/tests/test_authorize_snapshot.py \
+    apps/control-api/api/routers/missions.py apps/control-api/config/settings/base.py
+All checks passed!
+
+$ .venv/bin/pip-audit -r requirements.txt -r requirements-dev.txt
+No known vulnerabilities found
+```
+
+Every one of the PR body's claimed results reproduced independently, on a venv I built myself
+from the pinned requirements files, not from the author's environment. **294/294, ruff clean,
+OpenAPI unchanged, no missing migrations, no vulnerable pin — all confirmed by me, not taken on
+report.**
+
+Also run, not claimed by the PR body:
+
+```
+$ detect-secrets scan apps/control-api/authorization apps/control-api/api/routers/missions.py \
+    apps/control-api/config/settings/base.py apps/control-api/.env.example
+# no findings besides the placeholder ARTIFACT_ROOT=/SNAPSHOT_SOURCE_ROOT=/SNAPSHOT_STAGING_ROOT=
+# blank defaults in .env.example — not secrets, unset placeholders.
+$ git ls-files | grep -i '\.env$'
+# (nothing — .env is not tracked; .gitignore:22-23 covers it)
+```
+
+### 15.2 The SEC-15-pattern probe, run against every id these two endpoints accept
+
+This is the thing I was asked to go looking for, specifically: `mission_id` vs. `repository_ref`
+vs. `archive_ref` vs. cross-mission `Artifact.sha256` reuse, each checked against the *locked*
+mission row rather than against what the caller merely claims.
+
+| id | Checked against | Where | Verified how |
+|---|---|---|---|
+| `mission_id` | `Mission.objects.select_for_update().get(pk=mission_id)` — the lock itself | `service.py:57-64` | Read; the lock is the first statement in both `authorize_mission` and `create_mission_snapshot`. |
+| `AuthorizationRequest.repository_ref` | `mission.repository_ref` (the locked row), exact string equality | `service.py:88-94` | **Independently re-verified by injection** — disabled the check, `test_authorization_for_a_different_repository_is_refused` and `test_a_refused_authorize_leaves_no_authorization_row_behind` went red (403→201), restored, green again. §15.3. |
+| `SnapshotRequest.archive_sha256` (caller's assertion) | The digest actually computed by re-hashing the bytes the server itself streamed to disk (`store.ingest_from_path`) | `service.py:161-167` | Read + the PR's own `test_a_digest_the_server_cannot_verify_is_refused` / `test_a_swapped_archive_is_refused`, both still green in my run. Not independently re-injected by me — time-boxed to the two checks in §15.3 instead. |
+| `Artifact.sha256` (content-addressed) | Every **other** mission's claim on the same digest | `service.py:171-173` | **Independently re-verified by injection** — disabled the check, `test_an_archive_digest_already_claimed_by_another_mission_is_refused` went red (409→201), restored, green again. §15.3. **Also independently re-verified under real concurrent Postgres writers**, where it found a real gap — SEC-27, §15.5. |
+| `archive_ref` (staging-root path) | The fixed `SNAPSHOT_STAGING_ROOT` boundary, never against the mission | `service.py:201-215, 261-286` | Read. **Not** checked against the mission at all — this is real, and it is SEC-30, not a false alarm: `archive_ref` is a shared, flat, non-mission-scoped namespace by design. |
+| `repository_ref` used to locate bytes | The fixed `SNAPSHOT_SOURCE_ROOT` boundary, by basename only | `service.py:218-258` | Read + symlink-escape and `..`-traversal manual probes, both correctly refused (§15.6 details the one gap that basename-only resolution has, which is not a traversal — it's a collision — SEC-29). |
+
+**Net finding of the probe itself: the pattern SEC-15 named — an id accepted from a request and
+never compared to the thing it is supposed to belong to — does not recur here for `mission_id`,
+`repository_ref` (the authorization-declaration check), or `archive_sha256`/`Artifact.sha256` in
+the single-threaded case.** Two adjacent gaps do exist, and they are not the SEC-15 pattern
+exactly — they are a *link-following* variant of the same "check what's named, not what's really
+there" family (SEC-26) and a *missing atomicity* variant of the same cross-mission check done
+right in principle (SEC-27). Neither is a case of an id simply never being checked.
+
+### 15.3 Independent re-verification by injection, per the standing rule
+
+I did not trust the PR body's own injection table. I re-ran two of the five rows myself, on the
+unmodified worktree, saving a `diff`-verified backup before each edit and restoring it after:
+
+**Injection 1 — disable `require_active_authorization` in `create_mission_snapshot`:**
+
+```
+--- authorization/service.py
++        # require_active_authorization(mission, MissionStage.INGEST, now)
+```
+```
+$ pytest api/tests/test_authorize_snapshot.py -k "without_an_authorization or expired_authorization or revoked_authorization"
+FAILED test_snapshot_without_an_authorization_is_refused
+FAILED test_snapshot_with_an_expired_authorization_is_refused
+FAILED test_snapshot_with_a_revoked_authorization_is_refused
+  assert 409 == 403   # fell through to the digest-mismatch check instead of refusing up front
+3 failed, 16 deselected
+```
+Restored. `diff -q` against the pre-injection file: identical. Full 19-test file green again.
+
+**Injection 2 — disable the cross-mission artifact-claim check in `create_mission_snapshot`:**
+
+```
+--- authorization/service.py
++        # if existing_artifact is not None and existing_artifact.mission_id != mission.id:
++        #     raise SnapshotArtifactClaimedError(details={"sha256": result.sha256})
+```
+```
+$ pytest api/tests/test_authorize_snapshot.py -k already_claimed
+FAILED test_an_archive_digest_already_claimed_by_another_mission_is_refused
+  assert 201 == 409   # a second mission's snapshot silently claimed the first mission's artifact
+1 failed, 18 deselected
+```
+Restored. Full 294-test suite re-run: **294 passed.**
+
+Both of the checks I chose to re-verify are the two most load-bearing ones for the SEC-15 pattern
+specifically — the pre-I/O authorization gate, and the cross-mission artifact binding. Both are
+genuinely load-bearing, not merely present. I did not re-inject the digest-mismatch or
+member-safety checks myself; those are read-verified only (member safety is separately attacked
+in §15.6, which found the real gap the injection table did not cover).
+
+### 15.4 The mission-row lock under real concurrency, not SQLite
+
+The PR's own caveat: `SELECT ... FOR UPDATE` is a no-op on SQLite, so "lock the mission row
+first, check everything against the locked row" was exercised single-threaded only. I stood up
+an isolated `postgres:16-alpine` container (port 15432, unrelated to the other agents'
+`brahmadatta-db` container, removed at the end of this session), ran real migrations against it,
+and drove two real threads with two real DB connections at three scenarios.
+
+```
+=== Scenario A: same mission, two concurrent identical-digest snapshot posts ===
+Thread X: ('ok', UUID(...))
+Thread Y: ('ok', UUID(...))   <- same UUID as X
+Snapshot rows for mission: 1
+
+=== Scenario C: same mission, two concurrent DIFFERENT-digest snapshot posts ===
+Thread P (digest1): ('ok', UUID(...), 'e639f1...')
+Thread Q (digest2): ('SnapshotAlreadyRecordedError', 'This mission already has a snapshot with a different digest.')
+Snapshot rows recorded for the mission: ['e639f1...']
+```
+
+**Confirmed under real Postgres: the mission-row lock genuinely serializes.** The loser in
+Scenario C did not race, did not see a stale read, and was not able to overwrite the winner's
+snapshot — it blocked on the row lock, then read the winner's already-committed row and refused
+correctly with the documented `409`. This is exactly the property the PR's docstring claims and
+it was previously unverified. **I am closing that half of the caveat: proven, not merely
+asserted, on real Postgres, by me, this session.**
+
+### 15.5 SEC-27 — the half of the caveat that did *not* hold
+
+```
+=== Scenario B: two DIFFERENT missions, byte-identical content, forced interleave
+     via a barrier placed around Artifact.objects.filter(pk=...).first() ===
+Thread A (mission_a): ('ok', UUID(...))
+Thread B (mission_b): ('error', "IntegrityError: duplicate key value violates unique
+    constraint \"artifact_pkey\"\nDETAIL: Key (sha256)=(0ff12f...) already exists.")
+Artifact rows for this digest: 1
+Snapshot rows: mission_a=1 mission_b=0
+```
+
+**The reason this scenario needed a forced interleave and Scenarios A/C did not:** the mission-row
+lock only ever protects *one* mission's row. Two different missions' transactions never contend
+for the same lock, so `Artifact.objects.filter(pk=result.sha256).first()` (`service.py:171`) and
+`Artifact.objects.create(...)` (`service.py:175-180`) are a check-then-act pair with no lock
+spanning both operations, for the cross-mission case specifically. A barrier around `.first()`
+made the race deterministic instead of relying on thread-scheduling luck; the underlying gap is
+real regardless of the barrier — it is a property of the code, not of my harness.
+
+**Outcome quality: correct in the end, wrong in the telling.** The Postgres primary-key
+constraint on `Artifact.sha256` is a real backstop — exactly one Artifact row exists, exactly one
+mission ends up owning it, no data corruption occurred. But the loser did not get the documented,
+tested `SnapshotArtifactClaimedError` → `409 CONFLICT`; it got a raw, unhandled
+`django.db.utils.IntegrityError` → the generic `api.errors._unhandled` handler → `500 Internal
+Error`, logged as `"unhandled error"` even though this is a fully anticipated, already-named
+condition with its own exception class three lines above it. `api/errors.py`'s unhandled-exception
+path does not leak internal detail to the client (confirmed by reading it — generic message, trace
+id only), so this is not an information-disclosure finding. It is a correctness/robustness finding
+that reproduces on demand.
+
+**MEDIUM.** Rated below SEC-26 because (a) no data integrity or authorization property is broken
+— the artifact ends up bound to exactly one mission, which is the property the check exists to
+guarantee — and (b) the actor is an authenticated operator racing themselves or another operator,
+not an external attacker, under the current flat single-`OPERATOR`-role trust model. Rated Medium
+rather than Low because it is a demonstrated, reproducible divergence between the tested contract
+and the concurrent-runtime behavior, in the exact module whose caveat predicted this class of gap.
+
+**Required fix.** Wrap the `Artifact.objects.create(...)` call in `try`/`except IntegrityError`
+and re-raise `SnapshotArtifactClaimedError` on a unique-violation of the primary key — three lines,
+same shape as the existing check, and it turns the accidental-500 case into the documented 409
+without changing behavior in the non-racing case. Add a regression test using the same
+barrier-around-`.filter()` technique in this review (or Django's `TransactionTestCase` with two
+real threads against the test Postgres container) so this is pinned rather than re-discovered.
+
+**Location** — `apps/control-api/authorization/service.py:171-180`.
+
+### 15.6 SEC-26 — the zip-slip check covers member *names*, not member *links*
+
+`archive.py`'s docstring makes an explicit promise: `_is_safe_member_name` exists "so a downstream
+stage that does extract this archive should never have to make that judgement call again with less
+context than this one has." I took that promise as the thing to attack, per the task brief.
+
+**The check.** `_is_safe_member_name(member.name)` is called for every tar and zip member and
+correctly refuses `../../etc/passwd`-style and absolute names (`archive.py:33-39`,
+`_enumerate_tar:65-69`, `_enumerate_zip:93-97`) — I re-read this and it is genuinely correct for
+what it checks. **What it does not check, for a tar member specifically: `member.linkname`, or
+`member.type` (`SYMTYPE`/`LNKTYPE`).** A tar symlink or hardlink member can carry an innocuous,
+fully-safe `name` while its `linkname` points anywhere on the filesystem the extracting process can
+reach. `enumerate_members` never extracts, so it never notices.
+
+**Executed PoC, both halves — first that the "safe" gate accepts the archive, second what an
+ordinary extraction of an archive that passed it actually does:**
+
+```
+>>> tar = a symlink member name="innocuous_link" -> linkname="../../../../etc",
+...       plus a regular member name="innocuous_link/passwd" containing attacker bytes
+>>> _is_safe_member_name("innocuous_link")          -> True
+>>> _is_safe_member_name("innocuous_link/passwd")   -> True
+>>> enumerate_members(tar_path)                     -> ACCEPTED: ArchiveInfo(file_count=1, bytes_total=14)
+```
+
+That alone proves the gate misses the class. To show it is not a theoretical miss, I extracted the
+*same archive that `enumerate_members` accepted*, the ordinary way, on this project's own target
+interpreter:
+
+```
+$ python3.12 -c "print(tarfile.TarFile.extraction_filter)"
+None
+DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives...
+```
+
+Python 3.12 — the interpreter this project's own `README.md` tells every developer to build the
+venv with — ships the PEP 706 filter machinery but **defaults `extraction_filter` to `None`**,
+i.e. **unfiltered**, exactly like every Python version before it. The filter only becomes the
+default in 3.14. A plain `tar.extractall(dest)` — the ordinary, unremarkable way the next developer
+who writes the BASELINE/ANALYZE extraction stage will call it — gets no protection at all from the
+interpreter, only from whatever `archive.py` checked in advance.
+
+```
+>>> evil_dir_target = a real directory OUTSIDE the intended extraction root, containing
+...                    a pre-existing file HIDDEN_SECRET with known content
+>>> tar.extractall(extract_root)   # default filter=None, no filter= kwarg passed
+>>> open(victim_file).read()
+'ATTACKER CONTROLLED CONTENT\n'
+```
+
+**Confirmed: an archive that `enumerate_members` reports as safe, extracted the ordinary way,
+overwrites an arbitrary file outside the destination directory.** This is CWE-59 (Link Following),
+the symlink variant of the zip-slip family — distinct from, and not covered by, the path-traversal
+variant the existing test (`test_a_tar_with_a_path_traversal_member_is_refused`) and the module's
+own name-based check actually defend against.
+
+**HIGH, not Critical.** No extraction code path exists anywhere in this PR or the reachable
+control-api today — `enumerate_members` only counts, it never writes. Nothing an external attacker
+can reach over HTTP is compromised by this today. It is High rather than Critical because of that,
+and High rather than Medium because: (a) extraction of exactly these archives is not speculative —
+it is the explicit, near-term purpose of the BASELINE stage this same mission pipeline is built
+around; (b) the module's docstring makes an affirmative, specific safety promise to that future
+developer, and the promise is false; (c) zip-slip-class defects are a named CWE with well-understood
+severity once the write path exists, and fixing it now, before any consumer relies on the false
+promise, is materially cheaper than fixing it after BASELINE ships and depends on it.
+
+**Required fix**, either is sufficient on its own, both is better:
+
+1. In `_enumerate_tar`, refuse any member where `member.issym() or member.islnk()`
+   (`TarInfo.SYMTYPE`/`TarInfo.LNKTYPE`) outright — a repository snapshot has no legitimate reason
+   to contain a symlink or hardlink, and `build_tar_from_directory` (the only *writer* this PR
+   ships) never produces one, so refusing them costs nothing today.
+2. If symlinks must be permitted later, additionally validate `member.linkname` with the same
+   `_is_safe_member_name`-style containment check applied to the *resolved* target, not just the
+   member's own name.
+3. A test that builds the exact PoC archive above and asserts `enumerate_members` raises
+   `UnreadableArchiveError` — the zip case should get the analogous check for completeness even
+   though Python's stdlib `zipfile.extractall` does not itself create symlinks from Unix mode bits.
+
+**Location** — `apps/control-api/authorization/archive.py:33-39` (`_is_safe_member_name`),
+`:59-78` (`_enumerate_tar`, the call site that never inspects `member.linkname`/`member.type`).
+
+### 15.7 SEC-28 — `RepositoryOutOfScopeError`'s error code contradicts the check that just ran
+
+The author's own flagged open question, judged rather than assumed, per the task brief.
+
+**The problem, precisely.** `RepositoryOutOfScopeError` fires inside `_resolve_repository_ref`
+(`service.py:218-258`), which is called from `_materialize_source`, which is called from
+`create_mission_snapshot` **after** `require_active_authorization` (`service.py:138`) has already
+run and already confirmed an active, unrevoked, unexpired authorization covers this stage. By the
+time a caller can hit `RepositoryOutOfScopeError`, the system has already proven the authorization
+*is* valid. Labeling the resulting refusal `ErrorCode.INVALID_AUTHORIZATION` tells the operator the
+opposite of what was just established, for a failure that is actually about something else
+entirely: the configured `SNAPSHOT_SOURCE_ROOT` deployment doesn't have this repository checked
+out, or the operator supplied a remote URL this endpoint doesn't fetch.
+
+**Why this is a real (if Medium) finding and not a style nit.** `ErrorCode.UNSUPPORTED_REPOSITORY`
+already exists in the frozen vocabulary and is used, in this exact file, for exactly this class of
+failure — `UnreadableArchiveError` (`errors.py:94-105`, "the archive could not be read as a tar or
+zip") is `UNSUPPORTED_REPOSITORY`, not `INVALID_AUTHORIZATION`, for the identical reason: the
+authorization is not in question, the *source material* is. Conflating "your authorization is
+invalid" with "this deployment cannot read the repository you pointed at" sends an operator toward
+the wrong remediation (re-authorizing, which will fail identically every time) instead of the right
+one (stage the repository locally, or recognize that remote fetch isn't supported). This is exactly
+the kind of mislabeling the standing rule about naming things honestly exists to catch, one level
+below "does the check exist" — the check exists and is correct; the *label on its refusal* is not.
+
+**Ruling on the author's open question:** `INVALID_AUTHORIZATION` is the wrong code.
+`ErrorCode.UNSUPPORTED_REPOSITORY` is correct, matching the sibling error one function away in the
+same file. This also changes the HTTP status from `403` to whatever `UnreadableArchiveError` uses
+(`422`) for consistency, or the class can keep `403` with `UNSUPPORTED_REPOSITORY` if 403 is judged
+the better status for a scope refusal — the code is the finding, the status is a secondary call for
+whoever fixes it.
+
+**Required fix.** `errors.py:107-121`: change `RepositoryOutOfScopeError.code` from
+`ErrorCode.INVALID_AUTHORIZATION` to `ErrorCode.UNSUPPORTED_REPOSITORY`. Update
+`test_repository_ref_with_an_unsupported_scheme_is_refused` (`api/tests/test_authorize_snapshot.py:471`)
+accordingly — it currently pins the wrong code, which is why this shipped.
+
+**Location** — `apps/control-api/authorization/errors.py:107-121`.
+
+### 15.8 SEC-29 — basename-only `repository_ref` resolution collapses distinct paths onto one directory
+
+Judging the author's other flagged decision, per the task brief: basename-only lookup under
+`SNAPSHOT_SOURCE_ROOT` versus joining a containment-checked full path versus a registry.
+
+**The traversal question is correctly closed.** I read `_resolve_repository_ref`
+(`service.py:218-258`) specifically looking for a string an operator could put in `repository_ref`
+that reaches outside `SNAPSHOT_SOURCE_ROOT`, and there isn't one — only `PurePosixPath(...).name`
+survives, backslashes are normalized to forward slashes first, and the result is re-checked against
+`root.resolve()`'s parents regardless. This is a genuinely stronger construction than "join and
+check containment," for the reason the author's decision record gives: there is no path-shaped
+input left to get wrong. **I endorse this half of the decision.**
+
+**What the decision record does not weigh: identity, not traversal.** Basename-only resolution
+means `file:///org-a/repos/pktcfg`, `file:///org-b/repos/pktcfg`, and bare `pktcfg` are
+*indistinguishable* — all three resolve to the identical `SNAPSHOT_SOURCE_ROOT/pktcfg`. Two
+missions whose operators each correctly declared a `repository_ref` that matches their own
+mission's row (so the SEC-15-pattern check in `authorize_mission` passes for both, honestly) can
+still end up snapshotting the exact same on-disk directory if their intended repositories merely
+share a final path component — silently substituting the wrong repository's content into one
+mission's immutable, authorized evidence record, with no error anywhere in the request path.
+
+**Not reachable today.** `create_mission` is still `NotImplementedYetError` (confirmed by reading
+`api/routers/missions.py:74-79`), so `repository_ref` is presently server-side fixture/ORM data, not
+attacker- or even operator-reachable through the HTTP surface. This is why it is Medium rather than
+High: it is a design gap in code that is real and merged, not a live bypass.
+
+**MEDIUM, and it should be closed before #12 lands `create_mission`,** not after — once mission
+creation is a real endpoint, whoever names the second repository with a colliding basename does not
+need malicious intent, only bad luck with directory naming (`pktcfg` is exactly the kind of short,
+generic name a second target is likely to also use).
+
+**Required fix, either is sufficient:** (a) a uniqueness constraint or startup check enforcing that
+every directory directly under `SNAPSHOT_SOURCE_ROOT` has a name used by at most one
+`repository_ref` value across all missions — cheap, and keeps the current traversal-proof
+resolution; or (b) move to the author's option (c), a registry mapping `repository_ref` to a
+specific directory, once #12 exists and there is a natural place to put it. I am not picking
+between them — that is an implementation call for the owning developer — but I am requiring that
+this decision explicitly re-examine the identity question, not only the traversal question, before
+`create_mission` ships.
+
+**Location** — `apps/control-api/authorization/service.py:218-258` (`_resolve_repository_ref`).
+
+### 15.9 SEC-30 — `archive_ref` is a shared namespace with no mission scoping at all
+
+**The gap.** Whenever a caller supplies `archive_ref` (for `source="upload"`, or for
+`source="git"` with `archive_ref` also set — both real, tested code paths per the PR body's scope
+decision 2), it is resolved under `SNAPSHOT_STAGING_ROOT` and is **never compared to the requesting
+mission in any way** (`service.py:261-286` — contrast with `_resolve_repository_ref`, which at
+least derives from the mission's own row). `SNAPSHOT_STAGING_ROOT` is one flat directory shared by
+every mission.
+
+**Exploit scenario, combined with SEC-27.** Suppose mission A's operator stages a file at
+`archive_ref="build.tar"` (a real path once an upload endpoint exists) but has not yet called
+`/snapshot`. Any operator — including one working an unrelated mission B — can supply
+`archive_ref="build.tar"` on **mission B's** `/snapshot` call. If mission B's request is processed
+first, mission B's `Artifact` row claims that digest; when mission A subsequently calls `/snapshot`
+with its own correctly-computed digest, it is refused with `SnapshotArtifactClaimedError` — a
+mission denied a snapshot of its *own* staged content because a different mission's operator
+happened to name the same staged file first.
+
+**Tempered by two things.** First, the current role model (`api/auth.py:83-85`) is a single flat
+`OPERATOR` role with no per-mission ACL — every operator can already act on every mission, so this
+is not a privilege-boundary crossing between distrusting parties under the system as designed
+today. Second, no upload endpoint exists yet to place operator-influenced content at a
+`archive_ref`-addressable path — `SNAPSHOT_STAGING_ROOT` is only reachable from fixtures in the
+test suite right now.
+
+**MEDIUM.** Real design gap, not a live bypass, in code that is merged and tested. The entire
+purpose of the content-addressed `Artifact` index with mission binding (the check SEC-27 is about)
+is to make evidence unambiguously belong to the mission that produced it; leaving the *path that
+produces the bytes* completely unscoped by mission undermines that purpose even under a flat trust
+model, because "which mission's operator gets first claim on a race" is not the same guarantee as
+"this snapshot is this mission's own declared content."
+
+**Required fix.** Before an upload endpoint ships: either namespace staged uploads per-mission
+(e.g. `SNAPSHOT_STAGING_ROOT/<mission_id>/<archive_ref>`, so one mission's `archive_ref` value
+cannot resolve to another mission's staged bytes at all), or require the staging mechanism to record
+which mission a staged file was intended for and check it in `_materialize_source`. This does not
+need to block #18 in isolation — no upload endpoint exists to exploit it through yet — but it must
+be resolved as part of, not after, whichever PR adds one.
+
+**Location** — `apps/control-api/authorization/service.py:261-286` (`_materialize_source`),
+`:201-215` (`_resolve_under_root`).
+
+### 15.10 SEC-31 — the module's own docstring cites tests that do not exist
+
+`apps/control-api/authorization/__init__.py:27-33` lists, as the evidence for property 4 ("no
+stage runs without an active record"):
+
+```
+— ::test_snapshot_without_an_authorization_is_refused,
+  ::test_preflight_without_an_authorization_is_refused,
+  ::test_start_without_an_authorization_is_refused
+```
+
+```
+$ grep -rn "test_preflight_without_an_authorization_is_refused\|test_start_without_an_authorization_is_refused" \
+    --include="*.py" apps/control-api
+(no output)
+```
+
+**Neither test exists anywhere in the codebase.** `preflight_mission` and `start_mission`
+(`api/routers/missions.py:150-168`) are unconditional `NotImplementedYetError` — they raise before
+any authorization check, any orchestrator call, or any business logic runs at all (confirmed by
+reading; `require_role` runs, then the router body is exactly one line). The property these two
+citations claim to demonstrate is not merely undemonstrated at those two stages — it cannot be,
+because nothing reachable at those routes touches the authorization gate yet.
+
+**LOW-MEDIUM.** No security control is weakened by this — it's a documentation-accuracy defect, not
+a code defect — but it sits inside the exact module whose stated purpose is to be the trustworthy
+record of what this gate enforces, in a codebase whose own standing rule is "a property is described
+as enforced only when a named test demonstrates it." A future reviewer or auditor reading this
+docstring as the authoritative summary (which its position and tone invite) would reasonably, and
+wrongly, conclude `preflight`/`start` already refuse without authorization.
+
+**Required fix.** Either write the two tests against the real `NotImplementedYetError` behavior (a
+test that a stub 501s regardless of authorization state is a legitimate, if weak, thing to assert
+and name), or remove the two false citations and replace them with an explicit statement of what
+§15.11 below states: the property is demonstrated at `INGEST` only, and is not yet reachable at the
+other nine stages.
+
+**Location** — `apps/control-api/authorization/__init__.py:27-34`.
+
+### 15.11 SEC-32 · INFO · `Authorization.snapshot_sha256` binding is inert — every authorization is unbound
+
+`contracts/authorization.py:48-53` documents `snapshot_sha256`: "Once set, the authorization covers
+this snapshot and no other." `covers_snapshot` (`:87-95`) returns `True` unconditionally whenever
+`record.snapshot_sha256 is None`.
+
+```
+$ grep -rn "snapshot_sha256" apps/control-api --include="*.py" | grep -v tests
+# every hit is a READ (covers_snapshot, load_active_authorization, latest_snapshot_sha256,
+# assert_stage_can_run) or a schema field declaration. No call anywhere sets
+# Authorization.snapshot_sha256 to anything other than its column default (NULL).
+```
+
+`authorize_mission`'s `Authorization.objects.create(...)` (`service.py:97-104`) never passes
+`snapshot_sha256`. Every `Authorization` row this PR can produce is therefore permanently unbound,
+and `covers_snapshot` returns `True` for it against any snapshot digest, forever.
+
+**Not a live gap today.** The scenario this binding exists to prevent — an authorization granted
+for one snapshot being reused to justify work on a *different, later* snapshot of the same mission
+— cannot currently occur regardless, because `create_mission_snapshot` is write-once per mission
+(`SnapshotAlreadyRecordedError`, independently confirmed serialized under real Postgres in §15.4).
+So the two guarantees currently overlap completely: one mission, one snapshot, one (or more renewed)
+unbound authorization, and `covers_snapshot` being permanently `True` changes nothing observable.
+
+**INFO, tracked rather than rated as a finding with a required fix**, because there is no code path
+today where it matters. Flagging it so nobody reads the schema docstring's "once set" language and
+assumes the binding is enforced — it is declared, and it is inert. Whoever implements
+re-authorization-after-re-snapshot, or any flow that produces a second snapshot for a mission (a
+future scope change), must either set this field or explicitly re-justify why it is still safe to
+leave unset.
+
+**Location** — `apps/control-api/authorization/service.py:97-104`; `contracts/authorization.py:48-53,87-95`.
+
+### 15.12 What was reachable, and what plainly was not — the nine-stub caveat
+
+Confirmed by reading `api/routers/missions.py` directly, not inferred from the PR body: **only
+`authorize_mission` and `create_snapshot` call into `authorization.service`.**
+`create_mission`, `list_missions`, `get_mission`, `preflight_mission`, `start_mission`,
+`pause_mission`, `cancel_mission`, `replay_events` and `stream_events` all raise
+`NotImplementedYetError` (or its SSE equivalent) unconditionally, **before** any authorization
+check, any state-machine call, or any business logic runs.
+
+**"No stage runs without an active authorization record" is demonstrated for exactly one stage:
+`INGEST`, via `/snapshot`.** It is not merely "weakly demonstrated" at `BASELINE`/`TRIAGE`/etc — it
+is **not exercised at all**, because those routes 501 unconditionally and never reach the
+orchestrator or the guard. This matches the PR body's own §"NOT RUN" item 4, and I am independently
+confirming it reads correctly, not softening or inflating it: the property this gate exists to
+prove holds for the one stage that is wired up, and is simply not yet testable — not "not yet
+proven," genuinely not yet testable — for the other nine.
+
+### 15.13 What I did not review
+
+1. **The frontend / OpenAPI-consumer side of any of this.** No `apps/command-center` code exists
+   yet to check against the (unchanged) contract.
+2. **`mypy`.** Not run — the PR body says the same.
+3. **The `.env.example` new keys' effect on the finale/development profile system checks** beyond
+   `manage.py check` passing on the test profile. I did not run the finale-profile checks against
+   these four new settings specifically.
+4. **A live upload endpoint.** Does not exist; SEC-30's exploit path is analyzed against the code as
+   written, not executed against a running upload flow.
+5. **Concurrent `authorize_mission` calls racing a `create_mission_snapshot` call for the same
+   mission** (as opposed to same-endpoint races, which §15.4/§15.5 cover). Not run.
+6. **Resource/DoS behavior of `build_tar_from_directory`** against a very large or very deep
+   directory tree (as opposed to `ingest_from_path`'s `max_bytes` ceiling, which I did verify —
+   §15.1 covers the file-permission and ceiling checks I ran and are not repeated here since they
+   held: `0600`/`0700` confirmed on disk, oversized source correctly refused mid-stream with the
+   temp file cleaned up, no orphan).
+7. **`infrastructure/`, `services/model-gateway/`, `adapters/cpp/`** — out of scope for this PR;
+   other agents' live work, untouched.
+
+### 15.14 Verdict
+
+**PASS WITH CONDITIONS.** No Critical finding. The core promise this gate exists to make — every
+id is checked against the *locked* mission row, not against what the caller claims — holds
+everywhere I probed it, including under real concurrent Postgres writers, which was the specific
+thing left unproven going into this review. Two adjacent checks (archive link-safety,
+cross-mission-claim atomicity) do not fully hold, and one already-flagged error-code choice is
+confirmed wrong. None of the seven findings below allow an unauthorized caller to bypass the
+authorization gate, forge a digest, or corrupt another mission's evidentiary record through any
+HTTP surface reachable today.
+
+**Conditions on merge:**
+
+1. **SEC-26 (HIGH)** — refuse tar symlink/hardlink members outright in `archive.py`, before any
+   extraction-capable stage is built on top of this module. This is the one condition I would treat
+   as a hard blocker on the *next* PR that adds archive extraction, even though it does not block
+   this one.
+2. **SEC-27 (MEDIUM)** — catch the `IntegrityError` on the cross-mission artifact-claim race and
+   re-raise `SnapshotArtifactClaimedError`; add a concurrency regression test.
+3. **SEC-28 (MEDIUM)** — `RepositoryOutOfScopeError` → `ErrorCode.UNSUPPORTED_REPOSITORY`, and
+   update the one test that currently pins the wrong code.
+4. **SEC-31 (LOW-MEDIUM)** — remove or make true the two false test citations in
+   `authorization/__init__.py`.
+
+**Tracked, not blocking this PR, but blocking the PR that makes them reachable:**
+
+5. **SEC-29 (MEDIUM)** — resolve the basename-collision identity gap before `create_mission` (#12)
+   lands and `repository_ref` becomes operator-reachable.
+6. **SEC-30 (MEDIUM)** — namespace `archive_ref`/staged uploads per-mission before an upload
+   endpoint ships.
+7. **SEC-32 (INFO)** — no action required now; re-examine `Authorization.snapshot_sha256` binding
+   the moment any flow can produce a second snapshot for one mission.
+
+I will re-verify SEC-26, SEC-27 and SEC-28 personally before the follow-on PRs that depend on this
+one merge.
+
+### 15.15 Decision records to fold into `.project/decisions.md`
+
+**DR-SEC-R4-1 · `RepositoryOutOfScopeError` is mislabeled and must move to `UNSUPPORTED_REPOSITORY`**
+
+**Decision** — `RepositoryOutOfScopeError.code` changes from `ErrorCode.INVALID_AUTHORIZATION` to
+`ErrorCode.UNSUPPORTED_REPOSITORY`.
+
+**Options considered** — (a) leave it as `INVALID_AUTHORIZATION`, on the grounds that it is "the
+closest analog" (the author's own hedge in the PR body); (b) reassign to
+`UNSUPPORTED_REPOSITORY`, matching the sibling `UnreadableArchiveError` in the same file; (c) add a
+new `ErrorCode` member for this specific case.
+
+**Pros and cons** — (a) is free but actively misleading: the check fires only after
+`require_active_authorization` has already proven the authorization valid, so the code contradicts
+a fact the system just established, and it sends operators toward the wrong remediation. (c) is a
+contract change requiring OpenAPI regeneration and a frontend rebuild, the exact cost DR-BE-1 (#110)
+and this PR's own second decision record both already ruled against paying for a distinguishable
+`details` payload. (b) is free, reuses an existing code with the correct semantics one function
+away in the same file, and requires updating exactly one test that currently pins the wrong value.
+
+**Cost implications** — (b): one line in `errors.py`, one assertion in one existing test.
+
+**Security implications** — (b) improves incident diagnosis and operator remediation for a refusal
+on the safety-boundary path ("authorized repositories... only" per `CLAUDE.md`); it does not change
+any control's behavior, only its label.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b).
+
+**Final approval authority** — cybersecurity (error-code semantics on a security-relevant refusal
+path are mine to call; CTO may arbitrate if this is judged a contract-stability question instead).
+
+**DR-SEC-R4-2 · Basename-only `repository_ref` resolution is accepted for traversal-safety, conditioned on an identity fix before `create_mission` lands**
+
+**Decision** — endorse the author's basename-only resolution under `SNAPSHOT_SOURCE_ROOT` as the
+traversal defense (no path-shaped input reaches outside the root); require a uniqueness invariant
+or a registry-based resolution before `repository_ref` becomes operator-reachable through
+`create_mission` (#12).
+
+**Options considered** — the author's own three, restated in §15.8: (a) basename-only (as built);
+(b) full relative path plus containment check; (c) an explicit registry.
+
+**Pros and cons** — (a) is correctly the strongest against traversal, for the reason the author's
+decision record gives — no path string is left to get wrong. It is silent on identity: two
+different intended repositories sharing a final path component collapse onto one directory, which
+is a correctness gap, not a traversal gap, and the author's decision record does not weigh it
+because it was framed as a traversal-only question. (b) reopens the traversal risk the author
+correctly avoided. (c) resolves both but has no natural home before #12 exists.
+
+**Cost implications** — near-zero now (a directory-naming convention plus a startup check); a
+larger, but still small, change if (c) is chosen once #12 lands.
+
+**Security/data-integrity implications** — without a fix, the immutable, authorized snapshot record
+— this system's central evidentiary claim — can silently contain the wrong repository's content for
+a mission whose own declared `repository_ref` was correctly authorized. That is worse than a refused
+request; it is an unnoticed wrong answer.
+
+**Scalability implications** — none at current mission volume; grows with the number of distinct
+target repositories sharing directory-naming conventions.
+
+**Recommendation** — ship (a) as built for #18 (traversal safety is real and matters now); require
+the identity gap closed as an explicit condition on #12, not deferred indefinitely.
+
+**Final approval authority** — CTO for the resolution mechanism chosen; cybersecurity for whether
+the condition on #12 is satisfied before that PR merges.
+## 15. Re-verification — 2026-08-08 · #110's SEC-15/16/18, and #111's SEC-24/25
+
+Both conditions personally re-verified, as promised in §13.6 and §14.10. Executed in fresh
+isolated worktrees, independent scripts, not the fix's own tests.
+
+### 15.1 #110 · SEC-15, SEC-16, SEC-18 — all three CLOSED
+
+At `48fee55` (`feat/state-machine`, now merged). Full suite first:
+
+```
+$ cd apps/control-api && pytest
+262 passed, 2 warnings in 1.64s
+```
+
+**SEC-15.** `orchestrator/candidates.py:190-201` — `record_verification` now loads the patch
+under the same lock and refuses when `patch.mission_id != mission.id`, raising the new
+`CrossMissionEvidenceError`. Re-ran the exact §13 B4 attack — freeze mission A on a `REJECTED`
+candidate, create scratch mission B, verify B's candidate into A:
+
+```
+[BLOCKED]  SEC-15: verify mission B's candidate into frozen mission A
+           CrossMissionEvidenceError: Patch candidate a8d83ea2-… belongs to mission
+           296cb35b-…, not 6d1224…
+```
+
+**SEC-16.** New module `missions/lifecycle.py` — a per-thread context flag
+(`lifecycle_write_permitted`), claimed only inside `transitions.transition` and
+`record_verification`'s freeze write, and checked by both `Mission.save()` and a
+`MissionQuerySet.update()` override for exactly four fields (`state`, `paused_from`, `verdict`,
+`verification_started_at`). Re-ran both §13 attacks:
+
+```
+[BLOCKED]  SEC-16a: assert_transition(pruned set) + Mission.save()
+           MissionStateWriteError: Write to mission lifecycle field(s) ['state', 'verdict']
+           outside orchestrator.transitions.transition.
+[BLOCKED]  SEC-16b: CREATED -> VERIFIED via queryset .update()
+           MissionStateWriteError: Bulk update of mission lifecycle field(s)
+           ['state', 'verdict'] outside orchestrator.transitions.transition.
+```
+
+Two controls, because a guard this shaped is only good if it isn't blanket:
+
+```
+[ok]  ordinary field (name) still writable via Mission.save()            -> succeeds
+[ok]  orchestrator.transitions.transition() still reaches VERIFIED       -> succeeds, state=VERIFIED
+```
+
+Also checked BUG-020 (an author-stated widening, not one of my three conditions): an abort
+(`VERIFY -> FAILED`) with a deliberately corrupted `Authorization` row still succeeds, confirming
+aborts don't get wedged by evidence that fails to load — the same reasoning §13's SEC-20 asked
+for, applied by the author to authorization as well as verification records. Confirmed.
+
+**SEC-18.** `config/env.py`'s new `_libpq_options` — an explicit `LIBPQ_TLS_PARAMETERS`
+allowlist, fail-closed on anything else:
+
+```
+sslmode=require                    OPTIONS={'connect_timeout': 5, 'sslmode': 'require'}
+sslmode=verify-full+sslrootcert    OPTIONS={..., 'sslmode': 'verify-full', 'sslrootcert': '/etc/ssl/ca.pem'}
+sslmode=disable                    OPTIONS={'connect_timeout': 5, 'sslmode': 'disable'}
+no query string at all             OPTIONS={'connect_timeout': 5}
+```
+
+**The four DSNs that were byte-identical in §13 are now four different configurations.**
+Unrecognised or malformed parameters refuse to boot rather than dropping silently:
+
+```
+[refused]  sslfoo=bar               -> ImproperlyConfigured: does not understand 'sslfoo'
+[refused]  application_name=x       -> ImproperlyConfigured: does not understand 'application_name'
+[refused]  sslmode set twice        -> ImproperlyConfigured: which one wins would be an accident
+[refused]  sslmode=yolo             -> ImproperlyConfigured: libpq does not define 'yolo'
+```
+
+All three conditions closed. #110 merged with no open blocker from this seat.
+
+### 15.2 #111 · SEC-24, SEC-25 — both CLOSED, and SEC-25's number independently reproduced twice over
+
+At `fda584b` (`feat/model-gateway`, on top of #111's CTO-conditions commit).
+
+**A correction was raised against my original SEC-25 figure mid-review** — a five-minute check
+against `idna==3.10` reported 0.045s at 60,000 characters, not ~100s. I re-verified from scratch
+rather than defending the number: reproduced 99.8s (direct `idna.encode`) and 122.5s (through
+`classify()`) across two fresh processes, then root-caused it in the installed `idna` source —
+`check_label()` calls `valid_contexto()` once per codepoint, and for the advisory's payload
+(`"٠" * N`, Arabic-Indic digit zero) that function does an O(N) scan per call, before the
+length check that would otherwise short-circuit an ordinary long string. A differential over five
+control shapes at the same length — ordinary ASCII, digits, dotted labels, deeply nested labels,
+punycode-prefixed — showed all five 150–400× faster than the ContextO payload, which is exactly
+why none of the corrector's three adversarial shapes reached it. Posted in full on #111; not
+repeated here at length.
+
+**SEC-24 fix** — `_unwrap` now reports *which* mechanism produced an effective address
+(`ipv4-mapped`, `nat64`, `6to4`, or none), and `_classify_address` refuses `nat64`/`6to4` outright
+once they reach the allow decision, citing RFC 3056 §2 and RFC 6052 §3.1 for why neither
+mechanism is a legitimate carrier of a non-global address. `ipv4-mapped` is untouched — correctly,
+since that notation genuinely does deliver to the embedded address on a dual stack. Re-ran all six
+original attack cases plus two originally-correct controls plus three ipv4-mapped controls:
+
+```
+[ok]  6to4 wrapping 127.0.0.1        -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  6to4 wrapping 10.0.0.1         -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  6to4 wrapping 192.168.1.1      -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64 wrapping 127.0.0.1       -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64 wrapping 10.0.0.1        -> translation-wrapper-non-global   (was: allowed-network)
+[ok]  NAT64-local wrapping 192.168.0.1 -> translation-wrapper-non-global (was: allowed-network)
+[ok]  6to4 wrapping 8.8.8.8 (author's original case)   -> still global-address
+[ok]  NAT64 wrapping 8.8.8.8                            -> still global-address
+[ok]  ipv4-mapped loopback   -> still allowed-network (control, correctly unchanged)
+[ok]  ipv4-mapped RFC1918    -> still allowed-network (control, correctly unchanged)
+[ok]  ipv4-mapped metadata   -> still denied-network (control, correctly unchanged)
+```
+
+MISMATCHES: 0. The resolver check (`assert_resolves_inside_boundary`) inherits the fix — a
+declared name resolving to a 6to4/NAT64-wrapped private address is now refused, while one
+resolving to a plain or ipv4-mapped loopback still resolves. Confirmed with four cases, 0
+mismatches.
+
+**SEC-25 fix** — `idna` bumped to `3.18` (`pip-audit`: **No known vulnerabilities found**), plus
+`_oversized_hostname_reason` — an RFC 1035 253/63 length check applied to the **raw string,
+split on literal dots**, before `idna.encode()` at both call sites (`classify()` and
+`normalise_service_names`). Splitting on the literal string rather than running IDNA processing
+first is the right design: the SEC-25 payload is one label with no dots, so a check that
+IDNA-processed the string before finding the labels would already have paid the cost it exists to
+avoid. Re-measured the exact advisory payload through the real call site:
+
+```
+n=  1000   0.0003s  rule=host-too-long
+n=  5000   0.0001s  rule=host-too-long
+n= 60000   0.0009s  rule=host-too-long
+```
+
+**99.8–122.5s to 0.0009s.** Also confirmed the two halves are independently effective rather than
+one masking the other: `idna==3.18` alone (bypassing the application guard, calling
+`idna.encode` directly on a 60,000-character payload) returns in **0.0000s** with `IDNAError:
+Domain too long` — the library's own fix holds on its own, and the length guard is real defense in
+depth against a future regression, not decoration.
+
+**The bypass table — re-run by me, not read.** 60 cases became 68; each addition tagged and
+documented:
+
+```
+$ python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py --quiet
+GATEWAY  mismatches: 0 of 68
+CONTROL  mismatches: 39 of 68  (gated at exactly 39)
+```
+
+Eight new rows in `gateway/tests/bypass_table.py`, tagged `SEC-24`/`SEC-25`: four attack cases
+(6to4/NAT64 × private/loopback), one link-local case, one `ipv4-mapped` control asserting it
+**must stay allowed**, and two SEC-25 cases — the actual 60k ContextO payload and a 300-char
+ordinary-ASCII control confirming the length guard refuses on length alone, not on script.
+
+### 15.3 The import-check false positive, verified by injection rather than by reading
+
+Not one of my three conditions, but I hold this invariant (C5) and the claim was specific enough
+to check. `#110` landing on `main` added `apps/control-api/tools/export_openapi.py`, which does
+`from http.client import responses as _STDLIB_REASON_PHRASES` — a status-reason-phrase dict, not
+a client — and the architecture test's original root-level check (`"http" in HTTP_CLIENT_ROOTS`)
+flagged it.
+
+**The fix removes `"http"` from the root-level set entirely** and replaces it with
+`_imports_http_client_connection`, an AST walk checking specifically for
+`http.client.HTTPConnection`/`HTTPSConnection` — the two classes that actually open a socket —
+or the bare `import http.client`.
+
+```
+$ pytest tests/architecture/ -q -rs
+47 passed in 0.74s
+```
+
+Confirmed the real file's import does not trip it, then injected three violations myself and
+reverted each:
+
+```
+inject "import http.client"                                    -> FAILED, correctly caught
+inject "from http.client import HTTPSConnection"                -> FAILED, correctly caught
+inject "from http.client import responses, HTTPConnection"      -> FAILED, correctly caught
+  (mixed import: the safe name does not shield the dangerous one in the same statement)
+```
+
+Worktree clean after each revert. The reasoning holds, and the fix is precise rather than merely
+narrower — the mixed-import case was not claimed by the author and I tried it anyway; it is
+caught.
+
+### 15.4 Verdict
+
+**#110: no open condition from this seat.** SEC-15, SEC-16, SEC-18 all closed and independently
+re-verified against the exact attacks that opened them.
+
+**#111: no open condition from this seat.** SEC-24 and SEC-25 both closed and independently
+re-verified, including a full re-derivation of SEC-25 after a correction was raised against my
+original number — the corrected reproduction is stronger than the original finding, not weaker:
+it is now root-caused in the library's source and differentially proven against five control
+shapes, not just timed.
+
+**#78 may close.** Condition from §14.5 stands: SEC-02 and SEC-19 filed against #93 with an owner
+and a milestone before closing, same reasoning as §12.3 and §14.5 — not reargued here.
+
+No Critical is open anywhere in this pack. Both PRs are cleared for merge on the security axis.
+
+---
+
+## 17. Round 5 — 2026-08-08 · PR #113 `feat/sandbox-and-fixtures` · the canonical subprocess jail, `packages/sandbox/`
+
+Reviewed at `aa8e362` (`origin/feat/sandbox-and-fixtures`), diffed against `origin/main` at
+`1dca345`. Two isolated worktrees used: `/Users/manu/Documents/GitHub/.worktrees/pr113-review`
+(detached at the PR head, for running the actual test suites and adversarial probes) and
+`/Users/manu/Documents/GitHub/.worktrees/security-sandbox-jail` (branch
+`review/security-sandbox-jail`, for this document). No code in `packages/sandbox/` was edited.
+No other role's files were touched. Per D-053/D-054, this sign-off is a named standing condition
+of the CTO's ruling that made `packages/sandbox/` (built from #113) the canonical subprocess jail
+over the rival `adapters/cpp/` implementation (#120).
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Five new findings (SEC-33…SEC-37): one High
+(SEC-33), two Medium (SEC-34, SEC-35), one Low (SEC-36), one Informational (SEC-37). D-054's
+central claim — that `limits_applied` is measured from a real per-run `setrlimit()` outcome
+carried across the fork boundary, never guessed from `sys.platform` — **holds**, and I forced the
+exact failure mode the rejected implementation was vulnerable to and confirmed it does not
+recur (§17.2). What does not fully hold is the property this PR's own header table lists
+unconditionally: "the whole process group dies, no orphans." A trivial, one-line, non-exotic
+technique (a grandchild calling `os.setsid()`) defeats it completely and lets a process survive
+the wall-clock timeout indefinitely (§17.3) — this is the specific thing the task brief asked me
+to attack, and it succeeded.
+
+### 17.1 What I ran, for real, this session
+
+```
+$ cd .worktrees/pr113-review && python3.12 -m venv .venv && source .venv/bin/activate
+$ pip install -r requirements-dev.txt        # exact pins, no resolution drift
+Successfully installed ... jsonschema-4.26.0 ... pytest-9.1.1 ... ruff-0.16.1 ...
+
+$ pip list | grep -i django; python -c "import django"
+                                              # (no output from grep)
+ModuleNotFoundError: No module named 'django'
+```
+
+**The isolation-from-`apps/control-api` claim is real, not asserted.** `pytest-django` is a
+*test-runner plugin* installed transitively by `requirements-dev.txt`; the Django framework
+itself is not installed in this venv at all, and `import django` fails. `packages/sandbox/tests`
+ran clean against that:
+
+```
+$ pytest packages/sandbox/tests -q -rs
+.........s....................                                           [100%]
+SKIPPED [1] packages/sandbox/tests/test_jail.py:116: RLIMIT_AS is not enforced on Darwin: ...
+29 passed, 1 skipped in 19.96s
+```
+
+Then the Linux half, in the same base image the PR body cites, built fresh (not the author's
+container):
+
+```
+$ docker run --rm -v "$PWD":/work -w /work python:3.12-slim bash -lc \
+    "pip install -q -r requirements-dev.txt && pytest packages/sandbox/tests -q -rs"
+ss.........s..................                                           [100%]
+SKIPPED test_baseline_in_jail.py:36 / :67: cmake not installed
+SKIPPED test_jail.py:160: this is the Darwin-specific half of the memory_bytes measurement ...
+27 passed, 3 skipped in 11.68s
+```
+
+`test_memory_limit_stops_an_allocator` is in that 27 — a real 900 MB allocation, actually
+stopped by `RLIMIT_AS` inside `python:3.12-slim`, cross-checked in the same test against
+`result.limits_applied.get("memory_bytes") is True`. This is not a mocked assertion; it is the
+kernel doing the thing the field claims happened.
+
+```
+$ ruff check packages/sandbox
+All checks passed!
+
+$ pip install pip-audit && pip-audit -r requirements-dev.txt
+No known vulnerabilities found
+
+$ grep -rn "TOKEN\|SECRET\|PASSWORD\|API_KEY\|-----BEGIN" packages/sandbox --include="*.py" --include="*.md"
+# only monkeypatch.setenv("CONTROL_API_OPERATOR_TOKEN", "a-real-looking-secret-value") and
+# DJANGO_SECRET_KEY", "another-secret") in test_environment_is_scrubbed_to_the_allowlist —
+# placeholder test fixtures asserting these names are *not* passed through, not real secrets.
+```
+
+Every figure the PR body claims (55 passed/1 skipped on macOS in the earlier commit, 30/1 and
+30/3 after D-054's five new tests, ruff clean) reproduces independently in a venv I built myself
+from the pinned files — not taken on report.
+
+### 17.2 D-054's claim, attacked directly — no false positive, in either direction
+
+The task was explicit: force a `setrlimit()` failure inside the child and confirm the pipe
+carries the real outcome back, rather than defaulting to a claim of success — the exact failure
+mode `sys.platform != "darwin"` produced in the rejected implementation.
+
+**Forced failure → must report `False`, not default `True`:**
+
+```python
+def fake_setrlimit(which, limits):
+    if which in (resource.RLIMIT_AS, resource.RLIMIT_NPROC):
+        raise OSError(1, "Operation not permitted (forced by probe)")
+    return real_setrlimit(which, limits)
+
+with patch("resource.setrlimit", side_effect=fake_setrlimit):
+    with Jail.create(policy) as jail:
+        result = jail.run(["/bin/echo", "hello"])
+```
+```
+exit: 0
+limits_applied: {'memory_bytes': False, 'max_processes': False}
+OK: forced setrlimit failure correctly reported as False, not defaulted to True
+```
+
+**Forced failure on a *mandatory*, untracked limit (`RLIMIT_CPU`/`FSIZE`/`CORE`, set outside the
+try/except in `apply_limits`) → must fail loud, not silently proceed unprotected:**
+
+```
+run() raised as expected on a mandatory-limit setrlimit failure: SubprocessError: Exception
+occurred in preexec_fn.
+```
+
+Both directions hold. The mechanism described in `jail.py:349-397` and the README's "a per-run
+record, not a platform guess" section is accurate: the pipe is opened before `fork()`, written
+inside `preexec_fn` from the real outcome of each tracked `setrlimit()` call, closed before
+`exec()`, and read back with a bounded `select()` deadline rather than an unconditional block.
+I could not make it claim a limit was applied when the syscall that would apply it had actually
+failed, in either the tracked pair (`memory_bytes`/`max_processes`) or the untracked mandatory
+set. **D-054's core claim is verified, not merely read.**
+
+### 17.3 SEC-33 — `os.setsid()` in a grandchild survives the wall-clock timeout: the "no orphans" claim is not general, only the one shape the named test covers
+
+**HIGH.** `packages/sandbox/README.md`'s header table claims, unconditionally, "The timeout
+kills grandchildren — no orphans," backed by `test_timeout_kills_grandchildren_leaving_no_orphans`
+— and the CTO's own D-053 ruling names this exact test as the decisive advantage over the rival
+implementation ("orphan-process coverage... the property the module's own header calls out as the
+reason for `os.setsid()`"). The task brief asked directly: "Try to make a child survive the
+timeout." It survives.
+
+**The mechanism.** `_kill_group` (`jail.py:480-517`) signals via `os.killpg(pgid, sig)`, where
+`pgid` is captured once, from the direct child, right after spawn (`jail.py:487-490`).
+`apply_limits` (`jail.py:359-397`) calls `os.setsid()` on that direct child, making it a session
+and process-group leader specifically so `killpg` can reach everything under it — this is stated
+as the whole point in the module's own docstring. But `os.setsid()` is available to *any*
+process that is not already a group leader, including a grandchild the jailed command itself
+forks. A grandchild that calls it moves itself into a brand-new session with a new pgid of its
+own — no longer a member of the pgid `_kill_group` signals — and `killpg` on the original group
+never reaches it.
+
+**Executed PoC.** A direct jail child forks a grandchild; the grandchild calls `os.setsid()`,
+records its own pid, and sleeps:
+
+```python
+policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=2.0, kill_grace_seconds=0.5)
+code = """
+import os, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()                       # detach into a new session/pgid
+    open(pidfile, "w").write(str(os.getpid()))
+    time.sleep(600)
+else:
+    time.sleep(600)
+"""
+with Jail.create(policy) as jail:
+    result = jail.run([sys.executable, "-c", code])
+```
+```
+result: ... -> WALL_CLOCK limit (2.02s wall, 0.01s cpu, 13.2 MB peak)
+limit_hit: WALL_CLOCK
+SURVIVOR: pid 71594 is STILL ALIVE after jail exit + grace period -- ESCAPE CONFIRMED
+```
+
+The jail correctly detects and reports the wall-clock timeout on the direct child (`limit_hit`
+is `WALL_CLOCK`, and `Jail.close()`/`__exit__` ran and removed the jail root). The grandchild
+that detached is not in the killed group, receives neither `SIGTERM` nor `SIGKILL`, is
+independently confirmed alive with `os.kill(pid, 0)` after the full grace period and jail
+teardown, and would run for however long its own workload takes — unbounded, since it is now
+outside every limit this module sets (`RLIMIT_CPU`/`RLIMIT_AS`/wall-clock all belong to the
+jailed run's own bookkeeping, not to a kernel-level container it can't escape).
+
+**Why this is more than a hypothetical edge case.** This is exactly the technique the module's
+own `test_timeout_kills_grandchildren_leaving_no_orphans` was written to rule out — and does rule
+out, for the one shape it tests: an ordinary `subprocess.Popen()`-spawned grandchild that stays
+in the inherited process group. The property-table row makes no such qualification; it reads as
+a general guarantee. A build tool that daemonizes a background helper (several real ones do —
+ccache daemons, some generator backends) needs no malicious intent to hit this, and once #28
+(fuzzing, explicitly gated on this module being replaced by #15's namespace isolation) is in
+scope, a target that deliberately detaches to survive a kill is a completely unsurprising thing
+for adversarial or even just misbehaving code to do.
+
+**Not Critical, because:** nothing in the currently-merged consumer path (`test_baseline_in_jail`
+configuring/building/testing the trusted demo target) deliberately detaches, so today's actual
+D3 usage is not exposed. It is High rather than Medium because the property is claimed
+unconditionally in the header table that is this PR's own stated contract ("every claim... names
+the test that demonstrates it"), the named test demonstrates a narrower thing than the row's
+plain-English claim, and the module is the explicit, near-term dependency for #28 running
+untrusted code — the exact context where this gap stops being theoretical.
+
+**Required fix, either is acceptable, in order of preference:**
+1. Track the full descendant tree by PID (e.g. `PR_SET_CHILD_SUBREAPER` on the jail process plus
+   a walk of `/proc/*/stat` for reparented descendants on Linux, or an equivalent), not just the
+   one process group captured at spawn, and kill everything found — this is the actual fix and
+   the real reason #15's namespace/container isolation exists.
+2. At minimum before merge: **correct the claim.** Re-word the README's property-table row and
+   the module's opening docstring to state the guarantee accurately — "kills every descendant that
+   remains in the spawned process group; a process that calls `setsid()` to leave it is not
+   caught, and closing that gap in general requires PID-namespace isolation (#15)" — matching the
+   same honesty standard this document already holds the `RLIMIT_AS`/Darwin and
+   `RLIMIT_NPROC`/per-user caveats to. A corrected claim with a linked follow-up issue is an
+   acceptable interim condition; an unqualified claim next to a test that does not demonstrate it
+   is not.
+3. Either way, this specific property must be closed — by fix or by an explicit, tracked
+   limitation with an owner — **before `packages/sandbox` is relied on for #28.**
+
+**Location** — `packages/sandbox/jail.py:480-517` (`_kill_group`, `_group_alive`), the property
+row in `packages/sandbox/README.md`'s header table, and the parallel claim in `jail.py`'s module
+docstring table (`jail.py:38`).
+
+### 17.4 SEC-34 — the CI stale-path guard warns, but exits 0: the exact "a check nobody can fail" failure mode it was written to close
+
+**MEDIUM.** `469240b`'s own commit message states the intent precisely: make a stale
+`services/sandbox` reference (or any future path that goes stale the same way) "fail loudly
+with a warning instead of silently collecting zero tests." The implementation does not do that.
+
+```yaml
+# .github/workflows/ci.yml
+for dir in packages/sandbox packages/test-fixtures; do
+  if [ ! -d "$dir" ]; then
+    echo "::warning::$dir does not exist — nothing to test. If it was moved, this path is now stale."
+    missing=1
+  fi
+done
+if [ "$missing" = "1" ]; then
+  exit 0
+fi
+```
+
+`exit 0` on the missing-directory branch means the step — and the job — is reported **green**.
+A `::warning::` annotation is a small yellow marker on the run summary page, not a failed check;
+it does not block a merge, does not fail a required status check, and is easy to miss in a fast
+merge flow. If `packages/sandbox/` (or `packages/test-fixtures/`) is ever renamed again, deleted,
+or the pathspec silently goes stale the same way `services/sandbox` did during this very PR's own
+history (§17.5), CI reports success while collecting zero tests from either suite — which is
+verbatim the bug this step's own comment says it exists to prevent: "a check nobody can fail is
+a document."
+
+**Exploit scenario.** A future PR renames `packages/sandbox` (as this one already did once) and
+misses updating this one CI reference (as `4a7fd65`/`469240b`'s own predecessor commit did for
+`services/sandbox`, caught only by the author's own `git status`, not by CI). Every sandbox test
+— including the ones this review just used to verify `limits_applied` and the memory ceiling —
+stops running in CI, and the merge goes through green.
+
+**Required fix.** Fail the job (`exit 1`) when a directory that is expected to exist today is
+missing, rather than treating "missing" as an unconditional pass. If a genuinely optional,
+not-yet-built path is needed later, gate the pass-vs-fail decision on something that can't
+silently regress (e.g. a tracked issue reference or an explicit allow-list), not a bare existence
+check that always resolves to success.
+
+**Location** — `.github/workflows/ci.yml`, the "Fixture and sandbox tests" step (see §17.1 for
+the exact block).
+
+### 17.5 SEC-35 — `LimitKind.FILE_SIZE` is dead: a run genuinely stopped by `RLIMIT_FSIZE` is reported as `limit_hit == NONE`
+
+**MEDIUM.** `errors.py` defines `LimitKind.FILE_SIZE` as one of the taxonomy's named members, and
+`JailPolicy.max_file_bytes` sets `RLIMIT_FSIZE` unconditionally in every run. `Jail._classify`
+(`jail.py:543-588`) — the function whose entire job is "say which limit stopped the command, or
+`NONE`" — never once inspects for a file-size failure. `FILE_SIZE` is unreachable code.
+
+**Executed PoC**, a 4 MiB policy against a script writing 40 MiB to one file:
+
+```python
+policy = JailPolicy(cpu_seconds=20, wall_clock_seconds=20)
+object.__setattr__(policy, "max_file_bytes", 4 * 1024 * 1024)
+# ... open("big.bin","wb") and write 40 x 1 MiB chunks ...
+```
+```
+result: ... -> exit 1 (0.02s wall, 0.02s cpu, 14.1 MB peak)
+limit_hit: NONE
+stderr tail: OSError: [Errno 27] File too large
+actual file size on disk: 4194304
+```
+
+The kernel enforced the limit correctly — the file is capped at exactly the policy's 4 MiB, and
+the process actually stopped because of it (`OSError: File too large`, `errno.EFBIG`). But
+`result.limit_hit` reports `NONE` — the same value it reports for an unrelated ordinary command
+failure. `_classify`'s own docstring says the honest part of the function "is what it refuses to
+claim" about attributing failures to the wrong cause; here it does the opposite of what it
+promises for this specific limit, silently.
+
+**Why this matters beyond a taxonomy gap.** A caller — the orchestrator surfacing a mission
+event, or the evidence bundle recording why a stage failed — reads `limit_hit` specifically so it
+does not have to parse stderr text to explain a failure. For every other limit this module
+enforces, that promise holds (`CPU`, `MEMORY`, `WALL_CLOCK`, `OUTPUT` are all correctly
+classified, confirmed by the existing test suite and, for memory, independently by me in §17.1).
+For `FILE_SIZE` specifically, a build that failed because it hit a real, intentional resource
+ceiling is indistinguishable in the record from a build that simply crashed on its own — the
+same "a zero dressed as a result" failure mode D-010/D-023 already legislate against elsewhere in
+this project, one level down.
+
+**Required fix.** In `_classify`, detect the `RLIMIT_FSIZE` case (e.g. `SIGXFSZ` when the signal
+is delivered rather than converted to `EFBIG`, and/or `EFBIG`/`"File too large"` in `stderr` the
+way `MEMORY`'s allocator-failure markers are already matched) and return `LimitKind.FILE_SIZE`.
+Add a named test exercising it — this module's own standing rule.
+
+**Location** — `packages/sandbox/jail.py:543-588` (`_classify`), `packages/sandbox/errors.py:20`
+(`LimitKind.FILE_SIZE`, defined, never produced).
+
+### 17.6 SEC-36 — `max_file_bytes`'s docstring overclaims disk protection it does not provide
+
+**LOW.** `policy.py`'s `max_file_bytes` field docstring: "Stops a runaway log or a pathological
+build product filling the disk." `RLIMIT_FSIZE` bounds the size of any *single* file; it does not
+bound the sum of many files a process writes. A build product that fills the disk by writing many
+files each individually under the 512 MiB default is not stopped by this limit at all — SEC-35's
+PoC demonstrates the per-file cap works exactly as designed; nothing here demonstrates (or could,
+given what `RLIMIT_FSIZE` is) the aggregate claim the docstring makes. This specific claim is not
+in the README's tested-property table, so it is not a table-vs-test mismatch the way SEC-33 is —
+it is an internal-documentation overclaim a future integrator could reasonably rely on.
+
+**Required fix.** Narrow the docstring to what is true ("stops a single runaway file from growing
+past this size — does not bound total disk usage across multiple files") — the same kind of
+correction §17.3 asks for on the orphan claim, at lower stakes.
+
+**Location** — `packages/sandbox/policy.py`, `max_file_bytes` field docstring.
+
+### 17.7 SEC-37 — `preexec_fn` does non-trivial work in a process the module itself documents as multi-threaded (informational)
+
+**INFORMATIONAL / LOW — not independently reproduced as a failure.** CPython's own documentation
+warns that `preexec_fn` is "NOT SAFE to use in the presence of threads" in the calling process,
+because `fork()` duplicates only the calling thread; a lock held by another thread at the moment
+of `fork()` (e.g. in the memory allocator) is duplicated in a permanently-locked state in the
+child, and any further allocation in the child can then hang. `apply_limits`
+(`jail.py:359-397`) is not trivial: it calls `os.setsid()`, five `setrlimit()` calls,
+`json.dumps()`, and `os.write()` — and `Jail.cancel()` (`jail.py:208-218`) is explicitly designed
+to be called from a second thread while `run()` is blocked on the child in the first, which is
+precisely the shape the warning describes. `test_cancel_stops_a_running_command_from_another_thread`
+passed in both my macOS and Linux runs with no hang observed, so this is a latent risk class, not
+a demonstrated defect — the trigger is timing-dependent and I did not reproduce a hang in this
+session.
+
+**The mitigating factor, and why this does not rise above informational.** If `preexec_fn` does
+deadlock or otherwise fail to complete, the parent's bounded `select()` read in
+`_read_limits_applied` (`jail.py:445-478`) times out after ~2.5 s and returns `{}` — which the
+field's own docstring defines as "the measurement itself could not be recovered... not that
+nothing was applied." That is the honest direction to fail in: ambiguous, not a false claim of
+protection. The failure mode this hazard could produce is a slower or hung run, not a silent
+false positive on `limits_applied`.
+
+**Suggested follow-up, not a merge condition.** If a future host process embeds this module in a
+context with many real background threads (the orchestrator/worker, not this test suite), revisit
+whether the pipe-report logic in `apply_limits` can be simplified to reduce what runs post-fork,
+or moved to a wrapper that does the `setrlimit` calls via `os.posix_spawn`'s `file_actions`/
+`setsigmask` primitives instead of `preexec_fn`, which does not carry the same warning.
+
+**Location** — `packages/sandbox/jail.py:339-397` (`_spawn_and_wait`, `apply_limits`).
+
+### 17.8 The `packages/sandbox/` → `services/sandbox/` rename — verified clean
+
+Grepped the entire PR-branch tree, not just the diff:
+
+```
+$ grep -rln "services/sandbox\|services\.sandbox" . --exclude-dir=.git
+.github/workflows/ci.yml
+$ grep -n "services/sandbox" .github/workflows/ci.yml
+147:  # This references packages/sandbox/, not services/sandbox/. An earlier version of
+149:  # still pointed at services/sandbox/ — the exact stale-path failure mode BUG-016
+```
+
+Both hits are prose in a comment *narrating* the history of the stale-path bug the author caught
+and fixed (§17.5's neighboring CI section) — not a live reference. No functional path,
+import, `pytest` invocation, or fixture payload anywhere in this PR's tree points at the
+now-nonexistent `services/sandbox`. I independently re-verified both self-reported fixes:
+
+- `469240b` (the `git add` pathspec failure) — diffed against its parent; the commit genuinely
+  contains the 226-line change its message describes (CI wiring, `limits_applied` end to end,
+  README updates, `jsonschema` pin), not an empty or partial diff.
+- `aa8e362` (the stale `services/sandbox/README.md` string embedded in the committed fixture) —
+  confirmed the only change is the one `LogPayload` text string in
+  `build_mission_fixture.py` and the four corresponding bytes in the regenerated
+  `mission-pktcfg-001.events.jsonl`; nothing else in the fixture shifted.
+
+**No stale reference survives.** This part of the task closes clean.
+
+### 17.9 CI wiring — the isolation claim is real (with the one caveat in §17.4)
+
+Confirmed in §17.1: `packages/sandbox/tests` runs green with only `requirements-dev.txt`
+installed, Django genuinely not importable in that environment. The claim "no
+`apps/control-api` dependency" is true today, verified by me, not assumed from the PR body. The
+one open issue is not whether the isolation is real — it is that the CI step meant to *keep it
+enforced over time* degrades to a no-op instead of a hard failure if the path it checks for ever
+goes stale again (SEC-34).
+
+### 17.10 What I did **not** review
+
+- **`packages/test-fixtures/`** — out of this task's scope (the subprocess jail specifically);
+  not reviewed here at all, including `sse_replay.py`'s loopback-binding claim, which §11–§16 of
+  this document have not touched either. A separate pass, if wanted.
+- **`adapters/cpp/` and `workers/baseline/run.py`'s consumer-side import updates** — per D-053
+  these are explicitly out of #113's own scope and belong to a different, in-flight PR/seat; the
+  task brief also named `adapters/cpp/` as another agent's active lane this session. I confirmed
+  (§17.8, and a direct grep of current `main`) that neither directory currently imports
+  `sandbox` at all, so there is nothing stale to find yet — but the reconciliation itself (moving
+  them onto `packages.sandbox`, per D-053's "one integration detail flagged, not resolved here")
+  is unverified and is someone else's work to do and mine to re-check later.
+- **`probe_limits()` wired into a real preflight check** — the PR body itself lists this as not
+  done (#12's surface); nothing to review because it does not exist yet.
+- **RLIMIT_NPROC's actual behavior under a real fork bomb** — the README already discloses this
+  honestly ("a brake on a fork bomb, not a defence against one... per-user on most kernels"), and
+  no property-table row claims it is enforced or tested, so there is no claim-vs-test mismatch to
+  chase here the way there is for `FILE_SIZE` (SEC-35) or the orphan claim (SEC-33). I did not
+  empirically fork-bomb this sandbox to confirm the disclosed weakness's exact shape — the
+  disclosure is honest as written, so I did not spend the session budget re-deriving it.
+- **TOCTOU on `Jail.resolve()`** — a symlink swapped in between `resolve()` returning and the
+  command actually running. Given the jail directory is `0700`, created per-mission, and the only
+  local actors are the operator's own processes (no untrusted concurrent local user in this
+  system's threat model), I judged this low-value to chase this round and did not build a probe
+  for it. Flagged here rather than silently skipped.
+- **A fully adversarial fuzz-target run inside the jail** — nothing in this PR runs a real fuzzer
+  yet (#28 is explicitly future work, gated on #15). Everything I attacked was constructed by me
+  against the jail's own primitives, not against a real untrusted target binary.
+
+### 17.11 Verdict and required conditions
+
+**PASS WITH CONDITIONS.** No Critical. `packages/sandbox/` may merge. Before it is relied upon as
+the isolation boundary for #28 (fuzzing untrusted code) specifically — which the task brief
+correctly frames as the reason this sign-off carries real weight — the following must close:
+
+1. **SEC-33 (HIGH)** — fix the process-group escape via `os.setsid()`, or at minimum correct the
+   README/docstring claim to accurately scope what "no orphans" actually covers, with a tracked
+   follow-up to close the gap for real before #28. **This is the named condition that matters
+   most**, since it is the exact property the CTO's own D-053 ruling cited as this
+   implementation's decisive advantage.
+2. **SEC-34 (MEDIUM)** — make the CI stale-path guard fail the job, not warn-and-pass, when a
+   directory it depends on unexpectedly disappears.
+3. **SEC-35 (MEDIUM)** — classify a real `RLIMIT_FSIZE` stop as `LimitKind.FILE_SIZE`, not
+   `NONE`, and add the test the module's own rule requires.
+4. **SEC-36 (LOW)** — narrow the `max_file_bytes` docstring's disk-protection claim to what
+   `RLIMIT_FSIZE` actually bounds.
+5. **SEC-37 (INFO)** — no action required to merge; a follow-up worth tracking if this module is
+   later embedded in a genuinely multi-threaded host process.
+
+D-054's `limits_applied` claim is verified, not merely reviewed — I attacked it directly in both
+directions (§17.2) and it held. The three self-reported bugs from the `packages/sandbox/` move
+(the `git add` pathspec failure, the stale fixture string, and the CI path reference) are all
+independently confirmed fixed, and no further stale reference survives anywhere in the tree
+(§17.8). The gap this review adds is the one the task asked me to specifically go looking for —
+a way to make a child survive the timeout — and it exists. I will re-verify SEC-33 personally
+once a fix or a corrected claim lands, before #28 begins relying on this module.
+
+---
+
+## 18. Re-verification — 2026-08-08 · PR #119, commit `b01755b` · SEC-26/27/28/31 closed
+
+Re-verified **by name**, per the orchestrator's request, not a fresh full pass over §16
+(Round 4). New worktree at `b01755b`, fresh venv built from the pinned requirements, and a
+second isolated `postgres:16-alpine` container (port 15433, removed after use).
+`git diff 3230585 b01755b` — the fix commit's full diff — read before testing anything.
+
+### 18.1 SEC-26 — closed, confirmed against my exact original PoC, not a re-description of it
+
+`_enumerate_tar`/`_enumerate_zip` now refuse `member.issym() or member.islnk()` (tar) and a
+zip entry whose `external_attr` mode bits are `S_ISLNK` (zip), before any name-shaped check
+runs. I ran my **original, unmodified** round-4 PoC script (`innocuous_link` symlink to
+`../../../../etc`, plus a member walking through it) against the fixed `archive.py` — same
+file, same bytes, byte-identical to what I demonstrated the exploit with in §16:
+
+```
+member names: ['innocuous_link', 'innocuous_link/passwd']
+authorization.errors.UnreadableArchiveError: The snapshot archive contains a symlink or
+    hardlink member.
+```
+
+Refused, not silently accepted. I also independently disabled the new check (the check
+itself, not the author's added test) and confirmed `test_a_tar_symlink_with_a_safe_name_
+but_an_escaping_target_is_refused` and `test_a_tar_hardlink_member_is_refused` go red
+(`DID NOT RAISE UnreadableArchiveError`), then restored and confirmed `authorization/tests/
+test_archive.py` green again (11/11).
+
+### 18.2 SEC-27 — closed, and the specific savepoint claim reproduced both ways, not taken on report
+
+Ran the exact cross-mission race from §16 (two different missions, byte-identical content,
+forced interleave via a barrier around `Artifact.objects.filter(...).first()`) against the
+fixed code on a **fresh, real Postgres container**:
+
+```
+Thread A: ('claimed', {'sha256': '...'})
+Thread B: ('ok', UUID(...))
+Artifact rows for this digest: 1
+```
+
+Clean `SnapshotArtifactClaimedError`, no unhandled exception. Then, to test the savepoint
+claim specifically rather than the fix as a whole, I patched the fixed code to remove
+**only** the nested `with transaction.atomic():` while leaving the `try`/`except
+IntegrityError` in place, and re-ran the identical race:
+
+```
+Thread B: ('error', "TransactionManagementError: An error occurred in the current
+    transaction. You can't execute queries until the end of the 'atomic' block.")
+```
+
+**Confirmed: the savepoint is load-bearing on its own, independent of the exception
+handler.** Catching `IntegrityError` without the savepoint on Postgres does not produce the
+original 500 again — it produces a *different* unhandled exception
+(`TransactionManagementError`) at the very next statement, because the enclosing transaction
+is poisoned regardless of whether Python caught the error. This is exactly the distinction
+claimed, and it is Postgres-specific (SQLite has no equivalent poisoned-transaction
+behavior) — only a real Postgres run could have caught it, which is what makes re-running
+this myself the right call rather than reading the diff. Restored the savepoint, re-ran the
+race clean, then ran the full suite: 299 passed.
+
+### 18.3 SEC-28 — the 403 is the right call, ruled independently rather than let ride through
+
+`RepositoryOutOfScopeError` now carries `ErrorCode.UNSUPPORTED_REPOSITORY` with
+`http_status` kept at `403`, and the class docstring states the reason explicitly: this is a
+scope/permission refusal ("you may not point this endpoint at this reference at all" — the
+allowlist boundary `CLAUDE.md` and this module's own docstring both call a safety boundary)
+rather than a content-validity refusal (the archive was read and failed to parse, which is
+`UnreadableArchiveError`'s `422`). I agree with that distinction. `403 Forbidden` is
+conventionally an access-control status, and "this reference is outside what this deployment
+is authorized to read, independent of who is asking" is an access-control decision in
+substance even though the *identity* asking is not what is being judged — the same shape
+`AuthorizationScopeError` in the same file already uses at `403` for an analogous reason. I
+considered `422` (matching `UnreadableArchiveError`'s status, if not its code) and `404`
+(avoid confirming/denying the path's existence) and reject both: `422` would blur exactly
+the distinction this fix's docstring is making between "can't parse what we found" and "not
+allowed to look there at all," and `404` is wrong because the refusal is not about
+existence, it's about scope, and the response already says so honestly. **Ruling: 403 is
+correct. Not a new finding.** Independently injection-verified: reverted the code (not the
+status) to `INVALID_AUTHORIZATION`, confirmed
+`test_repository_ref_with_an_unsupported_scheme_is_refused` goes red
+(`'INVALID_AUTHORIZATION' == 'UNSUPPORTED_REPOSITORY'` assertion failure), restored via
+`git checkout`, confirmed green.
+
+### 18.4 SEC-31 — closed, and the adjacent fix is accurate, not a broadening of scope beyond what should ride through
+
+The two false citations are gone, replaced with two tests I confirmed exist by name
+(`test_snapshot_with_an_expired_authorization_is_refused`,
+`test_snapshot_with_a_revoked_authorization_is_refused`, alongside the original
+`test_snapshot_without_an_authorization_is_refused`), and the docstring now states plainly:
+"Demonstrated at exactly one stage: `INGEST`" — matching my own §16 finding word for word in
+substance. Confirmed `api/routers/missions.py` was not touched by this commit
+(`git diff 3230585 b01755b --name-only` has no router entry), so the claim that
+`preflight`/`start` "do not exist yet, and cannot yet" remains true. The adjacent claim they
+also fixed — the docstring previously asserted `archive_ref` "is never used to locate bytes
+on disk at all," which was already false in the original PR (`_materialize_source` uses it
+for exactly that, for `source="upload"`) — is now correctly rewritten to name this as the
+still-open SEC-30, tracked against the future upload endpoint, not claimed as resolved. I
+reviewed this adjacent change because it touches the same file and the same property ("is
+the enforcement claim accurate"), not because I am expanding this round's scope — it is a
+direct tightening of a claim adjacent to the one I originally flagged, and it is accurate.
+
+### 18.5 The author's own account of injection-testing — spot-checked, not merely accepted
+
+They report every fix was checked by injecting the violation and confirming red before
+green. I independently re-injected all four myself, using my own constructions rather than
+re-running theirs where it mattered most (SEC-26: my original PoC file, unmodified; SEC-27:
+my own real-Postgres harness, not their SQLite-monkeypatch regression test; SEC-28: a direct
+revert of the `code =` line). All four went red on injection and green on restoration,
+independently. **The standard held.**
+
+### 18.6 Updated verdict
+
+**PASS.** All four merge conditions from §16 (SEC-26, SEC-27, SEC-28, SEC-31) are closed and
+independently re-verified. SEC-29 and SEC-30 remain open, correctly untouched, gated on #12
+and the future upload endpoint respectively — unchanged from §16. SEC-32 remains INFO, no
+action required. No Critical, no open condition on this PR. **PR #119 clears security review
+outright**, subject only to the two forward-looking gates already on record (SEC-29 before
+#12, SEC-30 before an upload endpoint).

@@ -24,6 +24,9 @@ SANDBOX_CPU_LIMIT=4
 SANDBOX_MEMORY_MB=8192
 SANDBOX_MAX_SECONDS=5400
 SMALL_MODEL_BASE_URL=http://small-model.internal:8000/v1
+MODEL_SERVICE_NAMES=small-model.internal
+MODEL_GATEWAY_MODE=live
+MODEL_TRANSCRIPT_ROOT=services/model-gateway/transcripts
 TIER3_BASE_URL=http://kimi-k3.internal:8000/v1
 TIER3_MODEL_NAME=kimi-k3
 RUN_MAX_USD=<approved-cap>
@@ -32,6 +35,41 @@ GPU_IDLE_SHUTDOWN_MINUTES=10
 ARTIFACT_RETENTION_DAYS=14
 ```
 Never commit `.env`. Provider credentials are injected through protected secrets and never passed to target sandboxes.
+
+### `MODEL_SERVICE_NAMES` — read this before debugging a refused endpoint
+
+Note the example above: `SMALL_MODEL_BASE_URL=http://small-model.internal:8000/v1` needs
+`MODEL_SERVICE_NAMES=small-model.internal` beside it. Without the declaration the endpoint
+is **refused at startup**, and that refusal is the rule working.
+
+Under D-051 the endpoint policy permits, with no declaration at all:
+
+- loopback — `127.0.0.0/8`, `::1`, `localhost`, `host.docker.internal`
+- RFC 1918 — `10/8`, `172.16/12`, `192.168/16`
+- IPv6 unique-local — `fc00::/7`, less `fd00:ec2::/32`
+
+Everything else is an explicit declaration in `MODEL_SERVICE_NAMES`, comma-separated. That
+includes compose service names (`small-model`) and anything ending `.internal`, `.local`,
+`.svc` or `.test`.
+
+Those four suffixes used to pass on the suffix alone and no longer do, because nobody owns
+those namespaces — `evil.internal`, `sneaky.svc`, `redirector.local` and
+`api.openai.com.evil.test` all passed the previous check. **Declaration grants trust, not
+the suffix.** The reserved documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
+`203.0.113.0/24`) are refused for the same reason in the other direction: not globally
+routable and inside our trust boundary are different properties, and only the second one is
+the question being asked.
+
+A declared name is still checked. If it resolves to an address outside the boundary the
+call is refused — `services/model-gateway/gateway/endpoint_policy.py`, and the 60-case
+table behind it is `infrastructure/scripts/testing/endpoint-policy-bypass-table.py`.
+
+### `MODEL_GATEWAY_MODE` has no default
+
+`live` calls the self-hosted model; `replay` serves a recorded transcript (#82). Unset is a
+startup error rather than "live", because the choice decides whether the system later says
+"model-generated" or "model output recorded &lt;date&gt;, replayed" about its own output,
+and D-049 rules that the system does not make a provenance claim by staying silent.
 
 ---
 

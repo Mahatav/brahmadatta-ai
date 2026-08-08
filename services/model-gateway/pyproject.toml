@@ -1,0 +1,24 @@
+# Ruff configuration for services/model-gateway only.
+#
+# The root ruff.toml anticipates this: "Ruff only treats a pyproject.toml as configuration
+# when it contains a [tool.ruff] table, so a per-app override remains possible and would win
+# for that app's files." This is that override, and it extends rather than replaces, so the
+# repository's rule selection still applies here.
+#
+# Exactly two additions, both narrow.
+[tool.ruff]
+extend = "../../ruff.toml"
+
+[tool.ruff.lint.per-file-ignores]
+# gateway/tools/ is the operator command line. It is meant to talk to the operator on
+# stdout — the same reason infrastructure/scripts/** is exempted at the root. The
+# no-print rule exists for server code, and none of this runs in a server.
+"gateway/tools/**" = ["T201"]
+
+# The homograph cases are the finding. U+3002 IDEOGRAPHIC FULL STOP and U+FF0E FULLWIDTH
+# FULL STOP are ambiguous with `.` by design — that is what makes `http://api。openai。com/v1`
+# normalise to api.openai.com under UTS-46, and it is why SEC-02 is a High. A linter warning
+# that these characters look confusable is correct and is the point.
+"gateway/tests/bypass_table.py" = ["RUF001"]
+"gateway/tests/test_endpoint_policy.py" = ["RUF001"]
+"gateway/endpoint_policy.py" = ["RUF002"]

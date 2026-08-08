@@ -23,8 +23,19 @@ apps/control-api/
 │   ├── checks.py         # the above, enforced as Django system checks
 │   └── schemas/          # request/response schemas + the event envelope
 ├── api/                  # HTTP surface: routers, auth, trace ids, error envelope
+├── missions/             # Django models + migrations (#14)
+├── orchestrator/         # the only writer of Mission.state (#12)
+│   ├── transitions.py    # one transaction per transition, under the row lock
+│   ├── candidates.py     # patch/verification writes + the D-046 candidate freeze
+│   ├── repository.py     # persisted rows -> frozen contract schemas
+│   └── events.py         # gap-free per-mission sequence allocation
 └── tools/export_openapi.py
 ```
+
+`contracts/` has no Django dependency and never will — it is imported by the OpenAPI
+exporter, which must run without a database. `orchestrator/` is where the contract
+guards are *called from*, and for two of them that call site is the enforcement rather
+than a convenience. See `contracts/state_machine.py`'s module docstring.
 
 ## Running it
 
@@ -62,13 +73,25 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
 .venv/bin/python -m pytest
 ```
 
-No PostgreSQL required — the suite runs on in-memory SQLite and never touches a
-mission table, because there are none yet (schema is the database-engineer's, D2).
+No PostgreSQL required — the suite runs on SQLite. The `missions/` and
+`orchestrator/` tests do write real rows and run real migrations.
+
+`SELECT … FOR UPDATE` is a no-op on SQLite, so the tests demonstrate that the code
+takes the lock and that the guards hold; they do **not** demonstrate behaviour under
+two concurrent writers. That needs a PostgreSQL integration job and is not run here —
+see the PR body and QA's §12.
+
+Migrations, from empty:
+
+```bash
+DATABASE_URL=sqlite:///local.sqlite3 .venv/bin/python manage.py migrate
+```
 
 ## What the schemas enforce structurally
 
-Four product rules are expressed in types rather than in comments. Each has tests
-that fail if the property is removed:
+Product rules expressed in types and in transaction scope rather than in comments.
+Each row names the test that fails if the property is removed — a property is described
+as enforced here only when a named test demonstrates it:
 
 | Rule | Where | Test |
 |---|---|---|
@@ -77,7 +100,12 @@ that fail if the property is removed:
 | No inference endpoint may be a hosted third party | `contracts/model_policy.py`, `contracts/checks.py` | `contracts/tests/test_model_policy.py` |
 | Sandbox egress cannot be requested | `SandboxPolicy.network: Literal["deny"]` | `api/tests/test_http_surface.py` |
 | No verdict state without a verification record | `contracts/state_machine.py` `assert_verdict_is_evidenced` | `contracts/tests/test_state_machine.py` |
-| A substituted path cannot be claimed as the primary one | `DiscoveryMethod`, `FuzzingMode`, `IsolationMode`, `EvidenceSource`, `ModelProvenance` replay fields | `contracts/tests/test_verdict.py` |
+| A substituted path cannot be claimed as the primary one | `DiscoveryMethod`, `FuzzingMode`, `IsolationMode`, `EvidenceSource`, `ModelProvenance.inference_mode` | `contracts/tests/test_verdict.py` |
+| A verdict state is backed by *this mission's own* records, type-checked and de-duplicated | `contracts/state_machine.py` `assert_verdict_is_evidenced` | `contracts/tests/test_state_machine.py::test_guard_rejects_a_lookalike_without_a_gate_matrix`, `::test_another_missions_verification_does_not_justify_this_verdict` |
+| The record set handed to that guard is *complete* | `orchestrator/transitions.py` — loaded under the mission row lock, never a parameter | `orchestrator/tests/test_verdict_completeness.py` |
+| The candidate set closes when VERIFY begins | `Mission.verification_started_at`, `orchestrator/candidates.py` | `orchestrator/tests/test_candidate_freeze.py::test_cannot_add_candidate_after_verification_starts` |
+| A paused mission resumes only into the state it paused from | `Mission.paused_from`, `contracts/state_machine.py` `assert_resume` | `orchestrator/tests/test_pause_resume.py` |
+| The published OpenAPI dump does not depend on the interpreter | `tools/export_openapi.py` `CANONICAL_REASON_PHRASES` | `contracts/tests/test_openapi_dump.py::test_the_pinned_phrases_survive_a_renamed_stdlib_phrase` |
 
 ## Changing the contract
 

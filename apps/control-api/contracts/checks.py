@@ -100,3 +100,61 @@ def check_debug_off_in_finale(app_configs: Any, **kwargs: Any) -> list[CheckMess
             )
         ]
     return []
+
+
+DATABASE_TLS_CHECK_ID = "brahmadatta.E005"
+
+#: `sslmode` values that give an active man-in-the-middle nothing to work with. `require`
+#: encrypts but does not authenticate the server; it is accepted as the floor because the
+#: finale topology puts PostgreSQL on an `internal: true` network with no published port,
+#: so reaching the MITM position already means being inside the boundary. `prefer` — the
+#: libpq default — is NOT accepted: it falls back to plaintext without error.
+_ACCEPTABLE_FINALE_SSLMODES: frozenset[str] = frozenset(
+    {"require", "verify-ca", "verify-full"}
+)
+
+
+@register()
+def check_database_tls_in_finale(app_configs: Any, **kwargs: Any) -> list[CheckMessage]:
+    """The finale must not start on an unverified database connection.
+
+    `config.env` now forwards `sslmode` to libpq and refuses to boot on a DSN parameter
+    it does not understand. That closes the *silence*; it does not make anyone set the
+    parameter. Without this check the finale still starts happily on a DSN with no
+    `sslmode`, and libpq's default is `prefer` — attempt TLS, fall back to plaintext
+    without error, never validate the certificate.
+
+    An `Error` rather than a `Warning`, for the same reason `E001` is: the process
+    stopping is the point. Scoped to `APP_ENV=finale` so development and the test suite
+    run on SQLite and on a local PostgreSQL without ceremony.
+    """
+    if getattr(settings, "APP_ENV", "") != "finale":
+        return []
+
+    default = getattr(settings, "DATABASES", {}).get("default", {})
+    engine = str(default.get("ENGINE", ""))
+    if "postgresql" not in engine:
+        return [
+            Error(
+                f"APP_ENV=finale is configured against {engine or 'no database'}; the "
+                f"competition run uses PostgreSQL.",
+                hint="Set DATABASE_URL to a postgresql:// DSN.",
+                id=DATABASE_TLS_CHECK_ID,
+            )
+        ]
+
+    sslmode = str(default.get("OPTIONS", {}).get("sslmode", ""))
+    if sslmode not in _ACCEPTABLE_FINALE_SSLMODES:
+        return [
+            Error(
+                f"APP_ENV=finale with database sslmode="
+                f"{sslmode or 'unset (libpq defaults to prefer)'}. `prefer` silently "
+                f"falls back to plaintext when the server declines TLS, so the "
+                f"authorization statements and verification records this system exists "
+                f"to protect would cross the wire unencrypted with nothing to observe.",
+                hint="Append ?sslmode=verify-full&sslrootcert=... to DATABASE_URL, or "
+                "?sslmode=require at minimum.",
+                id=DATABASE_TLS_CHECK_ID,
+            )
+        ]
+    return []

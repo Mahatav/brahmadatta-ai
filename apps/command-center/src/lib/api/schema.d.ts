@@ -717,10 +717,7 @@ export interface components {
              * Format: date-time
              */
             generated_at: string;
-            /**
-             * @description How the target was contained. A subprocess jail (#81) is weaker than a rootless container and is reported as what it is.
-             * @default ROOTLESS_CONTAINER
-             */
+            /** @description How the target was contained. Required, with no default (D-049): the previous default claimed ROOTLESS_CONTAINER, which is the stronger of the two, so a bundle assembled by code that forgot the field overclaimed the isolation posture. A subprocess jail (#81) is weaker and is reported as what it is. */
             isolation_mode: components["schemas"]["IsolationMode"];
             /**
              * Mission Id
@@ -732,6 +729,11 @@ export interface components {
              * @description Every candidate the mission produced, accepted and rejected alike. The rejected one is the differentiator, not an embarrassment.
              */
             patches?: components["schemas"]["PatchCandidate"][];
+            /**
+             * Recommended Patch Id
+             * @description The one diff we stand behind. Derived and validated, not free-form: it must name a patch in `patches` whose verification verdict is VERIFIED, and when exactly one candidate verified it must be that one. A bundle showing two verified patches without naming one invites a judge to pick the wrong one and ask why we shipped it.
+             */
+            recommended_patch_id?: string | null;
             /** Reproducers */
             reproducers?: components["schemas"]["ReproducerRecord"][];
             resource_usage: components["schemas"]["ResourceUsage"];
@@ -980,10 +982,7 @@ export interface components {
              * @description Opaque artifact pointer (artifact://...). Resolved through a signed short-lived link, never returned inline.
              */
             evidence_ref?: string | null;
-            /**
-             * @description Where this result came from. A REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS.
-             * @default TOOL_EXECUTION
-             */
+            /** @description Where this result came from. Required, with no default (D-049): a default here is a claim the system makes on the caller's behalf when they say nothing, and the old default said 'a tool ran'. Code populating a gate from a stored artifact that forgot this field used to PASS the gate. A REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS, and a NOT_RUN result may not claim TOOL_EXECUTION. */
             evidence_source: components["schemas"]["EvidenceSource"];
             name: components["schemas"]["GateName"];
             status: components["schemas"]["GateStatus"];
@@ -1023,6 +1022,18 @@ export interface components {
             /** Version */
             version: string;
         };
+        /**
+         * InferenceMode
+         * @description Whether a model response was generated live or replayed from a transcript.
+         *
+         *     Required on every `ModelProvenance`; no default, by the same reasoning as
+         *     `DiscoveryMethod` and `FuzzingMode` (D-049). D-015 cut the rented GPU, so the D5
+         *     gate rests on a quantized CPU-served model and a replay-mode gateway is the
+         *     approved fallback. Serving a captured response is legitimate; letting silence
+         *     claim it was generated live is not.
+         * @enum {string}
+         */
+        InferenceMode: "LIVE_INFERENCE" | "REPLAYED_TRANSCRIPT";
         /**
          * IsolationMode
          * @description How the target was contained (#81).
@@ -1383,6 +1394,8 @@ export interface components {
              * @default 0
              */
             context_bytes: number;
+            /** @description LIVE_INFERENCE or REPLAYED_TRANSCRIPT. Required, no default: a default here would be the system making a provenance claim on the caller's behalf when they said nothing, and every such default should point at the weaker claim or not exist. Whatever renders provenance reads this. */
+            inference_mode: components["schemas"]["InferenceMode"];
             /** Model Name */
             model_name: string;
             /**
@@ -2119,7 +2132,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2206,7 +2219,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2291,7 +2304,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2380,7 +2393,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2465,7 +2478,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2554,7 +2567,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2639,7 +2652,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2727,7 +2740,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2812,7 +2825,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2901,7 +2914,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2989,7 +3002,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3075,7 +3088,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3160,7 +3173,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3248,7 +3261,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3334,7 +3347,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3423,7 +3436,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3508,7 +3521,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3597,7 +3610,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3686,7 +3699,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3769,7 +3782,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3852,7 +3865,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3941,7 +3954,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4024,7 +4037,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Unprocessable Entity */
+            /** @description Unprocessable Content */
             422: {
                 headers: {
                     [name: string]: unknown;

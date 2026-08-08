@@ -28,6 +28,7 @@ from contracts.enums import (
     FuzzingMode,
     GateName,
     GateStatus,
+    InferenceMode,
     PatchPolicyStatus,
     PatchProvenance,
     Severity,
@@ -55,7 +56,20 @@ NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
 
 
 def gate(name: GateName, status: GateStatus) -> GateResult:
-    return GateResult(name=name, status=status, tool="ctest 3.28.3", detail="")
+    # `evidence_source` is stated, not defaulted (D-049). A NOT_RUN gate had no tool
+    # execution to source from, so it takes the weaker label.
+    source = (
+        EvidenceSource.REPLAYED_ARTIFACT
+        if status is GateStatus.NOT_RUN
+        else EvidenceSource.TOOL_EXECUTION
+    )
+    return GateResult(
+        name=name,
+        status=status,
+        evidence_source=source,
+        tool="ctest 3.28.3",
+        detail="",
+    )
 
 
 def matrix(compile_=GateStatus.PASS, reproducer=GateStatus.PASS, regression=GateStatus.PASS, **kwargs) -> GateMatrix:
@@ -369,6 +383,7 @@ def test_a_maximally_confident_model_cannot_change_the_verdict():
         model=ModelProvenance(
             model_name="local-small-code-model",
             served_from="127.0.0.1:8000",
+            inference_mode=InferenceMode.LIVE_INFERENCE,
             confidence=1.0,
         ),
         diff="--- a/parser.c\n+++ b/parser.c\n",
@@ -388,6 +403,7 @@ def test_a_replayed_response_declares_all_three_replay_fields():
     replayed = ModelProvenance(
         model_name="local-small-code-model",
         served_from="127.0.0.1:8000",
+        inference_mode=InferenceMode.REPLAYED_TRANSCRIPT,
         replayed_from_transcript="artifact://transcripts/parser-lib-attempt-3",
         captured_at=NOW - timedelta(days=1),
         transcript_sha256="c" * 64,
@@ -395,7 +411,9 @@ def test_a_replayed_response_declares_all_three_replay_fields():
     assert replayed.is_replayed is True
 
     live = ModelProvenance(
-        model_name="local-small-code-model", served_from="127.0.0.1:8000"
+        model_name="local-small-code-model",
+        served_from="127.0.0.1:8000",
+        inference_mode=InferenceMode.LIVE_INFERENCE,
     )
     assert live.is_replayed is False
 
@@ -417,6 +435,7 @@ def test_a_partially_declared_replay_is_rejected(partial: dict):
         ModelProvenance(
             model_name="local-small-code-model",
             served_from="127.0.0.1:8000",
+            inference_mode=InferenceMode.REPLAYED_TRANSCRIPT,
             **partial,
         )
 

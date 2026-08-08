@@ -30,6 +30,10 @@ build/
 /evidence-out/
 *.log
 
+# Control API runtime state: content-addressed snapshot store, upload staging (#18).
+# Tests point these at a pytest tmp_path instead; this only guards a local dev run.
+apps/control-api/var/
+
 # Fuzzing / analysis output — never commit anything a campaign PRODUCES
 #
 # The rules above this line were anchored to the repository root (`/fuzz-out/`,
@@ -84,3 +88,6 @@ slow-unit-*
 # Claude local state
 .claude/settings.local.json
 .project/state.local.json
+
+# Astro generated types cache
+apps/command-center/.astro/
