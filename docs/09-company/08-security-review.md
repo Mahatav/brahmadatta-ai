@@ -28,6 +28,7 @@ says so in §7 rather than being left out.
 | **Isolation substitution** — `--network none` + non-root instead of rootless Podman | **ACCEPTED, with eight binding conditions.** §6. |
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
+| **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -2415,3 +2416,474 @@ unfalsifiable control is the kind people build on.
 
 **Final approval authority** — CTO for the parsing approach; cybersecurity for the severity and for
 the fail-closed requirement.
+
+---
+
+## 14. Round 3 — 2026-08-08 · PR #111 `feat/model-gateway` · the endpoint policy and replay mode
+
+This is the PR carrying my veto: it is the fix for **#78 / SEC-02**, the ten bypasses I rated in
+§2 and re-confirmed open in §12.2. Reviewed at `3cb12a5` in an isolated worktree.
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Two new findings (SEC-24, SEC-25) are merge
+conditions; both are small. **The gateway's egress function is correct and I reproduced that
+myself.** SEC-19 is **not** closed here and is re-targeted rather than waived — §14.4.
+
+### 14.1 The bypass table, re-run by me rather than read
+
+I said I do not sign off on someone else's script. I ran it:
+
+```
+$ python3 infrastructure/scripts/testing/endpoint-policy-bypass-table.py --quiet
+
+declared MODEL_SERVICE_NAMES: model-host.internal, small-model
+60 cases
+…
+GATEWAY  mismatches: 0 of 60
+CONTROL  mismatches: 34 of 60  (gated at exactly 34)
+```
+
+**0 of 60 reproduced independently.** Every case I rated in §2 and §12.2 is closed by the gateway
+implementation, each refused by a *named rule* rather than by a bare boolean — `denied-network`,
+`metadata-name`, `idna-mismatch`, `packed-ipv4`, `userinfo`, `undeclared-private-suffix`,
+`undeclared-bare-label`. A URL refused for the wrong reason fails the build. That is a better
+artifact than I asked for; the four fixes I specified in §2 are all present and two more besides.
+
+`CONTROL 34 of 60` is the honest state of `contracts/model_policy.py`, printed rather than
+asserted, and gated in both directions so it cannot drift silently.
+
+### 14.2 My own cases, which are not in the author's table
+
+Re-running the author's table proves the author's table. These are mine.
+
+Most of what I tried was already closed, and closed structurally rather than by enumeration —
+the name path is **allowlist-only** (`localhost`, `host.docker.internal`, or declared), so every
+name that is not explicitly permitted falls through to a refusal. That is why the following all
+failed to get through even though none of them is in the table:
+
+```
+  [ok] want=False got=False public-name       8.8.8.8 as a.b        'http://8.526344/v1'
+  [ok] want=False got=False public-name       8.8.8.8 as a.b.c      'http://8.8.2056/v1'
+  [ok] want=False got=False public-name       127.0.0.1 as a.b      'http://127.1/v1'
+  [ok] want=False got=False public-name       mixed hex dotted      'http://0x8.0x8.0x8.0x8/v1'
+  [ok] want=False got=False public-name       loopback octal dotted 'http://0177.0.0.1/v1'
+```
+
+`_looks_like_packed_ipv4` only inspects dotless hosts, so `inet_aton`'s partial-dotted forms
+(`8.526344` is 8.8.8.8) slip past it — and it does not matter, because the default for a name is
+deny. **That is the right shape and it is why this implementation is worth trusting**: the
+enumerated bypasses are a defence-in-depth layer over a deny-by-default decision, not the
+decision itself.
+
+I also confirmed rule ordering cannot be subverted by the operator's own allowlist — a name
+declared in `MODEL_SERVICE_NAMES` is still refused if it is a provider, a metadata name, a packed
+address or a denied network, because those checks run *before* the declared-name check:
+
+```
+  [ok] want=False got=False hosted-provider   declared 'api.openai.com' then used
+  [ok] want=False got=False metadata-name     declared 'metadata.google.internal' then used
+  [ok] want=False got=False packed-ipv4       declared '2130706433' then used
+  [ok] want=False got=False denied-network    declared '169.254.169.254' then used
+```
+
+and that `normalise_service_names` refuses a dangerous declaration at startup rather than
+widening the boundary quietly (`api.openai.com`, `metadata.google.internal`, `2130706433`,
+`127.0.0.1`, the U+3002 homograph and `evil.example.com` are all refused).
+
+All ten controls that must keep working, do:
+
+```
+  [ok] want=True got=True allowed-network  loopback / IPv6 loopback / all three RFC 1918 ranges
+  [ok] want=True got=True local-name       localhost
+  [ok] want=True got=True declared-service small-model, model-host.internal
+  [ok] want=True got=True allowed-network  IPv6 unique-local fd12:3456::1
+```
+
+---
+
+### SEC-24 · **MEDIUM** · The IPv6 unwrap is applied to the *allow* path as well as the *deny* path, so a globally routable literal is permitted for what is embedded in it
+
+**Location** — `services/model-gateway/gateway/endpoint_policy.py:515-547` (`_classify_address`),
+with `_unwrap` at `:499-512`. `effective = _unwrap(address)` is computed once and then used for
+**both** the deny loop at `:521` and the allow loop at `:536`.
+
+**Why unwrapping is right for denying and wrong for allowing.** Unwrapping is what catches
+`[::ffff:169.254.169.254]` and `[64:ff9b::808:808]` and `[2002:808:808::1]` — all three are in the
+author's table and all three are correctly refused. But `2002::/16` (6to4) and `64:ff9b::/96`
+(NAT64) are **globally routable IPv6 prefixes**. A packet addressed to `2002:7f00:1::1` does not
+go to 127.0.0.1; it leaves the host toward a 6to4 relay. Judging the *destination* by the address
+*embedded* in it is correct when the answer is "deny" and inverted when the answer is "allow".
+
+**Exploit scenario, executed — none of these are in the 60-case table:**
+
+```
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 127.0.0.1     'http://[2002:7f00:1::1]/v1'
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 10.0.0.1      'http://[2002:a00:1::1]/v1'
+  [FAIL] want=False got=True allowed-network  6to4 wrapping 192.168.1.1   'http://[2002:c0a8:101::1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64 wrapping 127.0.0.1    'http://[64:ff9b::7f00:1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64 wrapping 10.0.0.1     'http://[64:ff9b::a00:1]/v1'
+  [FAIL] want=False got=True allowed-network  NAT64-local wrapping 192.168.0.1 'http://[64:ff9b:1::c0a8:1]/v1'
+```
+
+Each is reported as `allowed-network — loopback or private address (127.0.0.0/8)`. The policy
+says loopback; the socket goes to a global IPv6 destination.
+
+**The resolver check inherits the same asymmetry**, so the defence-in-depth layer does not catch
+it either:
+
+```
+  [ok  ] refused=True  want_refused=True   declared name -> 8.8.8.8
+  [ok  ] refused=True  want_refused=True   declared name -> 169.254.169.254
+  [ok  ] refused=True  want_refused=True   declared name -> [loopback, 8.8.8.8] (2nd answer poisoned)
+  [ok  ] refused=True  want_refused=True   declared name -> 6to4 wrapping 8.8.8.8
+  [FAIL] refused=False want_refused=True   declared name -> 6to4 wrapping 127.0.0.1
+  [FAIL] refused=False want_refused=True   declared name -> NAT64 wrapping 127.0.0.1
+```
+
+A declared name whose resolver answers `2002:7f00:1::1` passes both layers.
+
+**Two of my eight unexpected results are my expectation being wrong, not the code**, and I am
+recording that rather than inflating the count: `[::ffff:127.0.0.1]` and `[::ffff:10.0.0.1]` are
+IPv4-mapped, and connecting to those genuinely does reach 127.0.0.1 and 10.0.0.1 on a normal dual
+stack. Unwrapping those for the allow decision is **correct**. The finding is the six 6to4/NAT64
+cases only.
+
+**MEDIUM.** The input is `MODEL_ENDPOINT`, operator configuration — actor A3 from §1, the same
+actor as SEC-02 — not attacker-supplied data. SEC-01's topology means the finale has no default
+route regardless. It is the same class as the ten cases this PR just closed, in the code written
+to close them, and the table to pin it already exists.
+
+**Required fix** — keep `_unwrap` for the deny loop; for the allow loop, permit only when the
+address is *itself* in `_ALLOWED_NETWORKS`, with `ipv4_mapped` as the one sanctioned equivalence.
+Concretely, in `_classify_address`, refuse any address where `wrapped` is true and the wrapper was
+6to4 or NAT64 rather than IPv4-mapped. Add the six rows above to `bypass_table.py`, which makes
+them permanent.
+
+---
+
+### SEC-25 · **MEDIUM** · The new runtime pin `idna==3.10` carries CVE-2026-45409, in the exact function that is this PR's security control, and the documented workaround is not implemented
+
+**Location** — `services/model-gateway/requirements.txt` (`idna==3.10`), consumed at
+`gateway/endpoint_policy.py:327` (`idna.encode(host, uts46=True)`) and `:231` in
+`normalise_service_names`.
+
+**Executed:**
+
+```
+$ pip-audit -r services/model-gateway/requirements.txt
+Found 2 known vulnerabilities in 1 package
+Name Version ID             Fix Versions
+---- ------- -------------- ------------
+idna 3.10    PYSEC-2026-215 3.15
+```
+
+`PYSEC-2026-215` = `CVE-2026-45409` / `GHSA-65pc-fj4g-8rjx`. Quadratic resource consumption in
+`idna.encode()` on long inputs — *"the same issue as CVE-2024-3651, however the original
+remediation in 2024 was not a complete fix"*. Fixed in 3.15. The advisory names the workaround
+explicitly: **enforce the 253-character domain limit before calling `idna.encode()`.**
+
+`classify()` applies no length check before `idna.encode()`. **Executed reachability, through the
+public entry point:**
+
+```
+CVE-2026-45409 reachability through classify() — no length guard before idna.encode()
+RFC 1035 caps a domain at 253 chars; classify() does not enforce that.
+
+  host len   1000  -> idna-invalid   in    0.031s
+  host len   5000  -> idna-invalid   in    0.667s
+  host len  20000  -> idna-invalid   in   10.303s
+  host len  60000  -> idna-invalid   in  100.832s
+```
+
+One `classify()` call, 100 seconds. The verdict is still correct — it refuses — it just takes a
+minute and a half to say so.
+
+**MEDIUM, not High.** The host comes from `MODEL_ENDPOINT` today, so this is a configuration
+foot-gun rather than a remote DoS. Three things stop it staying that way, and they are why this is
+a condition rather than a follow-up: `classify()` is documented at `:53-59` as safe to call from a
+Django system check, and a 100-second system check is a failed deploy; **D-050 consolidates this
+module into `contracts/`**, where the next caller may well hand it a URL from a request body; and
+this CVE is a *recurrence* of a 2024 CVE whose first fix was incomplete, which is the strongest
+possible argument for not relying on the library alone.
+
+**Required fix** — both halves, because either alone leaves the other gap:
+
+1. `idna>=3.15` in `services/model-gateway/requirements.txt`.
+2. A length guard in `classify()` and `normalise_service_names` before `idna.encode()`: refuse a
+   host over 253 characters, or any label over 63, as `EndpointDecision(False, "host-too-long", …)`.
+   That is the advisory's own workaround, it is two lines, and it holds when this recurs a third
+   time.
+3. A row in `bypass_table.py` for an over-long host, so the guard is pinned.
+
+This is also a **dependency-policy** point for the CTO: `pip-audit` is not in CI. `apps/control-api`'s
+pins are clean today (§13.3), and this one was not, and nothing in the pipeline would have said so.
+Adding `pip-audit -r` for every `requirements.txt` as a CI step is the generalisation and I
+recommend it.
+
+---
+
+### 14.3 Two claims I verified by injection rather than by reading
+
+**The import-closure walk.** The author reports catching their own check passing by not looking —
+a subprocess-based test that **skipped** rather than failed when `import ninja` was injected — and
+replacing it with a static walk. I verified the replacement the same way:
+
+```
+########## CONTROL: clean tree ##########
+8 passed in 0.28s
+
+########## INJECT 'import ninja' into gateway/endpoint_policy.py ##########
+71:import ninja  # INJECTED VIOLATION
+
+E   AssertionError: gateway.endpoint_policy failed to import in a bare interpreter, and the
+    error names ['django', 'ninja', 'pydantic']. That is not a missing dependency, it is the
+    policy having acquired one
+2 failed, 6 passed in 0.37s
+```
+
+**Two failures, no skips.** The claim holds. The runtime check also correctly distinguishes "this
+dependency is missing" from "this module acquired a dependency", which is the distinction that
+made the first version useless. Injection reverted; worktree clean.
+
+This is the **fifth** instance of a check passing by not looking, across five seats, and the
+**first caught by its own author before review**. That is the standing rule starting to work, and
+it is worth saying so in the record.
+
+**"No code in this package opens a socket."** Load-bearing for the security section, so I checked
+rather than accepted it:
+
+```
+$ grep -rnE "^\s*(import|from) +(httpx|requests|aiohttp|urllib3|openai|anthropic|socket)" \
+    --include="*.py" gateway | grep -v "/tests/"
+gateway/endpoint_policy.py:65:import socket
+$ grep -n "socket\." gateway/endpoint_policy.py
+410:    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+```
+
+One `socket` import, used once, for name resolution in the opt-in resolver check. No HTTP client.
+The claim is accurate.
+
+**The `SYNTHETIC_FIXTURE` gate.** `transcripts/` contains only `.gitkeep` and `README.md` — no
+transcript is committed, as claimed. `CaptureKind.SYNTHETIC_FIXTURE` is refused at load unless
+`allow_synthetic` is set (`gateway/transcripts.py:243-245`), with
+`test_a_synthetic_fixture_cannot_be_served_as_model_output` naming it. A hand-written diff cannot
+be served wearing a model's provenance. Verified by reading; I did not attack the transcript store.
+
+### 14.4 SEC-19 — **not closed by #111.** Re-targeted, not waived
+
+In §13 I wrote that SEC-19 *"must not outlive #111"*. It has, and after reading why, **I am not
+blocking on it.**
+
+```
+$ git diff origin/main...HEAD --name-only | grep control-api
+  NO control-api file touched
+
+$ sed -n '16p' apps/control-api/contracts/checks.py
+from contracts.model_policy import assert_local_inference_endpoint
+
+$ manage.py check, on this branch
+https://my-llm-proxy.internal/v1     System check identified no issues (0 silenced).
+http://169.254.169.254/              System check identified no issues (0 silenced).
+https://api.openai.com.evil.test/v1  System check identified no issues (0 silenced).
+```
+
+The boot gate still binds to the 34-of-60 implementation and still boots clean on all three.
+
+**Why this is the right call and not a waiver.** The seat's decision record gives two reasons for
+not touching `contracts/model_policy.py`: it is another seat's file in a live worktree, and C5
+forbids the ASGI process importing `gateway`, so the gateway's implementation is not available to
+`checks.py` until D-050 consolidates it into `contracts/`. Both are correct. Demanding the fix
+here would be demanding either a hard-rule breach or a premature architectural move, and I do not
+get to require that by attaching it to a severity.
+
+**What changes instead.** SEC-19's impact today is materially lower than when I filed it: nothing
+in the tree opens a socket to a model, so the boot gate is currently validating a setting that no
+code uses to connect. It is a misleading green check, not a live egress path. **It becomes a live
+egress path the moment #35/#36 land a real backend.**
+
+**Ruling.** SEC-19 does not block #111. It is re-targeted at **#93 / D-050**, and it **blocks the
+first PR that introduces a live model backend** — that is the merge gate it moves to, and I will
+enforce it there. It stays MEDIUM and open.
+
+### 14.5 Can #78 close, and what happens to SEC-02
+
+**#78 can close, on the same condition I set in §12.3 and for the same reason.** The component
+that will actually open the socket now has a correct egress function — 0 of 60, reproduced by me,
+with a named-rule table and a two-column drift guard. SEC-01's topology holds underneath it. #78's
+second acceptance box — *"link-local, loopback-to-elsewhere and metadata addresses are explicitly
+rejected by the validator"* — is now genuinely ticked **for the gateway**.
+
+**Condition, and it is the same one as last time: SEC-02 and SEC-19 must be filed against #93 with
+an owner and a milestone before #78 is closed. Not after.** `contracts/model_policy.py` is at 34
+of 60 and is what the ASGI process boots on; closing #78 while that is true, with nothing tracking
+it, is exactly how the finding got lost the first time.
+
+**SEC-02 status: still open, still MEDIUM, owner #93.** It is not closed by this PR and this PR
+does not claim it is. What changed is that it is now *measured* — 34 of 60, in CI, gated in both
+directions — rather than assumed.
+
+### 14.6 D-051, recorded verbatim as the CTO asked
+
+The CTO adopted the gateway seat's sentence, and it **retires my own §5 wording** — the claim that
+the private-suffix name check *"proves the hostname is inside the boundary"*. It does not, and
+`api.openai.com.evil.test` settles it. The replacement:
+
+> **"not globally routable" and "inside our trust boundary" are different properties, and only
+> the second one is the question being asked.**
+
+Nobody owns `.internal`, `.local`, `.svc` or `.test`. Declaration grants trust; a suffix does not.
+I endorse both divergences in the gateway's decision record — private suffixes requiring
+declaration, and the reserved documentation ranges denied — and I confirmed the three cases they
+newly refuse (`small-model.internal`, `model.svc.cluster.local`, `198.51.100.7`) are all refusals
+I want. **My §5 wording is superseded; §13's copy of this sentence and this one are the record.**
+
+One inconsistency inside the divergence, recorded as informational rather than a finding:
+`_LOCAL_NAMES` at `:141` hardcodes `host.docker.internal` as trusted with no declaration, and it
+sits under `.internal` — the namespace the divergence refuses on the grounds that nobody owns it.
+Docker owns that specific name by convention, so it is defensible, and `evil.host.docker.internal`
+is correctly refused. It is one hardcoded exception to a rule made three lines earlier and the
+next reader should know it was deliberate.
+
+### 14.7 Dependency audit and secrets — **executed**
+
+```
+$ pip-audit -r services/model-gateway/requirements.txt
+Found 2 known vulnerabilities in 1 package
+idna 3.10    PYSEC-2026-215   fix: 3.15          <-- SEC-25
+
+$ pip-audit -r services/model-gateway/requirements-dev.txt
+  same single finding (dev file includes the runtime file)
+
+$ (secret-shaped literals across every file in the diff)
+.env.example:51:POSTGRES_PASSWORD=REPLACE_ME_LOCAL_DEV_PASSWORD
+.env.example:68:CONTROL_API_OPERATOR_TOKEN=REPLACE_ME_OPERATOR_TOKEN_MIN_32_CHARS
+```
+
+Two matches, both placeholders in the committed example file. No credential in code. Two new
+runtime dependencies, both pinned exactly: `pydantic==2.13.4` (matching control-api, deliberately)
+and `idna==3.10` (SEC-25).
+
+### 14.8 The suite, run by me — and a stale claim in the PR body
+
+```
+$ cd services/model-gateway && pytest -q -rs
+274 passed, 1 skipped in 0.39s
+SKIPPED [1] gateway/tests/test_contract_alignment.py:172: contracts.ModelProvenance has no
+  inference_mode yet — #110 is not merged. The gateway already emits it; this assertion
+  activates on merge.
+```
+
+The PR body reports **`270 passed`** and states **"No skips."** The branch is at 274 passed and
+one skip. The body's evidence block predates the CTO-conditions commit and was not refreshed.
+
+**The skip itself is fine and is the good kind** — it names its reason, it is visible because the
+suite runs with `-rs`, and it self-activates when #110 merges. But under the standing rule the
+*claim* has to match the run, and "No skips" is now false. **LOW**, no ID: refresh the evidence
+block before merge. Flagging it because the whole point of the rule is that stale evidence is how
+a green run stops meaning anything, and this PR is otherwise the best-evidenced one I have
+reviewed.
+
+Worth recording what that skip means substantively: `test_contract_alignment.py` does **not**
+currently validate the replay triple against the real `contracts.ModelProvenance`. That assertion
+is dormant until #110 lands. The cross-implementation guarantee is therefore *intended*, not
+demonstrated, today.
+
+### 14.9 What I did **not** review
+
+1. **No egress attempt from inside a running container.** Not re-run this session. §12's execution
+   stands and is unchanged by this diff. **NOT RUN.**
+2. **No live-resolver DNS test.** I exercised `assert_resolves_inside_boundary` with an injected
+   resolver only, as the author did. Against a real resolver: **NOT RUN.**
+3. **The transcript store's integrity path.** I read the `SYNTHETIC_FIXTURE` gate and the
+   self-hashing refusal and did not attack them — no path traversal, symlink, TOCTOU or
+   concurrent-write testing on `TranscriptStore`. Unreviewed.
+4. **The replay/provenance labelling half of the PR (#82).** I confirmed the chokepoint tests
+   exist and are scoped honestly. I did not independently attack the renderers, and the AST
+   chokepoint scan's completeness is unverified by me.
+5. **`gateway/service.py`, `backends.py`, `schemas.py`, `settings.py`, `tools/transcripts_cli.py`**
+   — read for socket use and for the endpoint-policy call sites only, not reviewed line by line.
+6. **`mypy` and `ruff`** — not run by me; the author's figures are unverified.
+7. **The CI additions** in this PR — not reviewed.
+
+### 14.10 Verdict
+
+**PASS WITH CONDITIONS.**
+
+This is the best security work in the repository. It does the thing I asked for in §12.2 — IDNA
+normalisation before deciding, an explicit metadata and link-local deny list rather than
+`is_global`, `metadata` refused by name and by leftmost label, and the bare-label pass replaced by
+a declared allowlist — and then goes past it with packed-IPv4, userinfo, the IPv6 wrappers and an
+opt-in resolver check. The deny-by-default name path is what makes it trustworthy, rather than the
+enumeration. It reports its own remaining gap as a number in CI. And its author caught their own
+check passing by not looking, which is the first time that has happened here.
+
+**Conditions on merge:**
+
+1. **SEC-24 (MEDIUM)** — the 6to4/NAT64 unwrap must not permit; six rows added to
+   `bypass_table.py`.
+2. **SEC-25 (MEDIUM)** — `idna>=3.15`, plus the 253-character guard before `idna.encode()`.
+
+**Condition on closing #78** — SEC-02 and SEC-19 filed against #93 / D-050 with an owner and a
+milestone **before** #78 closes, not after. Identical to §12.3, for identical reasons.
+
+**Before merge, not a finding** — refresh the PR body's evidence block; "270 passed / No skips" is
+now "274 passed, 1 skipped".
+
+**Carried:** SEC-19 re-targeted at #93 and now **blocks the first PR landing a live model backend**
+(#35/#36). SEC-02 remains MEDIUM and open, owned by #93, now measured rather than assumed.
+
+I will re-verify SEC-24 and SEC-25 personally, by re-running my own cases, before this merges.
+
+### 14.11 Decision records to fold into `.project/decisions.md`
+
+**DR-SEC-R3-1 · SEC-19 is re-targeted at #93 rather than blocking #111**
+
+**Decision** — SEC-19 does not block #111. It moves to #93 / D-050 and becomes a merge gate on the
+first PR introducing a live model backend.
+
+**Options considered** — (a) block #111 until `contracts/checks.py` is rewired; (b) re-target to
+#93 with a named future merge gate; (c) close it as fixed because the gateway is 0 of 60.
+
+**Pros and cons** — (a) requires either editing another seat's file in a live worktree (a hard-rule
+breach for that seat) or importing `gateway` from the ASGI process, which C5 forbids; I do not get
+to require a hard-rule breach by attaching it to a severity. (c) is false — the boot gate demonstrably
+still admits `169.254.169.254` and `api.openai.com.evil.test`, and I executed that on this branch.
+(b) is accurate: the impact today is a misleading green check rather than an egress path, because
+nothing in the tree opens a socket to a model yet, and it names the exact moment that stops being
+true.
+
+**Cost implications** — zero now; one import change plus a test when D-050 consolidates.
+
+**Security implications** — a boot gate looser than the runtime control teaches operators that a
+green `manage.py check` means something it does not. Tolerable only while no live backend exists.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), with the gate on #35/#36 written down rather than remembered.
+
+**Final approval authority** — cybersecurity (severity and gate placement are mine).
+
+**DR-SEC-R3-2 · `pip-audit` becomes a CI step for every `requirements.txt`**
+
+**Decision** — recommend `pip-audit -r` in CI for every pinned Python requirements file.
+
+**Options considered** — (a) fix the `idna` pin and move on; (b) add `pip-audit` to CI; (c) add
+Dependabot or Renovate.
+
+**Pros and cons** — (a) leaves the next vulnerable pin undetected, and this one was introduced by
+the most security-conscious PR in the repository, which is the strongest available evidence that
+review does not catch it. (c) is better long-term and is a larger decision about bot noise during a
+seven-day build. (b) is one step, fails the build on a known CVE in a pinned dependency, and would
+have caught SEC-25 before I did.
+
+**Cost implications** — one CI step, a few seconds. Some risk of a red build from a new advisory on
+an unrelated day, which is the intended behaviour.
+
+**Security implications** — closes the gap between "we pin exactly" and "we know what we pinned".
+Exact pinning without an audit step is a decision to freeze whatever was vulnerable on the day.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b) now, (c) after the finale.
+
+**Final approval authority** — CTO (technical/CI); cybersecurity sets the dependency policy
+requirement.
