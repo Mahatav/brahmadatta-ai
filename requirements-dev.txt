@@ -26,3 +26,13 @@ httpx==0.28.1
 PyYAML==6.0.3
 # mypy stubs for the above.
 types-PyYAML==6.0.12.20260724
+
+# packages/test-fixtures/tests/test_mission_fixture.py validates the committed SSE
+# fixture against packages/schemas/openapi.json — the frozen contract dump. This is
+# what makes "a contract change breaks the fixture loudly" (#71) true rather than
+# aspirational; without it the check silently no-ops via pytest.importorskip.
+#
+# Pinned exactly, per this file's own header rule, not >=4.23: a floating minimum lets
+# a fresh jsonschema release change validation behaviour under a pull request with no
+# corresponding diff to review.
+jsonschema==4.26.0

@@ -1,0 +1,79 @@
+{
+  "fixture": "mission-pktcfg-001.events.jsonl",
+  "issue": "#71",
+  "generated_by": "packages/test-fixtures/tools/build_mission_fixture.py",
+  "generated_on": "2026-08-07",
+  "purpose": "Unblock Command Center panel work (#71) before the baseline worker exists. Build tool only - docs/09-company/10-fallback-ladder.md section 2.5 bans it from the finale.",
+  "honesty_note": "The mission narrative is fabricated: no orchestrator ran, and the events were assembled by the generator. The NUMBERS in it are not fabricated. Every measurement below came off a real run of demo/repositories/pktcfg on the machine described here, and a value in the fixture that is not traceable to a line in this file should not be there.",
+  "machine": {
+    "platform": "Darwin 25.5.0, arm64 (Apple silicon)",
+    "compiler": "Apple clang, -fsanitize=address,undefined",
+    "cmake": "cmake 4.2.1 (Homebrew)",
+    "ctest": "ctest 4.2.1"
+  },
+  "target": {
+    "path": "demo/repositories/pktcfg",
+    "snapshot_sha256": "3848673e21381f571831cf47b185758e89f76393687ea70932527aa42ac8b3d5",
+    "snapshot_algorithm": "sha256 over sorted (relative_path, sha256(contents)) pairs, .git excluded",
+    "file_count": 31,
+    "bytes_total": 57042
+  },
+  "measurements": [
+    {
+      "field": "baseline.tests_total / tests_passed / tests_failed",
+      "value": "8 / 8 / 0",
+      "command": "cmake -S . -B bld -DCMAKE_BUILD_TYPE=Debug -DPKTCFG_SANITIZE=ON && cmake --build bld -j4 && ctest --test-dir bld",
+      "observed": "100% tests passed, 0 tests failed out of 8"
+    },
+    {
+      "field": "baseline configure / build / ctest seconds",
+      "value": "0.641 / 0.490 / 2.177",
+      "command": "same, wall clock measured per step with time.monotonic()",
+      "observed": "duration_seconds 3.308 is their sum"
+    },
+    {
+      "field": "baseline resource usage (cpu_seconds, peak_memory_mb)",
+      "value": "2.326 / 46.7",
+      "command": "resource.getrusage(RUSAGE_CHILDREN) deltas around each step",
+      "observed": "ru_maxrss 46.7 MB across the build; cpu is utime+stime summed over the three steps"
+    },
+    {
+      "field": "finding.location, sanitizer frames",
+      "value": "src/decode.c:43 emit_tab, heap-buffer-overflow, WRITE of size 1",
+      "command": "./bld/pktcfg_replay crash/crash-literal-tab.bin 5",
+      "observed": "AddressSanitizer: heap-buffer-overflow on 0x6020000000f4; #0 emit_tab decode.c:43, #1 pkt_decode_into decode.c:148, #2 pkt_parse parse.c:126, #3 pktcfg_fuzz_one_input fuzz_entry.c:26; 0 bytes after a 4-byte region allocated at parse.c:120; exit 134"
+    },
+    {
+      "field": "reproducer.artifact.sha256 / size_bytes",
+      "value": "7a61fe76785718f0b94e4d60033b1f4037fa79eb7fd41039895773b91bc9eb5b / 22",
+      "command": "shasum -a 256 demo/repositories/pktcfg/crash/crash-literal-tab.bin",
+      "observed": "22-byte file"
+    },
+    {
+      "field": "candidate A gates (COMPILE, REPRODUCER_ELIMINATED, REGRESSION_PRESERVED)",
+      "value": "PASS / PASS / PASS -> VERIFIED",
+      "command": "git apply patches/candidate-a-correct-bounds-fix.patch; rebuild; pktcfg_replay crash-literal-tab.bin 5; ctest",
+      "observed": "build exit 0; reproducer exit 0 (no sanitizer report); 100% tests passed, 0 failed out of 8"
+    },
+    {
+      "field": "candidate B gates (COMPILE, REPRODUCER_ELIMINATED, REGRESSION_PRESERVED)",
+      "value": "PASS / PASS / FAIL -> REJECTED",
+      "command": "git apply patches/candidate-b-rejected-crash-only-fix.patch; rebuild; pktcfg_replay crash-literal-tab.bin 5; ctest",
+      "observed": "build exit 0; reproducer exit 0 (crash genuinely gone); 'The following tests FAILED: 4 - test_tab_expansion (Failed)' - 7 of 8 passed"
+    },
+    {
+      "field": "fuzzing.corpus_size / executions",
+      "value": "9",
+      "command": "ls demo/repositories/pktcfg/corpus/*.bin | wc -l, plus the recorded crash input",
+      "observed": "8 committed seeds + 1 crash input"
+    }
+  ],
+  "constructed_not_measured": [
+    "Event ids, timestamps and the trace id - fixed so the file is byte-stable across regeneration and a git diff stays readable.",
+    "Model provenance: model name, revision, prompt digest, transcript digest and the confidence values. No model was run. The confidences are chosen to make one point that the demo depends on - the REJECTED candidate carries the highest confidence in the mission - and the fixture's own test asserts that relationship rather than the numbers.",
+    "Artifact URIs. The evidence store does not exist yet (#20); these are well-formed pointers to nothing.",
+    "The libFuzzer build failure in the STRESS_TEST stage. The error text is real for a toolchain without libFuzzer (Apple clang has none), but this particular failure was written, not captured.",
+    "Candidate C and its patch-policy rejection. The diff is plausible and the policy outcome is what the policy would give; neither was executed.",
+    "Worktree digests on the verification records."
+  ]
+}

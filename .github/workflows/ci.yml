@@ -137,6 +137,43 @@ jobs:
       - name: Architecture tests
         run: pytest tests/ -q -rs
 
+      # The fixture and sandbox suites live outside `tests/` and outside apps/control-api,
+      # so neither existing step collected them — they passed locally and did not exist as
+      # far as CI was concerned. That made #71's central promise ("a contract change breaks
+      # the fixture loudly") true on a laptop and false on the branch that matters.
+      # Same shape as the bypass table gating only one of its two columns: a check nobody
+      # can fail is a document.
+      #
+      # This references packages/sandbox/, not services/sandbox/. An earlier version of
+      # this step (landed directly on this branch while the D-053 move was in flight)
+      # still pointed at services/sandbox/ — the exact stale-path failure mode BUG-016
+      # above already burned this project on once.
+      #
+      # SEC-34 (cybersecurity review of #113, Medium): an earlier version of this guard
+      # printed a warning and then `exit 0`d when a directory was missing — a check
+      # nobody can fail, the exact shape the CTO's own comment above this step warns
+      # about, reproduced in the guard meant to prevent it. Fixed to fail the job.
+      # `apps/control-api`'s existence check below is not the same situation and is not
+      # touched by this: at D1 that directory legitimately did not exist yet, and
+      # skipping cleanly during that bootstrap phase was correct. packages/sandbox and
+      # packages/test-fixtures are added complete in this PR — there is no "not built
+      # yet" phase for them from here on, so their absence in any future run can only
+      # mean a regression, and reports as one.
+      - name: Fixture and sandbox tests
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in packages/sandbox packages/test-fixtures; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::$dir does not exist. Unlike apps/control-api at D1, this directory is not still being built — it shipped complete in PR #113. Its absence means something moved or deleted it without updating this workflow."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 1
+          fi
+          pytest packages/sandbox/tests packages/test-fixtures/tests -q -rs
+
       - name: Control API tests
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
