@@ -26,3 +26,7 @@ httpx==0.28.1
 PyYAML==6.0.3
 # mypy stubs for the above.
 types-PyYAML==6.0.12.20260724
+
+# Validates the committed SSE fixture against the frozen event envelope, so a contract
+# change fails the fixture suite rather than surfacing as a dead panel on D3.
+jsonschema>=4.23

@@ -137,6 +137,15 @@ jobs:
       - name: Architecture tests
         run: pytest tests/ -q -rs
 
+      # The fixture and sandbox suites live outside `tests/` and outside apps/control-api,
+      # so neither existing step collected them — they passed locally and did not exist as
+      # far as CI was concerned. That made #71's central promise ("a contract change breaks
+      # the fixture loudly") true on a laptop and false on the branch that matters.
+      # Same shape as the bypass table gating only one of its two columns: a check nobody
+      # can fail is a document.
+      - name: Fixture and sandbox tests
+        run: pytest packages/test-fixtures/tests services/sandbox/tests -q -rs
+
       - name: Control API tests
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
