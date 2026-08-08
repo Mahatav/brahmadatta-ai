@@ -4140,3 +4140,227 @@ independently confirmed fixed, and no further stale reference survives anywhere 
 (§17.8). The gap this review adds is the one the task asked me to specifically go looking for —
 a way to make a child survive the timeout — and it exists. I will re-verify SEC-33 personally
 once a fix or a corrected claim lands, before #28 begins relying on this module.
+
+---
+
+## 18. Re-verification — 2026-08-08 · PR #113's SEC-33…SEC-36 fix at `2814723`
+
+Requested by the orchestrator, with an explicit instruction not to trust the fix report and to
+specifically re-attack SEC-33, including variants at different points in the child's lifecycle,
+and to reproduce the reaper/no-reaper environmental difference myself. All probes in this section
+were executed fresh against `2814723` (`feat/sandbox-and-fixtures`), in the same
+`.worktrees/pr113-review` worktree used for §17, with a rebuilt venv. Every artifact created by
+this session's probes has been removed from the worktree; nothing here is committed.
+
+**Result: two of four findings fully closed and independently re-verified (SEC-34, SEC-36); one
+substantially closed with a residual gap under adversarial conditions (SEC-33); one only
+partially closed (SEC-35).** I am not signing off on "all four fixed" as stated — the fix report
+undersold what's still open on two of them, and the coordinator's suspicion that this was worth
+checking rather than trusting was warranted for both.
+
+### 18.1 SEC-33 — the orphan escape: primary vector closed, a narrower residual race found under real default settings
+
+**Read first.** `_kill_group` now snapshots the descendant tree by walking `/proc`'s parent-id
+links *before* touching the process group (`_proc_descendants`, `jail.py:75-133`), runs the
+existing `killpg()` sequence, then sweeps the snapshot plus a fresh re-walk for up to 5 seconds
+and `SIGKILL`s anything still linked by parent id — independent of process group or session. This
+is exactly the right idea: `setsid()` cannot change a process's parent id, only its group/session,
+so a parent-id walk finds a detached descendant `killpg()` never could.
+
+**Direct re-attack of my original PoC — CLOSED, thoroughly.** Reran the exact `os.setsid()`
+grandchild PoC from §17.3, both with and without `docker run --init`:
+
+```
+--- WITHOUT --init (bash as PID 1, no reaper) ---
+limit_hit: WALL_CLOCK
+pid 15 is dead -- fix holds, no escape this run
+
+--- WITH --init (docker-init/tini as PID 1, a real reaper) ---
+limit_hit: WALL_CLOCK
+pid 16 is dead -- fix holds, no escape this run
+```
+
+**Lifecycle-timing variants, per the specific instruction to test more than the original timing —
+all held:**
+
+```
+[immediate]          delay=0.00s  limit_hit=WALL_CLOCK  no escape (dead or zombie-only)
+[mid-flight]          delay=1.00s  limit_hit=WALL_CLOCK  no escape (dead or zombie-only)
+[near-boundary]        delay=1.80s  limit_hit=WALL_CLOCK  no escape (dead or zombie-only)
+[right-at-boundary]     delay=1.95s  limit_hit=WALL_CLOCK  no escape (dead or zombie-only)
+```
+
+(A process detaching at each point relative to a 2.0s wall-clock timeout: immediately, mid-run,
+just before the boundary, and essentially at the boundary. All four closed.)
+
+**The zombie/reaper story — independently reproduced, and it is true, not a plausible-sounding
+fabrication.** Without `--init`, a `SIGKILL`ed detached descendant genuinely persists as an
+unreaped zombie (`/proc/<pid>/stat` state `Z`) — I polled it every 0.2s for 6 seconds and it
+never cleared:
+
+```
+t+0.0s .. t+5.8s: /proc/13 state='Z'  (every single poll)
+STILL PRESENT IN /proc AFTER 6s OF POLLING
+os.kill(pid,0) SUCCEEDS  <- a naive liveness check would misreport this as "alive" forever
+```
+
+A naive check (`os.kill(pid, 0)`, which succeeds against a zombie — it still occupies a
+process-table slot) would indeed misreport this as a surviving orphan, matching the fix report's
+account of its own first, wrong, verification attempt. `_pid_running` (`jail.py:136-167`) checks
+`/proc`'s state field specifically to avoid exactly that, and it is the right call: a zombie has
+already terminated and holds no CPU or memory beyond the process-table entry — `SIGKILL` already
+reached it and did its job. **This part of the report is accurate, confirmed independently, not
+taken on trust.**
+
+**What is not fully closed: a probabilistic race under rapid repeated fork+detach, reproducible
+even at the module's real default `kill_grace_seconds` (not just an artificially tight test
+value).** Per the specific instruction to try variants beyond the single-fork timing, I stress-
+tested a jailed process that forks and `setsid()`s a new detached child every ~20ms for up to
+0.8s, continuously, so that some fraction of forks land inside the exact window `_kill_group`'s
+snapshot-then-sweep sequence is racing against:
+
+```
+10 iterations at the module's DEFAULT kill_grace_seconds (5.0s): 1 escape
+  iter 9: ESCAPE with default kill_grace_seconds=5.0 -- pid 235, checked alive 2s later
+```
+```
+20 iterations at an adversarially tight kill_grace_seconds=0.05s: 1 persistent escape
+  iter 8: PERSISTENT ESCAPE after 3s -- pid 219, state='S' (genuinely running, not a zombie)
+```
+
+In both configurations, `jail.run()` returned normally — it did **not** raise
+`JailUnavailableError`, which `_sweep_detached_descendants`'s own final check (`jail.py:315-324`)
+is supposed to do if a straggler remains after the 5-second sweep. That check re-walks
+`_proc_descendants(root_pid)` one more time — but by the time of that final check, `root_pid` (the
+jail's own direct child) is itself already dead and reaped, so a descendant that forked and
+reparented in the narrow gap between two 0.1s poll iterations of the retry loop can, by the same
+"reparenting breaks the ppid-walk anchor" mechanism the fix's own docstring explains for the
+*original* bug, become briefly invisible to a walk anchored on `root_pid` a second time — one
+level deeper than the case the fix was built to close. The escape rate in my testing was roughly
+1-in-10 to 1-in-15 iterations, requiring specifically rapid, repeated forking timed against the
+kill window — not the single trivial line of the original bug, but a real, silent (no exception,
+no error logged), reproducible gap under the exact adversarial pattern a hostile or
+poorly-behaved fuzz target could produce.
+
+**Revised severity: SEC-33 is downgraded from HIGH to CLOSED for the primary vector, with a new
+sub-finding, SEC-38 (MEDIUM), for the residual race.** The property the CTO's D-053 ruling cited
+— "no orphans" — now holds for every single-instance detachment technique I could construct,
+including timing variants, and is a real, verified improvement. It does not yet hold against
+rapid, repeated fork-and-detach pressure. Given #28 is exactly the context where an adversarial
+target gets to choose its own behavior, this residual is worth closing before that milestone, but
+it is a materially smaller and harder-to-hit gap than the one this review originally found, and
+does not warrant blocking merge on its own.
+
+**Required fix for SEC-38.** Either (a) hold the retry loop's poll interval tight enough, and the
+snapshot frequent enough, that the reparent-on-death race window cannot open in practice — the
+underlying problem is that `root_pid`'s own death is what breaks the anchor, so a poll cadence
+significantly faster than `root_pid`'s own kill sequence would shrink the window rather than
+close it structurally; or (b), the more robust fix, set the process a `PR_SET_CHILD_SUBREAPER` on
+a hierarchy above the jail (or run the sweep as the pid-namespace's own init) so that a detaching
+descendant reparents to something this code already owns and can keep walking, rather than to an
+external init the walk loses track of. A named regression test exercising rapid repeated
+detachment (not just a single one) is the standing-rule requirement either way.
+
+**Location** — `packages/sandbox/jail.py:282-324` (`_sweep_detached_descendants`).
+
+### 18.2 SEC-34 — CI stale-path guard now genuinely fails a run: CLOSED, verified by execution
+
+Not just read — I extracted the exact shell block from `.github/workflows/ci.yml` and ran it
+directly against a directory deliberately made to not exist:
+
+```
+$ bash -c '
+set -euo pipefail
+missing=0
+for dir in packages/sandbox packages/test-fixtures; do
+  if [ ! -d "$dir" ]; then
+    echo "::error::$dir does not exist."
+    missing=1
+  fi
+done
+if [ "$missing" = "1" ]; then exit 1; fi
+'
+::error::packages/sandbox does not exist.
+$ echo "actual exit code: $?"
+actual exit code: 1
+```
+
+Real nonzero exit, confirmed by execution, not by reading the diff. **CLOSED.**
+
+### 18.3 SEC-35 — `LimitKind.FILE_SIZE`: closed for the fix's own test shape, still open for a Python-based target
+
+**Not fully closed — reopened, as MEDIUM, unchanged from §17.** The fix adds a `SIGXFSZ`-signal
+branch to `_classify` and a new test (`test_file_size_limit_is_reported_as_file_size_not_none`)
+that runs `/bin/dd if=/dev/zero of=toolarge.bin bs=1M count=50` against a 1 MiB cap and confirms
+`limit_hit == LimitKind.FILE_SIZE`. I reran that exact test — it passes. I then reran my original
+manual PoC style from §17.5 (a Python `open(...).write()` loop, not `dd`) against the fixed code:
+
+```
+limit_hit: NONE
+signal_number: None
+AssertionError: MISCLASSIFIED as NONE
+```
+
+Reproduced across four chunk-size variants (exact-multiple 1 MiB chunks against a 4 MiB cap,
+3 MiB and 5 MiB chunks straddling the boundary, and a smaller chunk size) — all four fall through
+to `NONE`, none raise `SIGXFSZ`, all instead surface a plain, catchable
+`OSError: [Errno 27] File too large` in the target Python process. **Root-caused, independently
+of the jail entirely** — this is not a jail bug, it is a real CPython behavior the fix's comment
+did not account for:
+
+```
+$ python3 -c "import signal; print(signal.getsignal(signal.SIGXFSZ))"
+1          # == signal.SIG_IGN
+```
+
+**CPython ignores `SIGXFSZ` by default at interpreter startup.** A `dd` binary, or any target
+that has not itself changed `SIGXFSZ`'s disposition, dies from the signal and `_classify` now
+correctly catches it. A Python-based target or tool — which, in this pipeline's own stack, is not
+an exotic case; Python build helpers, generators, and test harnesses are entirely plausible things
+to run inside this jail, not to mention the demo-target build tooling itself being invoked from a
+Python orchestrator — never receives the signal at all, and the classifier's new branch never
+fires, reproducing the exact original bug (`limit_hit == NONE` for a run genuinely stopped by
+`RLIMIT_FSIZE`) for that whole class of target. The fix's own comment overclaims generality:
+"exceeding it always raises this signal directly" (`jail.py:734-737`) is not true for any process
+that ignores or handles `SIGXFSZ`, and CPython does so by default.
+
+**Required fix, unchanged in substance from §17.5's original ask, now sharpened.** `_classify`
+already applies exactly this dual-detection pattern one branch above, for `MEMORY`
+(`allocation_failed = any(marker in stderr for marker in (...))`, `jail.py:748-756`) — because
+`RLIMIT_AS` has the same "the signal path is not the only path" problem. `FILE_SIZE` needs the
+same treatment: match on the target's own reported failure (`"File too large"`, `OSError: [Errno
+27]`, or the file actually sitting at exactly `policy.max_file_bytes` on disk) in addition to
+`SIGXFSZ`, not instead of it.
+
+**Location** — `packages/sandbox/jail.py:735-738` (`_classify`'s `SIGXFSZ` branch).
+
+### 18.4 SEC-36 — docstring correction: CLOSED, verified
+
+`max_file_bytes`'s docstring now states the limit is per-file, not aggregate, and
+`test_file_size_limit_bounds_one_file_not_aggregate_usage` demonstrates the gap directly — I
+reran it, it passes, and it is checking the right thing (20 files at 1 MiB each against a 2 MiB
+cap, none individually over the limit, all 20 written, `limit_hit == NONE` correctly). **CLOSED.**
+
+### 18.5 Verdict, revised
+
+**Still PASS WITH CONDITIONS.** No Critical. Two findings closed and independently re-verified
+(SEC-34, SEC-36). SEC-33's primary, deterministic vector is closed and thoroughly re-attacked
+across timing variants and the reaper/no-reaper environmental split — genuinely good work, and
+the zombie-vs-alive story in the fix report is true, not merely plausible-sounding. **New:
+SEC-38 (MEDIUM)** — a narrower probabilistic race remains under rapid repeated fork-and-detach,
+reproducible even at the module's real default settings (~1-in-10 in my testing), not just
+adversarially tight ones. **SEC-35 (MEDIUM) remains open** — the fix closes the case its own test
+exercises (a signal-respecting binary target) but not a Python-based target, which is a realistic
+case in this stack, not a hypothetical one, and CPython's default `SIGXFSZ`-ignoring behavior is
+independently confirmed, not assumed.
+
+**Before `packages/sandbox` is relied on for #28:**
+1. SEC-38 (MEDIUM) — close the reparent-race window in `_sweep_detached_descendants`, or make the
+   loop demonstrably tight enough that it cannot open; add a rapid-repeated-detachment regression
+   test, not just the single-detachment one already added.
+2. SEC-35 (MEDIUM) — extend `_classify`'s `FILE_SIZE` branch with the same stderr/on-disk-size
+   fallback `MEMORY` already uses, so a Python-based (or any `SIGXFSZ`-ignoring) target is
+   classified correctly too.
+
+SEC-34 and SEC-36 need no further action. I did not simply trust the fix report on any of the
+four — every claim was re-attacked directly, and two held up short of what was claimed.
