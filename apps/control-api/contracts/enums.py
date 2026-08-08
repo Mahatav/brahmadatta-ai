@@ -260,6 +260,20 @@ class EvidenceSource(StrEnum):
     REPLAYED_ARTIFACT = "REPLAYED_ARTIFACT"
 
 
+class InferenceMode(StrEnum):
+    """Whether a model response was generated live or replayed from a transcript.
+
+    Required on every `ModelProvenance`; no default, by the same reasoning as
+    `DiscoveryMethod` and `FuzzingMode` (D-049). D-015 cut the rented GPU, so the D5
+    gate rests on a quantized CPU-served model and a replay-mode gateway is the
+    approved fallback. Serving a captured response is legitimate; letting silence
+    claim it was generated live is not.
+    """
+
+    LIVE_INFERENCE = "LIVE_INFERENCE"
+    REPLAYED_TRANSCRIPT = "REPLAYED_TRANSCRIPT"
+
+
 class FuzzingMode(StrEnum):
     """Whether a fuzzing campaign actually ran (#83)."""
 

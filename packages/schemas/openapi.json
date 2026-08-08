@@ -589,13 +589,8 @@
             "type": "string"
           },
           "isolation_mode": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/IsolationMode"
-              }
-            ],
-            "default": "ROOTLESS_CONTAINER",
-            "description": "How the target was contained. A subprocess jail (#81) is weaker than a rootless container and is reported as what it is."
+            "$ref": "#/components/schemas/IsolationMode",
+            "description": "How the target was contained. Required, with no default (D-049): the previous default claimed ROOTLESS_CONTAINER, which is the stronger of the two, so a bundle assembled by code that forgot the field overclaimed the isolation posture. A subprocess jail (#81) is weaker and is reported as what it is."
           },
           "mission_id": {
             "format": "uuid",
@@ -609,6 +604,19 @@
             },
             "title": "Patches",
             "type": "array"
+          },
+          "recommended_patch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The one diff we stand behind. Derived and validated, not free-form: it must name a patch in `patches` whose verification verdict is VERIFIED, and when exactly one candidate verified it must be that one. A bundle showing two verified patches without naming one invites a judge to pick the wrong one and ask why we shipped it.",
+            "title": "Recommended Patch Id"
           },
           "reproducers": {
             "items": {
@@ -665,7 +673,8 @@
           "generated_at",
           "snapshot_sha256",
           "authorization_statement",
-          "resource_usage"
+          "resource_usage",
+          "isolation_mode"
         ],
         "title": "EvidenceBundle",
         "type": "object"
@@ -1140,13 +1149,8 @@
             "title": "Evidence Ref"
           },
           "evidence_source": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/EvidenceSource"
-              }
-            ],
-            "default": "TOOL_EXECUTION",
-            "description": "Where this result came from. A REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS."
+            "$ref": "#/components/schemas/EvidenceSource",
+            "description": "Where this result came from. Required, with no default (D-049): a default here is a claim the system makes on the caller's behalf when they say nothing, and the old default said 'a tool ran'. Code populating a gate from a stored artifact that forgot this field used to PASS the gate. A REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS, and a NOT_RUN result may not claim TOOL_EXECUTION."
           },
           "name": {
             "$ref": "#/components/schemas/GateName"
@@ -1164,7 +1168,8 @@
         },
         "required": [
           "name",
-          "status"
+          "status",
+          "evidence_source"
         ],
         "title": "GateResult",
         "type": "object"
@@ -1234,6 +1239,15 @@
         ],
         "title": "HealthResponse",
         "type": "object"
+      },
+      "InferenceMode": {
+        "description": "Whether a model response was generated live or replayed from a transcript.\n\nRequired on every `ModelProvenance`; no default, by the same reasoning as\n`DiscoveryMethod` and `FuzzingMode` (D-049). D-015 cut the rented GPU, so the D5\ngate rests on a quantized CPU-served model and a replay-mode gateway is the\napproved fallback. Serving a captured response is legitimate; letting silence\nclaim it was generated live is not.",
+        "enum": [
+          "LIVE_INFERENCE",
+          "REPLAYED_TRANSCRIPT"
+        ],
+        "title": "InferenceMode",
+        "type": "string"
       },
       "IsolationMode": {
         "description": "How the target was contained (#81).\n\n`SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an\nacceptable D3 fallback and it must never be reported as the container path.",
@@ -1969,6 +1983,10 @@
             "title": "Context Bytes",
             "type": "integer"
           },
+          "inference_mode": {
+            "$ref": "#/components/schemas/InferenceMode",
+            "description": "LIVE_INFERENCE or REPLAYED_TRANSCRIPT. Required, no default: a default here would be the system making a provenance claim on the caller's behalf when they said nothing, and every such default should point at the weaker claim or not exist. Whatever renders provenance reads this."
+          },
           "model_name": {
             "maxLength": 200,
             "title": "Model Name",
@@ -2027,7 +2045,8 @@
         },
         "required": [
           "model_name",
-          "served_from"
+          "served_from",
+          "inference_mode"
         ],
         "title": "ModelProvenance",
         "type": "object"
@@ -3480,7 +3499,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -3585,7 +3604,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -3693,7 +3712,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -3812,7 +3831,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -3921,7 +3940,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4039,7 +4058,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4148,7 +4167,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4280,7 +4299,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4388,7 +4407,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4506,7 +4525,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4637,7 +4656,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4755,7 +4774,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4863,7 +4882,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -4994,7 +5013,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5113,7 +5132,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5231,7 +5250,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5339,7 +5358,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5457,7 +5476,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5575,7 +5594,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5673,7 +5692,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5766,7 +5785,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5883,7 +5902,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -5980,7 +5999,7 @@
                 }
               }
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {

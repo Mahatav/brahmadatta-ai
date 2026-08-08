@@ -46,9 +46,12 @@ class GateResult(Schema):
     name: GateName
     status: GateStatus
     evidence_source: EvidenceSource = Field(
-        default=EvidenceSource.TOOL_EXECUTION,
-        description="Where this result came from. A REPLAYED_ARTIFACT result may be "
-        "recorded and displayed; it may not be PASS.",
+        description="Where this result came from. Required, with no default (D-049): "
+        "a default here is a claim the system makes on the caller's behalf when they "
+        "say nothing, and the old default said 'a tool ran'. Code populating a gate "
+        "from a stored artifact that forgot this field used to PASS the gate. A "
+        "REPLAYED_ARTIFACT result may be recorded and displayed; it may not be PASS, "
+        "and a NOT_RUN result may not claim TOOL_EXECUTION.",
     )
     tool: str = Field(
         default="",
@@ -69,6 +72,13 @@ class GateResult(Schema):
 
     @model_validator(mode="after")
     def _a_pass_requires_a_tool_that_ran(self) -> "GateResult":
+        if self.status is GateStatus.NOT_RUN:
+            if self.evidence_source is EvidenceSource.TOOL_EXECUTION:
+                raise ValueError(
+                    f"gate {self.name} is NOT_RUN and cannot also claim TOOL_EXECUTION; "
+                    f"a gate that did not run had no tool execution to source from."
+                )
+            return self
         if self.status is not GateStatus.PASS:
             return self
         if self.evidence_source is not EvidenceSource.TOOL_EXECUTION:
@@ -85,7 +95,25 @@ class GateResult(Schema):
 
     @classmethod
     def not_run(cls, name: GateName, reason: str) -> "GateResult":
-        return cls(name=name, status=GateStatus.NOT_RUN, detail=reason)
+        """The only sanctioned way to build a NOT_RUN result.
+
+        `evidence_source` is stated here rather than defaulted, and it is the weaker
+        of the two values `EvidenceSource` offers: nothing was executed for this gate,
+        so `TOOL_EXECUTION` would be the overclaim. `REPLAYED_ARTIFACT` is an imprecise
+        label for "nothing at all" and it is the honest direction to be imprecise in —
+        a third member (`NONE`) would be exact and is deliberately not added here,
+        because it widens the generated TypeScript union outside the one batched
+        contract change D-048 authorised. Flagged to the CTO on the PR.
+
+        `reason` is required by the signature — D-009 wants "did not run" to be as loud
+        as pass and fail, and a bare NOT_RUN with no reason is the quiet version.
+        """
+        return cls(
+            name=name,
+            status=GateStatus.NOT_RUN,
+            evidence_source=EvidenceSource.REPLAYED_ARTIFACT,
+            detail=reason,
+        )
 
 
 #: Gates that must PASS for a `VERIFIED` verdict. Non-negotiable set (P0-11).

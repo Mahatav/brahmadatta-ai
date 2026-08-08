@@ -68,6 +68,28 @@ class VerificationRequiredError(ContractError):
     )
 
 
+class CandidateSetFrozenError(ContractError):
+    """A patch candidate was offered after verification had already begun (D-046).
+
+    Without this, *"add one more candidate and re-verify"* reaches generate-until-pass
+    with no transition-table change for a reviewer to object to — the one failure mode
+    in this system that leaves no diff to catch it.
+
+    It reuses `ErrorCode.CONFLICT` deliberately. A dedicated member would be the more
+    descriptive code, and `ErrorCode` is a `StrEnum` consumed by generated TypeScript:
+    D-030 froze it and said no further additions. The specifics travel in `details`
+    instead of in the vocabulary.
+    """
+
+    code = ErrorCode.CONFLICT
+    http_status = 409
+    default_message = (
+        "The candidate set is frozen: verification has already started for this "
+        "mission. A candidate added now could only be an attempt to generate until "
+        "something passes."
+    )
+
+
 class ExternalInferenceBlockedError(ContractError):
     """An inference endpoint pointed outside the trust boundary.
 
