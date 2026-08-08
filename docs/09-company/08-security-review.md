@@ -26,7 +26,8 @@ says so in §7 rather than being left out.
 | **PR #74 — `demo/repositories/pktcfg`** | **PASS WITH CONDITIONS** — SEC-06 and SEC-09 before merge; SEC-10 before the repository is made public. Nothing in this PR blocks it. |
 | **Issue #78 — egress** | **REMAINS OPEN. NOT CLOSED.** The invariant is not structural. Two findings, one Critical (SEC-01) and one High (SEC-02). Claim wording is constrained until both close — §5. |
 | **Isolation substitution** — `--network none` + non-root instead of rootless Podman | **ACCEPTED, with eight binding conditions.** §6. |
-| **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** |
+| **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
+| **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -1706,3 +1707,711 @@ far — the topology fix, the separate `api`/`edge` split I did not ask for, D-0
 that survives a negative control, and an evidence script honest enough to carry its own control
 case. SEC-04, SEC-05, SEC-08 and SEC-14 are in its files and are all Medium or Low; they are
 follow-ups, not merge blockers.
+
+---
+
+## 13. Round 2 — 2026-08-08 · PR #110 `feat/state-machine` · the mission state machine
+
+Required by architecture spec §4.3 and D-045. This is the adversarial pass: I tried to reach a
+terminal `VERIFIED` state improperly and to defeat the D-046 candidate freeze. The `qa-engineer`
+seat is running the lock-dependent properties against real PostgreSQL in parallel — **I did not
+reproduce their work and everything below is single-threaded**, which is the same limitation the
+author declared. Every result in this section came from a command I ran in this session against
+`origin/feat/state-machine` at `4db0212`, in an isolated worktree.
+
+**Verdict: PASS WITH CONDITIONS.** No Critical. Three findings (SEC-15, SEC-16, SEC-18) are merge
+conditions. SEC-15 becomes Critical the moment an HTTP route is wired to `record_verification`.
+
+### 13.0 What the author got right, because it is most of the file
+
+The round-1 hole is properly closed and I could not reopen it. Stated first because the rest of
+this section is findings, and the ratio would otherwise mislead.
+
+```
+[BLOCKED]  A1 duck-typed object with .verdict          VerificationRequiredError
+[BLOCKED]  A2 another mission's VERIFIED record        VerificationRequiredError
+[BLOCKED]  A3 required gate NOT_RUN -> verdict         derive_verdict=HUMAN_REVIEW_REQUIRED
+[BLOCKED]  A4 confidence=0.99 smuggled onto GateResult ValidationError
+[BLOCKED]  B1 record_patch_candidate() after VERIFY started    CandidateSetFrozenError
+[BLOCKED]  B5 re-verify the same candidate until it passes     IntegrityError
+[BLOCKED]  C1 pause in VERIFY -> resume into BASELINE          InvalidStateTransitionError
+[BLOCKED]  C2 stale paused_from lets a 2nd pause resume backwards  InvalidStateTransitionError
+[BLOCKED]  C3 second BaselineReport for one mission            IntegrityError
+```
+
+C2 is worth naming: I specifically attacked `paused_from` as a stale value — pause in `BASELINE`,
+resume, walk forward to `VERIFY`, pause again — on the theory that a marker set on the way in and
+never cleared would let the second pause resume into the first pause's origin. It is cleared:
+
+```
+after resume, paused_from = None
+after 2nd pause, paused_from = 'VERIFY'
+```
+
+`transitions.py:161-162` clears it on the way out, and `BaselineReport.mission` is a
+`OneToOneField` underneath. **`paused_from` does prevent a mission resuming backwards into
+`BASELINE` and writing a second baseline for one snapshot.** That is the denominator of the
+"regression preserved" claim and it holds, at both layers, on this branch.
+
+`derive_verdict` also holds against the confidence axis: `GateResult` is `extra="forbid"`, gate
+status is a four-valued enum, and there is no numeric field on the path from evidence to verdict.
+I found no route from a confidence value to a verdict.
+
+### 13.1 A correction to the framing of BUG-004(c), which changes what the test has to prove
+
+The brief — and D-045 — describe the uncatchable case as *"a set with a `REJECTED` record
+dropped"*. Executed, that framing is wrong, and it matters:
+
+```
+  [VERIFIED, REJECTED]      -> VERIFIED
+  [VERIFIED]                -> VERIFIED
+  [VERIFIED, HUMAN_REVIEW]  -> HUMAN_REVIEW_REQUIRED
+```
+
+`derive_mission_verdict` (`contracts/verdict.py:215-222`) is **any-VERIFIED-wins**. Dropping a
+`REJECTED` record therefore cannot change the mission verdict — it is a no-op, and a guard that
+refused it would be refusing nothing. The drop that *does* change the answer is
+`HUMAN_REVIEW_REQUIRED`, which outranks everything.
+
+My first attempt at this attack passed its control case and I discarded it. The author's test is
+not making that mistake: `test_a_dropped_rejection_cannot_reach_verified`
+(`orchestrator/tests/test_verdict_completeness.py:85-126`) is **named** for the rejection case but
+its body builds `VERIFIED` + a `NOT_RUN` regression gate — i.e. the `HUMAN_REVIEW` case, the one
+that bites. The test is correct and the name is not. See SEC-23(c).
+
+Anyone re-deriving this later should take the corrected rule: **the record whose removal reaches
+`VERIFIED` is a `HUMAN_REVIEW_REQUIRED` one, not a `REJECTED` one.**
+
+---
+
+### SEC-15 · **HIGH** · `record_verification` never checks the patch belongs to the mission — this defeats D-046 through the sanctioned API
+
+**Location** — `apps/control-api/orchestrator/candidates.py:216-267`, the write at `:253-256`.
+`patch_id` arrives as a parameter and is assigned straight to the foreign key. Nothing compares
+`PatchCandidate.mission_id` to `mission_id`.
+
+**Why it matters more than a referential-integrity nit.** D-046 freezes *the candidate set of one
+mission*. It does not freeze the set of candidates that can be *verified into* that mission,
+because the verification writer never asks which mission a candidate came from.
+
+**Exploit scenario, executed — no direct ORM writes, only the sanctioned orchestrator API:**
+
+```
+  mission A frozen at 2026-08-08 02:57:27.014369+00:00
+  mission A verdict now: REJECTED
+  record_verification(mission=A, patch=B's) -> ACCEPTED, record 024fa10d-4508-4dde-b29c-efb3c444fe61
+    record.mission_id       = 828aa0ce-e296-41de-9dd9-8278d1434747
+    record.patch.mission_id = b0431815-cf9d-4255-90f7-a3ad21f0f035
+    -> they differ; nothing in record_verification compares them
+  mission A verdict now: VERIFIED
+  mission A terminal state: VERIFIED, verdict VERIFIED
+  candidates belonging to mission A: 1 (all REJECTED); verification records on A: 2
+```
+
+Mission A's own candidate set contains exactly one candidate and it was `REJECTED`. Mission A is
+frozen, so `record_patch_candidate` correctly refuses to add another. The attacker creates a
+second mission — an ordinary operator action — adds a candidate there, and verifies *that*
+candidate into mission A. Mission A reaches terminal `VERIFIED`.
+
+**This is generate-until-pass with one extra step, and it needs no transition-table change, no
+direct database write, and no convention broken.** It is the exact failure mode
+`orchestrator/candidates.py`'s own module docstring says the file exists to prevent. Every guard
+in the chain behaves as designed: `assert_verdict_is_evidenced` sees a real `VerificationRecord`
+whose `mission_id` is A's, because the row genuinely was written against A.
+
+The mission-binding check at `state_machine.py:422` is bypassed not by forging a record but by
+**relabelling one at creation time** — the check reads the column the attacker got to set.
+
+**Not Critical today, and here is the bright line.** The HTTP routers still return 501 (the
+author declares this), so no network-reachable caller supplies `patch_id`. The attack needs
+in-process access. **The moment a route calls `record_verification` with a `patch_id` taken from
+a request body, this is Critical and I will rate it so** — that is the next PR, so fix it in this
+one.
+
+**Required fix** — inside the existing `transaction.atomic()` and under the same mission row lock,
+before the write:
+
+```python
+patch = PatchCandidate.objects.get(pk=patch_id)
+if patch.mission_id != mission.id:
+    raise InvalidStateTransitionError(...)   # or a dedicated ContractError
+```
+
+Plus a named test — `test_a_candidate_from_another_mission_cannot_be_verified_into_this_one` —
+that builds the two-mission shape above and asserts the refusal. A `unique_together`-style
+constraint cannot express this; it has to be the check.
+
+---
+
+### SEC-16 · **HIGH** · The completeness guarantee is a property of one function, not a mechanism — and I reached `VERIFIED` past it
+
+**Location** — `apps/control-api/contracts/state_machine.py:445` (`verifications: Sequence[...] =
+()` on the public `assert_transition`), `apps/control-api/missions/models.py:98-155`
+(`Mission.state` has no writer guard), `apps/control-api/orchestrator/transitions.py:150`.
+
+**The brief asked me to judge this plainly, so: the defence is real but it is not a mechanism, and
+it is one import away from being undone.**
+
+What is genuinely mechanical: `transitions.transition` takes no verification argument, and
+`test_transition_takes_no_verification_argument_from_its_caller` asserts its signature is exactly
+`{mission_id, target, trace_id, reason, now}`. `test_the_records_are_loaded_by_mission_with_no_filter`
+reads `load_verifications`'s source and fails on `.exclude(`, `verdict=`, `[:`, `.first()`,
+`.last()`. Both are good tests and I could not defeat either.
+
+What they guard is **one function and one loader**. They do not guard the surface that reaches
+the same outcome without touching either. `assert_transition` is public, exported, and its
+`verifications` parameter accepts whatever a caller assembles.
+
+**Exploit scenario, executed. The control cases are in the output because without them this proves
+nothing:**
+
+```
+  records in DB: ['VERIFIED', 'HUMAN_REVIEW_REQUIRED']
+  [BLOCKED]  orchestrator.transitions.transition() -> VERIFIED  (VerificationRequiredError)
+  [BLOCKED]  assert_transition(full set) -> VERIFIED            (VerificationRequiredError)
+  [*** REACHED ***] assert_transition(pruned set: ['VERIFIED']) -> VERIFIED, then Mission.save()
+                    mission is now state=VERIFIED verdict=VERIFIED with 2 records on disk,
+                    one of them HUMAN_REVIEW_REQUIRED
+```
+
+The sanctioned path refuses. The honestly-fed guard refuses. The same guard, one record withheld,
+permits — and `Mission.save()` then writes the terminal state with nothing objecting.
+
+And the second half, which is why the first half is reachable at all:
+
+```
+  A7 CREATED -> VERIFIED via queryset .update()
+     state=VERIFIED verdict=VERIFIED (no Mission.save/state guard exists)
+```
+
+**In this PR's favour, and I checked rather than assumed** — there is exactly one writer of
+`Mission.state` in the tree today:
+
+```
+   ./orchestrator/events.py:68:        state=str(state or mission.state)     (a read)
+   ./orchestrator/transitions.py:150:    mission.state = str(target)          (the write)
+```
+
+So the convention holds *right now*. The finding is that nothing makes it keep holding, and the
+HTTP layer that will want to write state has not been written yet — which is the cheapest possible
+moment to install the mechanism, and the last moment before three routers make it expensive.
+
+`missions/models.py` already contains the idiom three times: `Authorization`, `Snapshot` and
+`MissionEvent` each override `save()` to refuse. `Mission` — the model carrying the two rulings —
+does not.
+
+**Required fix**, either is acceptable and the second is a 20-line test:
+
+1. A `Mission.save()` override that refuses a change to `state` unless it is invoked from within
+   `transitions.transition` (a module-level context flag set under the row lock), matching the
+   append-only idiom already in the file; **or**
+2. An architecture test in `tests/architecture/` — now collected by CI, see SEC-12 below —
+   asserting that `mission.state =` and `Mission.objects...update(state=` appear in exactly one
+   file, `orchestrator/transitions.py`, and that `assert_transition(` appears in exactly one
+   non-test file, the same one. That is the same structural-read technique
+   `test_the_records_are_loaded_by_mission_with_no_filter` already uses, applied one level up.
+
+Without one of these, the CTO's assessment is confirmed: **this is the one item a future refactor
+can quietly undo, and no test fails when it does.**
+
+---
+
+### SEC-17 · **MEDIUM** · The D-046 freeze has no model-level backstop, in a file where three other models have one
+
+**Location** — `apps/control-api/missions/models.py:454-492`. `PatchCandidate` has no `save()`
+override. Its own docstring at `:458-460` says *"Inserting one is not a plain `save()`. Go through
+`orchestrator.candidates.record_patch_candidate`"* — which is a comment, not a mechanism.
+
+**Exploit scenario, executed:**
+
+```
+[BLOCKED]          B1 record_patch_candidate() after VERIFY started   CandidateSetFrozenError
+[*** REACHED ***]  B2 PatchCandidate.objects.create() on a frozen mission
+                     candidates 1 -> 2; no save() override on PatchCandidate
+[*** REACHED ***]  B3 smuggled candidate flips the mission to VERIFIED
+                     mission verdict REJECTED -> VERIFIED; terminal state VERIFIED
+```
+
+Lower than SEC-15 because it requires bypassing the sanctioned writer, where SEC-15 uses it. Same
+outcome.
+
+**Required fix** — `PatchCandidate.save()` re-reads `mission.verification_started_at` and refuses
+when set, so the freeze is enforced by the model rather than by the caller that remembers to use
+the recorder. Named test: `test_a_candidate_cannot_be_inserted_into_a_frozen_mission_by_any_path`.
+
+I want to be fair to the author here: `record_patch_candidate` checks **both** halves — the column
+*and* the record count via `assert_candidate_set_open` — with a comment explaining that they can
+disagree. I attacked exactly that gap (write a verification without setting the column, then add a
+candidate) and the second check caught it. That is good defensive work. It just lives in the
+function rather than in the model.
+
+---
+
+### SEC-18 · **HIGH** · BUG-011 rated — the DSN silently discards `sslmode`, and `verify-full` is byte-identical to `disable`
+
+**Location** — `apps/control-api/config/env.py:124-133`. `database_from_url` builds the Django
+entry from `parsed.hostname/username/password/path` and never reads `parsed.query`.
+
+**Executed:**
+
+```
+postgresql://u:p@db:5432/brahmadatta?sslmode=require
+   -> OPTIONS: {"connect_timeout": 5}          sslmode reaching libpq: ABSENT
+postgresql://u:p@db:5432/brahmadatta?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem
+   -> OPTIONS: {"connect_timeout": 5}          sslmode reaching libpq: ABSENT
+postgresql://u:p@db:5432/brahmadatta?sslmode=disable
+   -> OPTIONS: {"connect_timeout": 5}          sslmode reaching libpq: ABSENT
+postgresql://u:p@db:5432/brahmadatta
+   -> OPTIONS: {"connect_timeout": 5}          sslmode reaching libpq: ABSENT
+```
+
+**All four DSNs produce byte-identical database configuration.** The operator's strongest possible
+TLS statement and their explicit opt-out are the same string to this system.
+
+**Exploit scenario.** With no `sslmode` in `OPTIONS`, libpq applies its own default, `prefer`:
+attempt TLS, **fall back to plaintext without error if the server declines, and never validate the
+certificate in either case**. An operator who writes `?sslmode=verify-full&sslrootcert=…` — the
+setting that exists specifically to defeat an active man-in-the-middle — gets `prefer`. An
+attacker positioned between control-api and PostgreSQL downgrades the connection and reads and
+rewrites every row on the wire: authorization statements, verification records, the mission state
+this PR exists to protect.
+
+**HIGH, not Critical**, for the same reason SEC-02 was downgraded in §12.2: in the finale topology
+control-api and postgres share a private network with no published port, so the MITM position
+requires already being inside the boundary. That is a property of today's compose file, not of
+this code, and it is the only thing holding.
+
+**The severity is driven by the silence, not the bytes.** A control that accepts a
+security-relevant configuration string and discards it is worse than one that does not accept it,
+because the operator now believes something false and there is nothing to observe. That is the
+same argument I made for SEC-02 in §12.2 and the same one D-049 makes about defaults pointing at
+the weaker claim — inverted here, since the *stronger* claim is what silently degrades.
+
+**Required fix** — fail closed, matching this repository's own idiom (`E001` stops the process):
+
+1. Parse `parsed.query`. Map `sslmode`, `sslrootcert`, `sslcert`, `sslkey` into `OPTIONS`.
+2. **Raise `ImproperlyConfigured` on any query parameter not in that allowlist**, rather than
+   dropping it. A DSN parameter the system does not understand must refuse to boot, not be ignored.
+3. A Django system check that raises `Error` when `APP_ENV=finale` and `sslmode` is absent or
+   weaker than `require`, so the finale cannot start on an unverified database connection.
+4. Named test `test_sslmode_reaches_the_driver` plus `test_an_unknown_dsn_parameter_refuses_to_boot`.
+
+Until (1)–(4) land, `.env.example:32-34`'s warning must stay exactly where it is. It is the only
+thing standing between an operator and a false belief, and the author was right to write it.
+
+---
+
+### SEC-19 · **MEDIUM** · The boot gate is wired to the looser of two egress implementations, so the invariant fails mid-mission instead of at startup
+
+Routed to me by the orchestrator under D-050. **I verified it myself on this branch rather than
+taking the report**; the finding is mine and so is the severity.
+
+**Location** — `apps/control-api/contracts/checks.py:16`. `check_model_endpoints` — a Django
+system-check `Error`, which stops the process — imports `assert_local_inference_endpoint` from
+`contracts.model_policy`, the implementation D-050 is replacing.
+
+**Executed, `manage.py check` on this branch:**
+
+```
+########## SMALL_MODEL_BASE_URL=https://api.openai.com/v1
+SystemCheckError: (brahmadatta.E001) SMALL_MODEL_BASE_URL points at 'api.openai.com' …
+########## SMALL_MODEL_BASE_URL=https://my-llm-proxy.internal/v1
+System check identified no issues (0 silenced).
+########## SMALL_MODEL_BASE_URL=http://169.254.169.254/
+System check identified no issues (0 silenced).
+########## SMALL_MODEL_BASE_URL=https://api.openai.com.evil.test/v1
+System check identified no issues (0 silenced).
+########## SMALL_MODEL_BASE_URL=http://metadata.google.internal/computeMetadata/v1/
+System check identified no issues (0 silenced).
+```
+
+**Exploit scenario.** The process boots clean on a configuration the gateway will later refuse.
+The operator gets a green `manage.py check`, starts a mission, and the egress invariant asserts
+itself at call time — mid-run, on the demo night, with a mission part-way through a stage. A
+strict check downstream of a loose boot gate is strictly worse than having only one of them,
+because it converts a startup failure into a runtime failure while *also* teaching the operator
+that startup validation means something.
+
+D-028 requires this invariant to fail as early and as structurally as available. A boot gate wired
+to the weaker of two co-resident implementations is the exact inverse. **Yes, this warrants its own
+ID and I am giving it one.**
+
+Note `https://api.openai.com.evil.test/v1` in that output: the boot gate admits a **globally
+routable, attacker-controlled** host. That is not a strict-versus-loose difference, it is fail-open
+on the primary invariant.
+
+**Required fix** — when D-050's consolidation lands, `contracts/checks.py` imports the gateway's
+implementation, and a test asserts there is exactly one such implementation in the tree. Filing
+against `contracts/model_policy.py`'s internals would be filing against a file that is being
+deleted; **the wiring is the finding, and it survives the replacement.** Owner: the seat landing
+D-050. Not a condition on #110 — #110 did not introduce it — but it must not outlive #111.
+
+**D-051, recorded here in the wording the CTO asked for, retiring the corresponding sentence in
+D-028:** *"not globally routable" and "inside our trust boundary" are different properties, and
+only the second one is the question being asked.* Nobody owns `.internal`; a private-suffix name
+check proves neither property. Declaration grants trust, not the suffix. My §5 wording that leaned
+on the suffix check is superseded by this sentence.
+
+---
+
+### SEC-20 · **MEDIUM** · `VerificationRecord.clean` is claimed twice and does not exist; a malformed `gates` blob wedges the mission past its own abort paths
+
+**Location** — `apps/control-api/missions/models.py:8` (*"validated on write with the pydantic
+schema instead — see `VerificationRecord.clean`"*), `:28` (*"Every one of them has a `clean()` that
+runs the real validator, so a malformed blob fails on write rather than on read at 3am"*), and the
+class at `:495-526`. PR body: *"`gates` is `jsonb` validated against the frozen `GateMatrix`
+**on write and on read**"*.
+
+**Executed:**
+
+```
+does VerificationRecord.clean exist? -> False
+models.py methods defined on VerificationRecord: ['DoesNotExist', 'MultipleObjectsReturned',
+ 'id', 'mission_id', 'mission', 'patch_id', 'patch', 'gates', 'verdict', 'get_verdict_display',
+ 'started_at', ..., 'resource_usage', 'objects']
+
+wrote row 62d3d410-… with gates={'not': 'a gate matrix'} and verdict=VERIFIED -> ACCEPTED
+  (no ValidationError; the claimed on-write validator does not run)
+```
+
+There is no `clean()` and no `full_clean()` anywhere in `missions/models.py`. The on-**read** half
+of the claim is true and is good design — `repository.load_verifications` re-derives the verdict
+through the pydantic validator, so a row whose stored verdict disagrees with its stored gates
+cannot be loaded. The on-**write** half is true only of `orchestrator.candidates.record_verification`,
+which validates the schema before creating the row. The model permits anything.
+
+**Exploit scenario — availability, and it is worse than "a bad row".** Because
+`transitions.transition:100` loads the verification set *unconditionally*, on every transition,
+before the guards:
+
+```
+  RAISES   repository.load_verifications(mission)              -> ValidationError
+  RAISES   transition VERIFY -> EXPORTING                      -> ValidationError
+  RAISES   transition VERIFY -> FAILED (the escape hatch)      -> ValidationError
+  RAISES   record_patch_candidate (the freeze check path)      -> ValidationError
+
+mission is stuck in VERIFY: every transition, including the abort paths,
+goes through load_verifications() first.
+```
+
+One malformed row and the mission cannot be advanced, cancelled, or failed. `_ABORTS` exists
+precisely so that *"getting out safely is never blocked by the bookkeeping"*
+(`state_machine.py:224`) — and here it is blocked by the bookkeeping.
+
+**Required fix — and explicitly *not* by weakening the load.** The unconditional load is the
+mechanism that closes BUG-004(c) and must stay unconditional.
+
+1. Add the `clean()` the docstrings already promise: run `VerificationSchema` over `gates` and
+   `verdict`, called from `save()`. Same for the other JSON columns the module docstring makes the
+   same claim about.
+2. Make the abort targets survive a failed evidence load: in `transition`, if `target in _ABORTS`,
+   a `ValidationError` from `load_verifications` must not prevent the transition. Getting out is
+   never gated on evidence that is already unreadable.
+3. Named tests: `test_a_malformed_gate_matrix_is_refused_on_write` and
+   `test_a_mission_with_an_unloadable_record_can_still_be_failed`.
+
+Until (1) lands, the module docstring at `:8` and `:28` and the PR body's "on write and on read"
+are **claims with no implementation behind them**, which is the standing rule's exact subject.
+
+---
+
+### SEC-21 · **MEDIUM** · `record_verification` requires no authorization and no mission state, and its side effect is the D-046 freeze
+
+**Location** — `apps/control-api/orchestrator/candidates.py:216-286`. The function takes the mission
+row lock and writes, but never calls `assert_stage_can_run`, never loads an authorization, and
+never reads `mission.state`.
+
+**Executed** — mission in `CREATED`, its only authorization revoked:
+
+```
+[*** REACHED ***]  B6 write a VERIFIED record with no authorization, mission in CREATED
+                     state=CREATED, authorization revoked, freeze now SET
+```
+
+**Two distinct consequences.** First, P0-1 says no stage may run without an active authorization,
+and `VERIFY` is a stage; a verification record is the artifact that stage produces, and it was
+written against a revoked one. `assert_transition` will still demand an active authorization to
+*enter* a verdict state, so this does not by itself reach `VERIFIED` — but it puts evidence in the
+bundle that no authorization covers, and the evidence bundle is the thing a judge reads.
+
+Second, and more immediately: **the freeze is a side effect of an unguarded function.** Calling
+`record_verification` on a mission in `CREATED` sets `verification_started_at`, which permanently
+closes the candidate set before `PATCH` has run. That is a denial of service on the mission's own
+purpose, from a call that no guard refuses.
+
+**Required fix** — `record_verification` loads the authorization and calls
+`assert_stage_can_run(MissionStage.VERIFY, authorization, now, snapshot_sha256)` under the lock it
+already holds, and refuses unless `mission.state_enum is MissionState.VERIFY`. Named test:
+`test_a_verification_cannot_be_recorded_without_an_active_authorization`.
+
+---
+
+### SEC-22 · **LOW** · The full unified diff of target source is copied into an append-only table that is also broadcast over SSE
+
+**Location** — `apps/control-api/orchestrator/candidates.py:204-211`. The event payload is
+`schema.model_dump(mode="json")` over the whole `PatchCandidate`.
+
+**Executed:**
+
+```
+  PATCH_CANDIDATE_RECORDED payload keys: ['id', 'mission_id', 'finding_id', 'provenance',
+   'model', 'diff', 'files_changed', 'lines_changed', 'policy_status', 'policy_detail',
+   'rationale', 'created_at']
+  payload['patch']['diff'] present: True
+```
+
+Up to 200 KB of the customer's proprietary source (a unified diff carries context lines) is
+duplicated from `patch_candidate.diff` into `mission_event.payload`. `MissionEvent` overrides
+`save()` to refuse edits (`models.py:254-259`), so **the copy cannot be redacted** — a customer
+deletion or retention request cannot be honoured against it without deleting the audit trail that
+the evidence bundle depends on. The same payload is what the SSE stream and the replay endpoint
+serve.
+
+Good news on the adjacent axis, which I checked because it was in the brief: **no artifact content
+and no crash bytes reach the database.** `Artifact` is `sha256`-keyed with `size_bytes` and no blob
+column (`models.py:548-565`), `Reproducer.artifact` is a JSON pointer, `GateResult.evidence_ref` is
+an opaque `artifact://` pointer with a docstring forbidding inline return, and `ModelProvenance`
+carries `prompt_sha256` — a digest — never the prompt. `Finding.sanitizer_report` and
+`Finding.code_slice` are capped at 20 000 characters and do carry target-derived text, which is
+defensible as the finding's substance. That is a well-designed persistence layer on the
+data-minimisation axis and `diff` is the one place it leaks by duplication.
+
+**Required fix** — emit `{"kind": "patch_candidate", "patch_id": …, "provenance": …,
+"files_changed": …, "lines_changed": …, "policy_status": …}` and let the client fetch the diff from
+the candidate endpoint under the same authorization. The event rail needs the fact, not the bytes.
+
+---
+
+### SEC-23 · **LOW** · Standing-rule sweep: three properties described as enforced, checked against their named tests
+
+The rule is *a property is described as enforced only when a named test demonstrates it*. I held
+this PR's body and its docstrings to it. The "NOT RUN / NOT DEMONSTRATED" section is honest and
+thorough and is the baseline; these are the three claims that go beyond it.
+
+**(a) `VerificationRecord.patch` uniqueness.** `models.py:503-505` claims *"Re-verifying a
+candidate until it passes is the same failure D-046 closes at the other end, and the constraint
+makes it a database error rather than a review question."* I tested it and **the property holds**
+— `B5 re-verify the same candidate until it passes -> IntegrityError`. But there is no test named
+for it in `orchestrator/tests/` or `missions/tests/`. A property demonstrated only by my review is
+a property that survives until someone changes `OneToOneField` to `ForeignKey` for a plausible
+reason. Add `test_a_candidate_can_only_be_verified_once`.
+
+**(b) `gates` validated on write.** Claimed in two docstrings and the PR body; not implemented. See
+SEC-20. This is the one that is not merely untested but false.
+
+**(c) `test_a_dropped_rejection_cannot_reach_verified` is misnamed.** Its body exercises the
+`HUMAN_REVIEW` drop, which is the case that bites. The name describes the `REJECTED` drop, which
+under any-VERIFIED-wins cannot change the outcome and is therefore vacuous. The PR body's table
+maps it to *"BUG-004(c) — dropping a `REJECTED` record"*, propagating the wrong claim into the
+record. Rename to `test_a_dropped_human_review_record_cannot_reach_verified` and correct the table.
+The test is right; only its label is wrong, which is precisely the failure the standing rule
+exists to catch before it becomes doctrine.
+
+**Not a finding, recorded for the CTO:** the author flipped `EvidenceBundle.isolation_mode` to
+required-with-no-default under D-049's general rule and flagged that D-049 did not name it. From a
+security standpoint the flip is **correct and I endorse it** — `ROOTLESS_CONTAINER` was the
+stronger of the two postures and defaulting to it is overclaim-by-omission, the exact pattern
+D-049 exists to end. The CTO owns the ruling; I am recording that reverting it would create a
+finding.
+
+---
+
+### 13.2 Status of prior findings, re-checked on this branch
+
+| ID | Was | Now | Evidence |
+|---|---|---|---|
+| SEC-01 | CRITICAL | **CLOSED** | Unchanged since §12. |
+| **SEC-02** | MEDIUM, open | **open, unchanged here; closed by #111** | Re-ran the bypass table on `feat/state-machine`: **`MISMATCHES: 10`**, plus the D-051 case `https://api.openai.com.evil.test/v1` also admitted. D-050 replaces this implementation with the gateway's (0 of 60). **#111 is not merged**, so it is open on `main` today. Do not close it against #110. |
+| SEC-07 | MEDIUM, open | **CLOSED ✅** | `assert_transition` now takes `mission_id` as a required keyword-only argument with no default (`state_machine.py:447`). I confirmed the guard cannot be run without a mission and that another mission's records are refused (A2). This PR closes it. |
+| **SEC-12** | MEDIUM, new | **CLOSED ✅** | `tests/architecture/` is now a CI step — `.github/workflows/ci.yml:137-138`, `pytest tests/ -q -rs`. I ran it on this branch: **`36 passed in 0.54s`**. D-036 and D-037 are enforced again. |
+| SEC-03, 04, 05, 06-R, 08, 09, 10, 13, 14 | — | **open, untouched** | Not in this PR's files. Carried forward. |
+
+### 13.3 Dependency audit — **executed**
+
+```
+$ pip-audit -r apps/control-api/requirements.txt
+No known vulnerabilities found
+
+$ pip-audit -r apps/control-api/requirements-dev.txt
+No known vulnerabilities found
+
+$ npm audit
+found 0 vulnerabilities
+
+$ npm audit --omit=dev
+found 0 vulnerabilities
+```
+
+Runtime set is pinned to exact versions (`Django==5.2.17`, `django-ninja==1.6.2`,
+`pydantic==2.13.4`, `psycopg[binary]==3.3.4`, `python-dotenv==1.2.2`, `uvicorn[standard]==0.52.1`).
+This PR adds no new dependency. The `actions/setup-python` addition in `ci.yml` is pinned to a
+commit SHA (`ece7cb06…`), which is the correct form and matches the existing job.
+
+### 13.4 Secrets — **executed**
+
+```
+$ grep -n env .gitignore
+22:.env
+23:.env.*
+24:!.env.example
+
+$ git ls-files | grep -i '\.env'
+.env.example
+apps/control-api/.env.example
+
+$ (secret-shaped literals across every file this PR touches)
+apps/control-api/.env.example:40:CONTROL_API_OPERATOR_TOKEN=REPLACE_ME_OPERATOR_TOKEN_MIN_32_CHARS
+```
+
+One match, a placeholder in the committed example. No credential in code. The migration contains
+no `RunPython`, no `RunSQL` and no data migration. `database_from_url`'s error messages name the
+scheme and never the DSN, so the password does not reach a traceback from that path.
+
+### 13.5 What I did **not** review
+
+Listed rather than omitted, per the rule.
+
+1. **Anything concurrent.** Everything above is single-threaded on in-memory SQLite, where
+   `SELECT … FOR UPDATE` is a no-op — the same limitation the author declared. **The candidate
+   freeze under an interleaved insert, and gap-free `sequence` under two writers, are not
+   demonstrated by me and I make no claim about them.** That is the `qa-engineer` seat's run
+   against real PostgreSQL and I deliberately did not duplicate it. SEC-15 and SEC-17 are
+   single-threaded logic holes and are unaffected by how that run comes out.
+2. **The 937-line migration**, beyond confirming it contains no raw SQL, no `RunPython` and no
+   data migration. I did not diff it field-by-field against `models.py`; `makemigrations --check`
+   is the author's evidence for that and I did not re-run it.
+3. **The HTTP layer.** The routers return 501 and were not wired in this PR. No authentication,
+   authorization, IDOR, rate-limiting or input-handling review of the mission endpoints was
+   possible, because there are no mission endpoints yet. **This is the single largest unreviewed
+   surface and it is where SEC-15 becomes Critical.** It needs its own security pass when wired.
+4. **The frontend.** `apps/command-center/src/lib/api/schema.d.ts` is generated output; I did not
+   review it, and no XSS/CSP/token-storage review was done on the Command Center.
+5. **The OpenAPI exporter's reason-phrase pinning (#103).** A correctness and supply-chain-drift
+   concern, not a security one; I read the approach and did not test it.
+6. **`packages/schemas/openapi.json`** — regenerated output, not read.
+7. **`mypy`** — not run by me. **`ruff`** — not run by me; the author's figures are unverified.
+8. **Infrastructure.** No container, TLS, header, port or compose review in this round; nothing in
+   this PR touches `infrastructure/`. §12's findings stand unchanged.
+9. **BUG-012 and BUG-008** — out of scope for #110 by the author's declaration, and I did not
+   look at them.
+
+### 13.6 Verdict
+
+**PASS WITH CONDITIONS.**
+
+No Critical finding is open, so I am not exercising the veto. This is good work — the round-1
+duck-typing hole is properly closed, `paused_from` genuinely closes both directions, the
+second-baseline path is shut at two layers, and there is no route from a confidence value to a
+verdict. The author's "NOT RUN / NOT DEMONSTRATED" section is the most honest artifact in this PR
+and it is why this review could be adversarial instead of archaeological.
+
+**Conditions on merge — all three are in this PR's own files:**
+
+1. **SEC-15 (HIGH)** — `record_verification` validates that the patch belongs to the mission, with
+   the named two-mission test. This is the condition I care about most: it defeats D-046 through
+   the sanctioned API, and it is Critical the day a route supplies `patch_id`.
+2. **SEC-16 (HIGH)** — one mechanism, model guard or architecture test, making `transitions.transition`
+   the only writer of `Mission.state` and the only caller of `assert_transition`. The convention
+   holds today; nothing makes it keep holding.
+3. **SEC-18 (HIGH)** — `config/env.py` stops silently discarding DSN query parameters. Fail closed
+   on an unrecognised one. Until it lands, `.env.example`'s warning stays.
+
+**Follow-ups, not merge blockers** — SEC-17, SEC-20, SEC-21 (Medium) and SEC-22, SEC-23 (Low) get
+issues with owners. SEC-19 (Medium) is not #110's to fix but must not outlive #111.
+
+**On the question the CTO put to me directly** — is "the guard is only ever called from a
+transaction-scoped path that loaded the records itself" adequate? **No, and SEC-16 is the executed
+proof rather than an opinion.** It is a well-chosen convention, defended by two better-than-average
+tests, and it is still a convention: I reached terminal `VERIFIED` past a `HUMAN_REVIEW_REQUIRED`
+record on disk, through a public function, in four lines, with no test failing. The author was
+right that no in-function validation closes BUG-004(c). The answer is not in-function validation —
+it is making the sanctioned path the only path, which is a one-file change today and a three-router
+change after the HTTP layer lands.
+
+### 13.7 Decision records to fold into `.project/decisions.md`
+
+**DR-SEC-R2-1 · SEC-15 rated HIGH now, Critical on HTTP wiring**
+
+**Decision** — rate the cross-mission verification hole HIGH, make it a merge condition, and
+pre-commit to Critical the moment a route passes a caller-supplied `patch_id`.
+
+**Options considered** — (a) Critical now, blocking merge under my veto; (b) HIGH with a merge
+condition and a named escalation trigger; (c) HIGH as an ordinary follow-up issue.
+
+**Pros and cons** — (a) matches the impact (the product's central invariant is defeatable) but not
+the exploitability: the HTTP layer returns 501, so no external actor can reach it, and a veto on an
+unreachable path spends the veto's credibility on a hypothetical. (c) understates it — the next PR
+is the routers, and a Medium-priority follow-up will not land before them. (b) is accurate on both
+axes and gives the engineering-manager a bright line that does not require re-litigating severity
+later.
+
+**Cost implications** — the fix is a query and a comparison inside an existing transaction, plus
+one test. Under an hour. Deferring it past the routers costs a security re-review of three
+endpoints.
+
+**Security implications** — this is the finding. Unfixed, a mission reaches terminal `VERIFIED` on
+a candidate that is not in its own frozen candidate set, which is generate-until-pass.
+
+**Scalability implications** — one indexed primary-key lookup per verification write. None.
+
+**Recommendation** — (b).
+
+**Final approval authority** — cybersecurity (severity is mine).
+
+**DR-SEC-R2-2 · The convention defending BUG-004(c) is judged inadequate, and the required
+remedy is a structural test rather than a rewrite**
+
+**Decision** — SEC-16 is a merge condition, satisfiable by *either* a `Mission.save()` guard *or*
+an architecture test asserting single-writer. I do not specify which.
+
+**Options considered** — (a) require the `save()` override, matching the append-only idiom already
+in `models.py`; (b) require the architecture test; (c) accept the convention plus the existing
+signature test as sufficient.
+
+**Pros and cons** — (a) is the strongest mechanism and the most likely to fight the ORM in ways I
+cannot foresee (bulk operations, migrations, fixtures) — and choosing it would be me making an
+implementation decision that belongs to the software-architect. (b) is 20 lines, uses the technique
+already in `test_the_records_are_loaded_by_mission_with_no_filter`, and fails loudly on the exact
+refactor the CTO is worried about. (c) is what I tested and defeated.
+
+**Cost implications** — (b) is under an hour. (a) is a half-day with a real regression risk.
+
+**Security implications** — either closes the reachable path. (b) closes it at review time rather
+than at runtime, which for an internal-refactor threat actor — a future developer, not an attacker
+— is the right layer.
+
+**Scalability implications** — none for (b); (a) adds a check on every `Mission` write.
+
+**Recommendation** — leave the choice to the owning developer and the software-architect; I set the
+requirement, not the design. Verify whichever lands.
+
+**Final approval authority** — CTO for the technical approach; cybersecurity for whether the
+delivered mechanism satisfies SEC-16.
+
+**DR-SEC-R2-3 · BUG-011 rated HIGH, and the fix is fail-closed rather than best-effort**
+
+**Decision** — SEC-18 is HIGH and the required fix refuses to boot on an unrecognised DSN query
+parameter rather than mapping the ones it knows and dropping the rest.
+
+**Options considered** — (a) parse and map the known TLS parameters, ignore the rest — the minimal
+fix; (b) parse, map, and raise on anything unrecognised; (c) document it in `.env.example` and set
+`sslmode` through a separate environment variable.
+
+**Pros and cons** — (a) fixes today's symptom and preserves the mechanism that caused it: the next
+security-relevant parameter is dropped just as silently. (c) is what the author did as a stopgap
+and it is a good stopgap, but it leaves two ways to spell the same setting, one of which lies. (b)
+costs one `raise` and converts a whole class of silent-misconfiguration bugs into startup failures,
+which is what this repository already does for the model-endpoint invariant.
+
+**Cost implications** — an afternoon including the system check and two tests.
+
+**Security implications** — `verify-full` and `disable` are currently indistinguishable to this
+code. Any control that silently discards its own configuration is unfalsifiable, and an
+unfalsifiable control is the kind people build on.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), plus the finale system check.
+
+**Final approval authority** — CTO for the parsing approach; cybersecurity for the severity and for
+the fail-closed requirement.
