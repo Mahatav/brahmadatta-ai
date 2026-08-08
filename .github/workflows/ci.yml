@@ -26,7 +26,7 @@
 #   finale-egress-evidence.sh       REHEARSAL, not CI. It builds and boots the whole finale
 #                                   stack to prove egress denial from inside the running
 #                                   container. That is the right test and the wrong cadence
-#                                   — see SEC-R3 and docs/06-operations/74-rehearsal-checklist.md,
+#                                   — see SEC-R3 and docs/06-operations/73-rehearsal-checklist.md,
 #                                   where it is a numbered checklist item with a place to
 #                                   record the output, not an intention.
 #
@@ -336,6 +336,71 @@ jobs:
             exit 0
           fi
           python infrastructure/scripts/testing/endpoint-policy-bypass-table.py
+
+  # ---------------------------------------------------------------------------
+  # The three scripts named at the top of this file, restored to CI. Needs nothing built —
+  # docker-compose.yml's dev target is exercised at the config level only; the images it
+  # `docker run` are the pinned upstream images (nginx-unprivileged, python), never a
+  # locally-built one, so this job does not depend on apps/control-api or
+  # apps/command-center existing and cannot be slowed down by an application build.
+  #
+  # Each of the three properties below fails SILENTLY without its check: a broken nginx
+  # config still starts on a bad day, a buffered SSE stream still returns 200, and a
+  # container quietly reattached to `external` still passes every other test in this
+  # workflow. That silence is the whole argument for spending runner minutes here.
+  ingress:
+    name: ingress (nginx -t · compose config · SSE determinism · egress topology)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # `nginx -t` against both profiles, self-signed dev TLS material generated on
+      # demand. Neither compose file's runtime images are pulled — this parses and
+      # validates the committed config, nothing more.
+      - name: nginx -t (dev + finale)
+        run: infrastructure/scripts/nginx-validate.sh
+
+      # `docker compose config` for both profiles. This is a distinct check from `nginx
+      # -t`: it validates the YAML, the interpolation, and the network/volume/profile
+      # graph — none of which nginx -t ever looks at. The six variables below are every
+      # `${VAR:?...}` in docker-compose.finale.yml — it refuses to default them on
+      # purpose (fail loud rather than silently run with a blank secret). CI has no .env
+      # at all (see the top of this file), so they are supplied inline, same as every
+      # other CI-only value in this workflow. None of these values are used to start
+      # anything — `config` only resolves and validates, it does not run a container.
+      - name: docker compose config validates (dev + finale)
+        env:
+          DATABASE_URL: "postgresql://ci:ci-only-not-a-real-password@db:5432/ci"
+          DJANGO_ALLOWED_HOSTS: "localhost"
+          DJANGO_CSRF_TRUSTED_ORIGINS: "https://localhost"
+          POSTGRES_PASSWORD: "ci-only-not-a-real-password"
+          REDIS_PASSWORD: "ci-only-not-a-real-password"
+          REDIS_URL: "redis://:ci-only-not-a-real-password@redis:6379/0"
+        run: |
+          set -euo pipefail
+          docker compose -f infrastructure/compose/docker-compose.yml config --quiet
+          echo "dev profile: config OK"
+          docker compose -f infrastructure/compose/docker-compose.finale.yml config --quiet
+          echo "finale profile: config OK"
+
+      # #114. Four cases, two of them an injected violation that must fail — see the
+      # comment block at the top of infrastructure/scripts/smoke-sse.sh.
+      - name: SSE survives the proxy
+        run: infrastructure/scripts/smoke-sse.sh
+
+      # C4 / the security review's SEC-R3 split: the expensive live-boot proof
+      # (finale-egress-evidence.sh) is a rehearsal-checklist item, re-run by cybersecurity
+      # before each rehearsal — see docs/06-operations/73-rehearsal-checklist.md. This is
+      # the cheap half that runs on every PR: it reads the compose topology as data (no
+      # build required) AND attempts real outbound connections from throwaway probe
+      # containers on the declared networks, so it catches both a compose-file regression
+      # and a case where the topology reads right and Docker did something else.
+      - name: only nginx has egress (C4)
+        run: infrastructure/scripts/egress-test.sh
 
   # ---------------------------------------------------------------------------
   # Without this, issue #6's acceptance criterion — "a contract change breaks the frontend

@@ -23,7 +23,7 @@
 # the upstream, so only an upstream that genuinely goes silent exercises it.
 #
 # Two things about cases 1 and 2 that are easy to get wrong, both established by
-# measurement in docs/06-operations/73-sse-buffering-measurements.md:
+# measurement in docs/06-operations/72-sse-buffering-measurements.md:
 #
 #   HTTP VERSION. The buffering stall is HTTP/1.1 only. Over ALPN h2 there is no stall
 #   with proxy_buffering on at all, and curl negotiates h2 by default over TLS. A probe
