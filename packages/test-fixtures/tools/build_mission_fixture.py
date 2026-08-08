@@ -496,7 +496,7 @@ def build() -> Builder:
             text=(
                 "preflight ok — authorization active, adapter C_CMAKE_CTEST resolved from "
                 "CMakeLists.txt, isolation SUBPROCESS_JAIL (weaker than a rootless "
-                "container; see services/sandbox/README.md), wall-clock budget 900s."
+                "container; see packages/sandbox/README.md), wall-clock budget 900s."
             )
         ),
     )
