@@ -29,7 +29,7 @@ says so in §7 rather than being left out.
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 | **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
-| **PR #119 — `feat/authorize-snapshot`** | **PASS WITH CONDITIONS** — SEC-26 (High) before any extraction stage is built on this; SEC-27, SEC-28, SEC-31 before merge; SEC-29, SEC-30 before #12/upload land. No Critical. Mission-row lock **verified serializing under real Postgres**, not just SQLite. Round-4 pass in **§15**. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-31 fixed at `b01755b` and independently re-verified in **§18** — including the Postgres-specific savepoint claim, reproduced both with and without the fix. SEC-29, SEC-30 remain open, correctly gated on #12/the upload endpoint. No Critical, no open condition on this PR. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -4140,3 +4140,123 @@ independently confirmed fixed, and no further stale reference survives anywhere 
 (§17.8). The gap this review adds is the one the task asked me to specifically go looking for —
 a way to make a child survive the timeout — and it exists. I will re-verify SEC-33 personally
 once a fix or a corrected claim lands, before #28 begins relying on this module.
+
+---
+
+## 18. Re-verification — 2026-08-08 · PR #119, commit `b01755b` · SEC-26/27/28/31 closed
+
+Re-verified **by name**, per the orchestrator's request, not a fresh full pass over §16
+(Round 4). New worktree at `b01755b`, fresh venv built from the pinned requirements, and a
+second isolated `postgres:16-alpine` container (port 15433, removed after use).
+`git diff 3230585 b01755b` — the fix commit's full diff — read before testing anything.
+
+### 18.1 SEC-26 — closed, confirmed against my exact original PoC, not a re-description of it
+
+`_enumerate_tar`/`_enumerate_zip` now refuse `member.issym() or member.islnk()` (tar) and a
+zip entry whose `external_attr` mode bits are `S_ISLNK` (zip), before any name-shaped check
+runs. I ran my **original, unmodified** round-4 PoC script (`innocuous_link` symlink to
+`../../../../etc`, plus a member walking through it) against the fixed `archive.py` — same
+file, same bytes, byte-identical to what I demonstrated the exploit with in §16:
+
+```
+member names: ['innocuous_link', 'innocuous_link/passwd']
+authorization.errors.UnreadableArchiveError: The snapshot archive contains a symlink or
+    hardlink member.
+```
+
+Refused, not silently accepted. I also independently disabled the new check (the check
+itself, not the author's added test) and confirmed `test_a_tar_symlink_with_a_safe_name_
+but_an_escaping_target_is_refused` and `test_a_tar_hardlink_member_is_refused` go red
+(`DID NOT RAISE UnreadableArchiveError`), then restored and confirmed `authorization/tests/
+test_archive.py` green again (11/11).
+
+### 18.2 SEC-27 — closed, and the specific savepoint claim reproduced both ways, not taken on report
+
+Ran the exact cross-mission race from §16 (two different missions, byte-identical content,
+forced interleave via a barrier around `Artifact.objects.filter(...).first()`) against the
+fixed code on a **fresh, real Postgres container**:
+
+```
+Thread A: ('claimed', {'sha256': '...'})
+Thread B: ('ok', UUID(...))
+Artifact rows for this digest: 1
+```
+
+Clean `SnapshotArtifactClaimedError`, no unhandled exception. Then, to test the savepoint
+claim specifically rather than the fix as a whole, I patched the fixed code to remove
+**only** the nested `with transaction.atomic():` while leaving the `try`/`except
+IntegrityError` in place, and re-ran the identical race:
+
+```
+Thread B: ('error', "TransactionManagementError: An error occurred in the current
+    transaction. You can't execute queries until the end of the 'atomic' block.")
+```
+
+**Confirmed: the savepoint is load-bearing on its own, independent of the exception
+handler.** Catching `IntegrityError` without the savepoint on Postgres does not produce the
+original 500 again — it produces a *different* unhandled exception
+(`TransactionManagementError`) at the very next statement, because the enclosing transaction
+is poisoned regardless of whether Python caught the error. This is exactly the distinction
+claimed, and it is Postgres-specific (SQLite has no equivalent poisoned-transaction
+behavior) — only a real Postgres run could have caught it, which is what makes re-running
+this myself the right call rather than reading the diff. Restored the savepoint, re-ran the
+race clean, then ran the full suite: 299 passed.
+
+### 18.3 SEC-28 — the 403 is the right call, ruled independently rather than let ride through
+
+`RepositoryOutOfScopeError` now carries `ErrorCode.UNSUPPORTED_REPOSITORY` with
+`http_status` kept at `403`, and the class docstring states the reason explicitly: this is a
+scope/permission refusal ("you may not point this endpoint at this reference at all" — the
+allowlist boundary `CLAUDE.md` and this module's own docstring both call a safety boundary)
+rather than a content-validity refusal (the archive was read and failed to parse, which is
+`UnreadableArchiveError`'s `422`). I agree with that distinction. `403 Forbidden` is
+conventionally an access-control status, and "this reference is outside what this deployment
+is authorized to read, independent of who is asking" is an access-control decision in
+substance even though the *identity* asking is not what is being judged — the same shape
+`AuthorizationScopeError` in the same file already uses at `403` for an analogous reason. I
+considered `422` (matching `UnreadableArchiveError`'s status, if not its code) and `404`
+(avoid confirming/denying the path's existence) and reject both: `422` would blur exactly
+the distinction this fix's docstring is making between "can't parse what we found" and "not
+allowed to look there at all," and `404` is wrong because the refusal is not about
+existence, it's about scope, and the response already says so honestly. **Ruling: 403 is
+correct. Not a new finding.** Independently injection-verified: reverted the code (not the
+status) to `INVALID_AUTHORIZATION`, confirmed
+`test_repository_ref_with_an_unsupported_scheme_is_refused` goes red
+(`'INVALID_AUTHORIZATION' == 'UNSUPPORTED_REPOSITORY'` assertion failure), restored via
+`git checkout`, confirmed green.
+
+### 18.4 SEC-31 — closed, and the adjacent fix is accurate, not a broadening of scope beyond what should ride through
+
+The two false citations are gone, replaced with two tests I confirmed exist by name
+(`test_snapshot_with_an_expired_authorization_is_refused`,
+`test_snapshot_with_a_revoked_authorization_is_refused`, alongside the original
+`test_snapshot_without_an_authorization_is_refused`), and the docstring now states plainly:
+"Demonstrated at exactly one stage: `INGEST`" — matching my own §16 finding word for word in
+substance. Confirmed `api/routers/missions.py` was not touched by this commit
+(`git diff 3230585 b01755b --name-only` has no router entry), so the claim that
+`preflight`/`start` "do not exist yet, and cannot yet" remains true. The adjacent claim they
+also fixed — the docstring previously asserted `archive_ref` "is never used to locate bytes
+on disk at all," which was already false in the original PR (`_materialize_source` uses it
+for exactly that, for `source="upload"`) — is now correctly rewritten to name this as the
+still-open SEC-30, tracked against the future upload endpoint, not claimed as resolved. I
+reviewed this adjacent change because it touches the same file and the same property ("is
+the enforcement claim accurate"), not because I am expanding this round's scope — it is a
+direct tightening of a claim adjacent to the one I originally flagged, and it is accurate.
+
+### 18.5 The author's own account of injection-testing — spot-checked, not merely accepted
+
+They report every fix was checked by injecting the violation and confirming red before
+green. I independently re-injected all four myself, using my own constructions rather than
+re-running theirs where it mattered most (SEC-26: my original PoC file, unmodified; SEC-27:
+my own real-Postgres harness, not their SQLite-monkeypatch regression test; SEC-28: a direct
+revert of the `code =` line). All four went red on injection and green on restoration,
+independently. **The standard held.**
+
+### 18.6 Updated verdict
+
+**PASS.** All four merge conditions from §16 (SEC-26, SEC-27, SEC-28, SEC-31) are closed and
+independently re-verified. SEC-29 and SEC-30 remain open, correctly untouched, gated on #12
+and the future upload endpoint respectively — unchanged from §16. SEC-32 remains INFO, no
+action required. No Critical, no open condition on this PR. **PR #119 clears security review
+outright**, subject only to the two forward-looking gates already on record (SEC-29 before
+#12, SEC-30 before an upload endpoint).
