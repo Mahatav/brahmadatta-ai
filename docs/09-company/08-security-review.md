@@ -4439,6 +4439,16 @@ test covered and what SEC-04's fix actually needs to guarantee end to end.
 **Verdict: SEC-04 CLOSED for the DoS it names. SEC-38 (MEDIUM, new) required before the finale
 stack is used for a real snapshot upload of realistic size.**
 
+**SEC-38 resolution (issue #132).** Both nginx and control-api now use a bounded 640MiB
+`/tmp` tmpfs in both compose profiles: 512MiB for the configured snapshot ceiling plus
+25% scratch headroom. A committed architecture test asserts the minimum and prevents
+profile drift. Live through the real dev compose network and committed nginx config,
+501MiB and 480MiB request bodies were fully uploaded and returned Django's structured
+413 response in 3.44s and 2.93s respectively; nginx logged no `pwrite()`/`ENOSPC`, and
+the API logged no 500. Django's `RequestDataTooBig` is now an explicit 413 contract path
+rather than falling into the generic 500 handler. This preserves the application memory
+limit instead of weakening it to admit a 512MiB JSON body. **SEC-38 is CLOSED.**
+
 ### 19.3 SEC-05 — **CLOSED at both layers, live. One LOW test-coverage gap.**
 
 App layer, live (not just read) — reloaded `api.api` under `API_DOCS_ENABLED=False` and hit it
@@ -4601,18 +4611,16 @@ instead of network-position trust, that's a future hardening item, not a defect 
 |---|---|---|---|
 | SEC-03 | HIGH, open | **CLOSED** | `APP_ENV` hardcoded in both `finale.py` and `development.py`; env override of `DJANGO_SETTINGS_MODULE` in the dev compose file doesn't defeat it. |
 | SEC-04 | MEDIUM, open | **CLOSED** (core DoS) | 70MB→413 end-to-end through real Django; tmpfs ceiling kernel-enforced (`pwrite(): No space left on device`), host RAM flat at ~11MiB under load. |
-| **SEC-38** | — | **MEDIUM, new** | `client_max_body_size 512m` on the snapshot location exceeds the `256m` tmpfs it buffers into, on both profiles — legitimate 256–512MB snapshot uploads 500 every time. Required before the finale run. |
+| **SEC-38** | — | **CLOSED in #132** | Both profiles now give nginx and control-api 640MiB bounded tmpfs; 501MiB and 480MiB live requests reach Django's structured 413 with no `ENOSPC` or 500. |
 | SEC-05 | MEDIUM, open | **CLOSED** | 404 confirmed live at both the app layer (reloaded module + real client) and the proxy layer (real finale nginx config). Case-variant bypass attempted, does not reach the schema. |
 | — | — | **LOW, new (SEC-05 gap)** | No committed test wires `docs_urls()`/`API_DOCS_ENABLED` to an actual HTTP 404 — only the two halves are tested in isolation. Recommend adding it. |
 | SEC-08 | LOW, open | **CLOSED** | Single genuine mount point confirmed (`urls.py:25`). Trailing-slash, case, double-slash, percent-encoding and dot-segment bypass attempts all either hit the same guarded location or miss Django admin entirely. `$remote_addr`-based, not header-spoofable. `/static/` mismatch confirmed non-security. |
 | SEC-14 | LOW, open | **CLOSED** | `--forwarded-allow-ips 172.28.90.0/24` confirmed from `/proc/1/cmdline` inside the real running container. Residual CIDR-vs-identity trust limitation confirmed live, already disclosed by the author, informational only. |
 
-**No Critical or High finding is open as a result of this PR.** SEC-38 (MEDIUM) is real,
-reproduced end-to-end, and must be fixed before the finale stack is used for an actual
-repository-snapshot upload of realistic size — it is a functional/availability regression
-introduced by a security fix, not a reopening of the original attacker-facing vulnerability,
-so it does not exercise the veto in §0. The SEC-05 test-coverage gap (LOW) should be closed
-before this class of fix is trusted again without a human re-reading the code.
+**No Critical or High finding is open as a result of this PR.** SEC-38 was reproduced
+end-to-end and is now closed by #132 as recorded in §19.2. The SEC-05 test-coverage gap
+(LOW) should be closed before this class of fix is trusted again without a human re-reading
+the code.
 
 **Verdict: PASS WITH CONDITIONS.**
 

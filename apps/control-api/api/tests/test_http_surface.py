@@ -110,6 +110,22 @@ def test_wrong_token_is_rejected(client: Client):
     assert response.status_code == 401
 
 
+def test_a_body_over_djangos_memory_limit_is_413_not_500(client: Client):
+    """SEC-38: nginx may admit a large body that Django must still reject safely."""
+    response = client.generic(
+        "POST",
+        f"/api/v1/missions/{MISSION_ID}/snapshot",
+        data=b"{}",
+        content_type="application/json",
+        CONTENT_LENGTH=settings.DATA_UPLOAD_MAX_MEMORY_SIZE + 1,
+        **bearer(OPERATOR),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["trace_id"]
+
+
 def test_authenticated_read_reaches_the_stub(client: Client):
     response = client.get(f"/api/v1/missions/{MISSION_ID}", **bearer(OPERATOR))
     assert response.status_code == 501
