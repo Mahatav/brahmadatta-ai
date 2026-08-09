@@ -149,6 +149,23 @@ class ExternalInferenceBlockedError(ContractError):
     default_message = "Inference endpoint is outside the permitted trust boundary."
 
 
+class TooManyConcurrentStreamsError(ContractError):
+    """A mission's SSE view already has `SSE_MAX_STREAMS_PER_MISSION` open readers.
+
+    Reuses `ErrorCode.CONFLICT` for the reason given on `CandidateSetFrozenError` —
+    D-030 froze the vocabulary and a dedicated member is not on the list. `http_status`
+    is 429, not `CONFLICT`'s usual 409: the caller's remedy is "close another viewer
+    and reconnect," not "the request itself is wrong."
+    """
+
+    code = ErrorCode.CONFLICT
+    http_status = 429
+    default_message = (
+        "Too many concurrent event-stream connections for this mission. Close "
+        "another viewer and reconnect."
+    )
+
+
 class NotImplementedYetError(ContractError):
     """A frozen-contract stub that has no implementation behind it yet.
 

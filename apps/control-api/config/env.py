@@ -56,6 +56,16 @@ def get_int(name: str, default: int) -> int:
         raise ImproperlyConfigured(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def get_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a number, got {raw!r}") from exc
+
+
 def get_list(name: str, default: str = "") -> list[str]:
     raw = os.environ.get(name, default) or ""
     return [item.strip() for item in raw.split(",") if item.strip()]
