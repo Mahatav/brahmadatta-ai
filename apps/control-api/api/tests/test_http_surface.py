@@ -205,29 +205,67 @@ def test_a_malformed_mission_id_is_rejected(client: Client):
 # --- SSE -------------------------------------------------------------------------
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_event_stream_is_an_unbuffered_event_stream():
-    """Exercised through the async client, because the stream is an ASGI view."""
+    """Exercised through the async client, because the stream is an ASGI view.
+
+    The deeper SSE behaviours (replay ordering, reconnect, heartbeat, the
+    concurrent-stream cap) have their own tests in `test_event_stream.py`. This one
+    is the HTTP-surface contract: right status, right content type, the header that
+    keeps nginx from buffering it, and real incremental delivery.
+    """
+    from asgiref.sync import sync_to_async
+
+    from contracts.enums import LanguageAdapter
+    from missions.models import Mission
+
+    mission = await sync_to_async(Mission.objects.create)(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
     response = await AsyncClient().get(
-        f"/api/v1/missions/{MISSION_ID}/events",
+        f"/api/v1/missions/{mission.id}/events",
         headers={"authorization": f"Bearer {OPERATOR}"},
     )
     assert response.status_code == 200
     assert response.headers["Content-Type"] == "text/event-stream"
     # nginx buffers proxied responses by default, which silently breaks SSE.
     assert response.headers["X-Accel-Buffering"] == "no"
-    chunks = [chunk async for chunk in response.streaming_content]
-    # More than one chunk: the response really is streamed, not assembled and sent.
-    assert len(chunks) >= 3
-    body = b"".join(chunks).decode()
-    assert body.startswith(": brahmadatta stream open")
-    assert "event: contract.not_implemented" in body
-    payload = json.loads(body.split("data: ", 1)[1].strip())
-    assert payload["error"]["code"] == "NOT_IMPLEMENTED"
+
+    it = response.streaming_content.__aiter__()
+    first = await it.__anext__()
+    assert first == b": brahmadatta stream open\n\n"
+    await response._iterator.aclose()
 
 
 def test_event_stream_requires_a_token(client: Client):
     response = client.get(f"/api/v1/missions/{MISSION_ID}/events")
     assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_event_stream_404s_for_a_mission_that_does_not_exist(client: Client):
+    response = client.get(
+        f"/api/v1/missions/{MISSION_ID}/events", **bearer(OPERATOR)
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.django_db
+def test_events_replay_requires_a_token(client: Client):
+    response = client.get(f"/api/v1/missions/{MISSION_ID}/events/replay")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_events_replay_404s_for_a_mission_that_does_not_exist(client: Client):
+    response = client.get(
+        f"/api/v1/missions/{MISSION_ID}/events/replay", **bearer(OPERATOR)
+    )
+    assert response.status_code == 404
 
 
 # --- docs ------------------------------------------------------------------------

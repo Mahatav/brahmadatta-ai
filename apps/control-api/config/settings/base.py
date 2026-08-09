@@ -101,6 +101,24 @@ API_PREFIX = "api/v1/"
 # route, so nothing in the build depends on the endpoint existing.
 API_DOCS_ENABLED = env.get_bool("CONTROL_API_DOCS_ENABLED", True)
 
+# --- Server-sent events (#13) ---------------------------------------------------
+
+# CTO-C1: a hard per-mission concurrent-stream cap. A handful of tabs/reconnects is
+# ordinary; unbounded readers is a resource leak with no operator-visible cause. One
+# supervised ASGI process per D-019/D-024 (no Redis, no multi-worker fan-out for the
+# control API), so a process-local counter in api.sse is the whole store.
+SSE_MAX_STREAMS_PER_MISSION = env.get_int("SSE_MAX_STREAMS_PER_MISSION", 4)
+
+# How often the stream polls MissionEvent for rows past the client's cursor. No
+# broker (D-019/D-024 again) — this is a plain SELECT, sync_to_async per call.
+SSE_POLL_INTERVAL_SECONDS = env.get_float("SSE_POLL_INTERVAL_SECONDS", 0.5)
+
+# `: heartbeat\n\n` comment cadence during an idle stream. sse.conf's
+# `proxy_read_timeout 3600s` covers the upstream-idle gap; this is what lets a client
+# (and a human watching curl) tell a quiet mission from a dead connection well before
+# that fires. infrastructure/compose/nginx/includes/sse.conf recommends 15s.
+SSE_HEARTBEAT_INTERVAL_SECONDS = env.get_float("SSE_HEARTBEAT_INTERVAL_SECONDS", 15.0)
+
 # --- Operator authentication ---------------------------------------------------
 #
 # Bearer tokens, one per role, supplied by the environment. Absent tokens mean the

@@ -105,19 +105,19 @@ export interface paths {
         };
         /**
          * Ordered event stream (SSE)
-         * @description Server-sent events over ASGI.
+         * @description Server-sent events over ASGI, backed by the persisted `MissionEvent` log.
          *
-         *     The transport is real and running today; the mission events are not, because the
-         *     orchestrator that emits them does not exist yet. Rather than fabricate telemetry
-         *     — which the product rules forbid outright — this emits the stream preamble, two
-         *     heartbeat comments, and one terminal `contract.not_implemented` frame carrying the
-         *     standard error envelope, then closes.
+         *     Every ORM read runs through `sync_to_async` in `api.sse`, once per call — this
+         *     view never holds an `asgiref` thread-pool thread between reads (CTO-C1). The
+         *     per-mission concurrent-stream cap is enforced with `sse.acquire_slot` *before*
+         *     `StreamingHttpResponse` is constructed, so a caller over the limit gets a real
+         *     `429` rather than a stream that opens and immediately closes; `sse.release_slot`
+         *     runs from the generator's `finally`, so a client disconnect (the ASGI handler
+         *     closing this generator) frees the slot regardless of which frame it happened on.
          *
-         *     That is enough to prove the thing most likely to break silently: nginx buffers
-         *     proxied responses by default, and a buffered SSE stream arrives as one lump at the
-         *     end. `X-Accel-Buffering: no` is set here as well as `proxy_buffering off` in the
-         *     nginx config (issue #10) — belt and braces, because this failure is invisible
-         *     until the demo.
+         *     `Last-Event-ID` (sent automatically by a reconnecting `EventSource`) or an
+         *     explicit `?since_sequence=` resumes from a cursor and replays every missed event
+         *     in order before the stream goes live — see `sse.event_frames`.
          */
         get: operations["streamMissionEvents"];
         put?: never;
@@ -137,7 +137,7 @@ export interface paths {
         };
         /**
          * Replay ordered events from a sequence number
-         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value.
+         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery.
          */
         get: operations["replayMissionEvents"];
         put?: never;
@@ -2589,7 +2589,9 @@ export interface operations {
     };
     streamMissionEvents: {
         parameters: {
-            query?: never;
+            query?: {
+                since_sequence?: number;
+            };
             header?: never;
             path: {
                 mission_id: string;
@@ -2654,6 +2656,15 @@ export interface operations {
             };
             /** @description Unprocessable Content */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
