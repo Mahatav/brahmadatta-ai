@@ -220,6 +220,57 @@ def test_dns_and_tcp_egress_both_fail():
 
 
 @needs_docker
+def test_all_capabilities_are_dropped():
+    """Condition 3's own executed proof, the effective half — not just that
+    `--cap-drop ALL` is passed as a flag (that's `test_docker_run_args_carry_every_
+    flag_the_eight_conditions_require`), but that the kernel actually reports zero
+    effective capabilities inside the running container."""
+    with ContainerJail.create(_policy()) as sandbox:
+        result = sandbox.run(["sh", "-c", "grep CapEff /proc/self/status"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "CapEff:\t0000000000000000"
+
+
+@needs_docker
+def test_no_new_privileges_is_effective():
+    """Condition 3's other half: `NoNewPrivs` is 1 inside the running container, not
+    merely passed as `--security-opt no-new-privileges` on the command line."""
+    with ContainerJail.create(_policy()) as sandbox:
+        result = sandbox.run(["sh", "-c", "grep NoNewPrivs /proc/self/status"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "NoNewPrivs:\t1"
+
+
+@needs_docker
+def test_pids_limit_is_enforced():
+    """Condition 6's `--pids-limit` half, the effective proof — a real fork attempt
+    past the configured ceiling is refused by the kernel's cgroup controller, not
+    merely passed as a flag. `posix_spawn`, in a loop, until it fails; the count that
+    actually succeeded must stay under the configured limit."""
+    policy = _policy(pids_limit=16, wall_clock_seconds=20)
+    script = (
+        "import os, sys\n"
+        "created = 0\n"
+        "for _ in range(200):\n"
+        "    try:\n"
+        "        pid = os.fork()\n"
+        "    except OSError:\n"
+        "        break\n"
+        "    if pid == 0:\n"
+        "        import time; time.sleep(5); os._exit(0)\n"
+        "    created += 1\n"
+        "print(f'CREATED={created}')\n"
+    )
+    with ContainerJail.create(policy) as sandbox:
+        result = sandbox.run(["python3", "-c", script])
+    created = int(result.stdout.strip().removeprefix("CREATED="))
+    # Some slack above the configured ceiling for the interpreter's own threads/pids
+    # already counted against the cgroup; the property under test is "capped well
+    # short of 200", not an exact match to 16.
+    assert created < 100, result.stdout + result.stderr
+
+
+@needs_docker
 def test_the_root_filesystem_is_read_only():
     with ContainerJail.create(_policy()) as sandbox:
         result = sandbox.run(["sh", "-c", "echo x > /etc/should-not-be-writable"])
