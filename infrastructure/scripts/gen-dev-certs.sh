@@ -16,6 +16,10 @@ mkdir -p "${CERT_DIR}"
 
 if [[ -f "${CERT_DIR}/server.crt" && -f "${CERT_DIR}/server.key" && "${1:-}" != "--force" ]]; then
   echo "certs already present in ${CERT_DIR} (pass --force to regenerate)"
+  # Re-normalize permissions even on the early-exit path: a key generated before the
+  # world-readable fix below (chmod 600) would otherwise sit there forever, since nothing
+  # else ever revisits it. See the chmod comment below for why 644 is correct here.
+  chmod 644 "${CERT_DIR}/server.key" "${CERT_DIR}/server.crt"
   openssl x509 -in "${CERT_DIR}/server.crt" -noout -subject -enddate
   exit 0
 fi
@@ -51,7 +55,19 @@ openssl req -x509 -nodes \
   -out    "${CERT_DIR}/server.crt" \
   -config "${CERT_DIR}/openssl.cnf" >/dev/null 2>&1
 
-chmod 600 "${CERT_DIR}/server.key"
+# Not 600. This key is bind-mounted read-only into nginxinc/nginx-unprivileged, which
+# runs nginx as uid 101 (the `nginx` user), not as whoever generated this file — the CI
+# runner's user locally, and the same is true for any developer running docker-compose.yml
+# directly on Linux (macOS's Docker Desktop bind-mount layer maps ownership per-accessing-
+# process and hides this; a real Linux bind mount does not — the container sees the host's
+# actual UID/GID and honours the host's actual permission bits). 600 leaves the key
+# readable only by the host user that ran this script, so `nginx -t` and every real
+# container boot fails: "cannot load certificate key ... Permission denied". World-readable
+# is fine here specifically because this key secures nothing: self-signed, CN=localhost,
+# regenerated on every run, gitignored twice over, explicitly out of the production TLS
+# path (docs/06-operations/71-ingress-and-proxy-contract.md), and never leaves local disk
+# or an ephemeral CI runner.
+chmod 644 "${CERT_DIR}/server.key"
 chmod 644 "${CERT_DIR}/server.crt"
 rm -f "${CERT_DIR}/openssl.cnf"
 

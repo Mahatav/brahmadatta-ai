@@ -13,6 +13,24 @@ It deliberately does NOT send `X-Accel-Buffering: no` by default. That header wo
 nginx disable buffering on its own, which would mask a missing `proxy_buffering off` in
 the committed config — the exact bug this test exists to catch. Set SSE_STUB_ACCEL=no to
 turn it on when testing the belt-and-braces path.
+
+Environment, all optional and all defaulting to the original behaviour:
+
+    SSE_STUB_PORT        listen port                                    8000
+    SSE_STUB_EVENTS      number of frames before the stream ends        10
+    SSE_STUB_INTERVAL    seconds between frames                         0.4
+    SSE_STUB_ACCEL       "no" sends X-Accel-Buffering: no               unset
+    SSE_STUB_FRAME_BYTES pad each frame to at least this many bytes     0
+
+    SSE_STUB_IDLE_AFTER    emit this many frames, then go silent        0 (never)
+    SSE_STUB_IDLE_SECONDS  how long that silence lasts                  0
+
+The last two exist for #114. `proxy_read_timeout` measures the gap between two reads FROM
+the upstream, so the only way to test it is an upstream that genuinely stops talking —
+a fast stream never exercises it at all. The frame-size knob exists because the buffering
+stall is a byte threshold: with buffering on nginx releases at roughly 16 KB accumulated,
+so a stub emitting fat frames shows no stall and a stub emitting realistic ~110-byte
+frames stalls completely. Testing with the wrong frame size is how this stayed unproven.
 """
 
 from __future__ import annotations
@@ -28,6 +46,9 @@ PORT = int(os.environ.get("SSE_STUB_PORT", "8000"))
 EVENTS = int(os.environ.get("SSE_STUB_EVENTS", "10"))
 INTERVAL = float(os.environ.get("SSE_STUB_INTERVAL", "0.4"))
 SEND_ACCEL_HEADER = os.environ.get("SSE_STUB_ACCEL", "") == "no"
+FRAME_BYTES = int(os.environ.get("SSE_STUB_FRAME_BYTES", "0"))
+IDLE_AFTER = int(os.environ.get("SSE_STUB_IDLE_AFTER", "0"))
+IDLE_SECONDS = float(os.environ.get("SSE_STUB_IDLE_SECONDS", "0"))
 
 
 def chunk(payload: bytes) -> bytes:
@@ -87,9 +108,17 @@ class Handler(socketserver.StreamRequestHandler):
                     }
                 )
                 frame = f"event: mission\ndata: {payload}\n\n".encode()
+                if FRAME_BYTES > len(frame):
+                    # Pad inside the data: line so the frame stays valid SSE.
+                    pad = b"x" * (FRAME_BYTES - len(frame))
+                    frame = f"event: mission\ndata: {payload}".encode() + pad + b"\n\n"
                 self.wfile.write(chunk(frame))
                 self.wfile.flush()
-                time.sleep(INTERVAL)
+                if IDLE_AFTER and seq == IDLE_AFTER:
+                    print(f"sse-stub: going silent for {IDLE_SECONDS}s", flush=True)
+                    time.sleep(IDLE_SECONDS)
+                else:
+                    time.sleep(INTERVAL)
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
         except (TimeoutError, BrokenPipeError, ConnectionResetError):
