@@ -542,6 +542,35 @@ def test_repository_ref_with_an_unsupported_scheme_is_refused(client: Client, ro
     assert response.json()["error"]["code"] == "UNSUPPORTED_REPOSITORY"
 
 
+def test_different_repository_refs_with_the_same_basename_are_refused(
+    client: Client, mission: Mission, repo_dir: Path
+):
+    """SEC-29: distinct repository identities must never collapse to one source."""
+    other = Mission.objects.create(
+        name="other-pktcfg",
+        repository_ref="file:///another-owner/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    for candidate in (mission, other):
+        authorization = post(
+            client,
+            f"/api/v1/missions/{candidate.id}/authorize",
+            authorize_payload(repository_ref=candidate.repository_ref),
+            OPERATOR,
+        )
+        assert authorization.status_code == 201
+        response = post(
+            client,
+            f"/api/v1/missions/{candidate.id}/snapshot",
+            {"source": "git", "archive_sha256": "0" * 64},
+            OPERATOR,
+        )
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "UNSUPPORTED_REPOSITORY"
+        assert Snapshot.objects.filter(mission=candidate).count() == 0
+
+
 # === Validation ===================================================================
 
 

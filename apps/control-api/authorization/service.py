@@ -249,15 +249,12 @@ def _resolve_under_root(root: Path, ref: str) -> Path:
     return candidate
 
 
-def _resolve_repository_ref(repository_ref: str) -> Path:
-    """The mission's own `repository_ref`, as a directory inside the allowlisted root.
+def _repository_lookup_name(repository_ref: str) -> str:
+    """Return the traversal-free lookup key used beneath the source allowlist.
 
     `repository_ref` is server-side mission data, not a value this request supplies —
-    but it still gets the same treatment as any path input: resolved and checked
-    against the allowlist before anything is read from it. A scheme this function does
-    not recognize (a remote `https://` or `git@` URL) is refused rather than guessed
-    at; live remote fetch is out of scope for this endpoint (see the module docstring
-    in `authorization/__init__.py`).
+    but it still gets the same treatment as path input. A scheme this function does
+    not recognize is refused rather than guessed at; live remote fetch is out of scope.
 
     Only the reference's final path component is used to locate a directory, and only
     directly under `SNAPSHOT_SOURCE_ROOT` — `file:///demo/repositories/pktcfg` and
@@ -279,6 +276,31 @@ def _resolve_repository_ref(repository_ref: str) -> Path:
     name = PurePosixPath(ref.replace("\\", "/")).name
     if not name or name in {".", ".."}:
         raise RepositoryOutOfScopeError(details={"repository_ref": repository_ref})
+    return name
+
+
+def _resolve_repository_ref(repository_ref: str) -> Path:
+    """Resolve an unambiguous mission repository beneath the source allowlist.
+
+    Basename lookup deliberately discards path-shaped input before joining it to the
+    allowlisted root. Distinct repository references that collapse to the same key are
+    refused, however: silently selecting one would bind a mission's evidence to the
+    wrong repository (SEC-29).
+    """
+    name = _repository_lookup_name(repository_ref)
+    for candidate_ref in Mission.objects.values_list("repository_ref", flat=True):
+        if candidate_ref == repository_ref:
+            continue
+        try:
+            candidate_name = _repository_lookup_name(candidate_ref)
+        except RepositoryOutOfScopeError:
+            # A remote/unsupported reference cannot claim a local lookup key.
+            continue
+        if candidate_name == name:
+            raise RepositoryOutOfScopeError(
+                "repository_ref is ambiguous within the snapshot source allowlist.",
+                details={"repository_ref": repository_ref, "lookup_name": name},
+            )
 
     root = Path(settings.SNAPSHOT_SOURCE_ROOT).resolve()
     candidate = (root / name).resolve()

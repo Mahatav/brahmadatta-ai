@@ -29,7 +29,7 @@ says so in §7 rather than being left out.
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 | **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
-| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-31 fixed at `b01755b` and independently re-verified in **§18** — including the Postgres-specific savepoint claim, reproduced both with and without the fix. SEC-29, SEC-30 remain open, correctly gated on #12/the upload endpoint. No Critical, no open condition on this PR. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-29, SEC-31 fixed and verified — including the Postgres-specific savepoint claim and the distinct-reference basename-collision regression. SEC-30 remains open, correctly gated on the upload endpoint. No Critical, no open condition on this PR. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -3248,6 +3248,12 @@ this decision explicitly re-examine the identity question, not only the traversa
 `create_mission` ships.
 
 **Location** — `apps/control-api/authorization/service.py:218-258` (`_resolve_repository_ref`).
+
+**Resolution (issue #126).** Basename-only containment is retained, and resolution now
+refuses a lookup key claimed by any different `repository_ref`. The HTTP regression test
+creates two missions with different paths ending in `pktcfg` and proves that neither can
+snapshot the shared source directory. Exact duplicate references remain valid when two
+missions intentionally analyze the same repository.
 
 ### 15.9 SEC-30 — `archive_ref` is a shared namespace with no mission scoping at all
 
