@@ -44,10 +44,13 @@ class SandboxPolicy(StrictSchema):
     memory_mb: int = Field(default=8192, ge=512, le=131072)
     max_seconds: int = Field(default=5400, ge=60, le=43200)
     runtime: Literal["podman", "docker", "subprocess-jail"] = Field(
-        default="podman",
-        description="Rootless container runtime, or the subprocess-jail fallback "
-        "(#81). The fallback is weaker isolation and is reported as such everywhere "
-        "it is used — it is not a silent substitution.",
+        default="docker",
+        description="Container runtime, or the subprocess-jail fallback (#81). "
+        "`docker` is D-024's accepted substitute for rootless Podman — a standard "
+        "rootful-daemon container with `--network none`, never reported as "
+        "`podman`'s stronger isolation claim. The subprocess-jail fallback is "
+        "weaker isolation still and is reported as such everywhere it is used — "
+        "it is not a silent substitution.",
     )
 
 

@@ -1036,13 +1036,25 @@ export interface components {
         InferenceMode: "LIVE_INFERENCE" | "REPLAYED_TRANSCRIPT";
         /**
          * IsolationMode
-         * @description How the target was contained (#81).
+         * @description How the target was contained (#81, #15).
          *
-         *     `SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an
-         *     acceptable D3 fallback and it must never be reported as the container path.
+         *     `SUBPROCESS_JAIL` is materially weaker than either container mode and it is an
+         *     acceptable D3 fallback; it must never be reported as a container path.
+         *
+         *     `CONTAINER_NO_NETWORK` [Δ #15] is D-024's accepted substitute for rootless
+         *     isolation: a standard (rootful-daemon) container with `--network none`, a fixed
+         *     non-root uid, every capability dropped, `no-new-privileges`, and a read-only root
+         *     filesystem — every property in `docs/09-company/08-security-review.md` §6.2
+         *     *except* the user-namespace remapping true rootless would add. D-024 condition 8
+         *     is binding: a run in this mode is never reported as `ROOTLESS_CONTAINER`, because
+         *     that would claim the one property (`--network none` aside) it does not deliver —
+         *     protection against a container-runtime escape reaching host root.
+         *
+         *     `ROOTLESS_CONTAINER` is kept for a genuine rootless Podman/Docker run, should one
+         *     ever land; nothing in this codebase produces it today.
          * @enum {string}
          */
-        IsolationMode: "ROOTLESS_CONTAINER" | "SUBPROCESS_JAIL";
+        IsolationMode: "ROOTLESS_CONTAINER" | "CONTAINER_NO_NETWORK" | "SUBPROCESS_JAIL";
         /**
          * LanguageAdapter
          * @enum {string}
@@ -1716,8 +1728,8 @@ export interface components {
             network: "deny";
             /**
              * Runtime
-             * @description Rootless container runtime, or the subprocess-jail fallback (#81). The fallback is weaker isolation and is reported as such everywhere it is used — it is not a silent substitution.
-             * @default podman
+             * @description Container runtime, or the subprocess-jail fallback (#81). `docker` is D-024's accepted substitute for rootless Podman — a standard rootful-daemon container with `--network none`, never reported as `podman`'s stronger isolation claim. The subprocess-jail fallback is weaker isolation still and is reported as such everywhere it is used — it is not a silent substitution.
+             * @default docker
              * @enum {string}
              */
             runtime: "podman" | "docker" | "subprocess-jail";
