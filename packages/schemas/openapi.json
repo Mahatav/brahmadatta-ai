@@ -1250,9 +1250,10 @@
         "type": "string"
       },
       "IsolationMode": {
-        "description": "How the target was contained (#81).\n\n`SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an\nacceptable D3 fallback and it must never be reported as the container path.",
+        "description": "How the target was contained (#81, #15).\n\n`SUBPROCESS_JAIL` is materially weaker than either container mode and it is an\nacceptable D3 fallback; it must never be reported as a container path.\n\n`CONTAINER_NO_NETWORK` [Δ #15] is D-024's accepted substitute for rootless\nisolation: a standard (rootful-daemon) container with `--network none`, a fixed\nnon-root uid, every capability dropped, `no-new-privileges`, and a read-only root\nfilesystem — every property in `docs/09-company/08-security-review.md` §6.2\n*except* the user-namespace remapping true rootless would add. D-024 condition 8\nis binding: a run in this mode is never reported as `ROOTLESS_CONTAINER`, because\nthat would claim the one property (`--network none` aside) it does not deliver —\nprotection against a container-runtime escape reaching host root.\n\n`ROOTLESS_CONTAINER` is kept for a genuine rootless Podman/Docker run, should one\never land; nothing in this codebase produces it today.",
         "enum": [
           "ROOTLESS_CONTAINER",
+          "CONTAINER_NO_NETWORK",
           "SUBPROCESS_JAIL"
         ],
         "title": "IsolationMode",
@@ -2645,8 +2646,8 @@
             "type": "string"
           },
           "runtime": {
-            "default": "podman",
-            "description": "Rootless container runtime, or the subprocess-jail fallback (#81). The fallback is weaker isolation and is reported as such everywhere it is used — it is not a silent substitution.",
+            "default": "docker",
+            "description": "Container runtime, or the subprocess-jail fallback (#81). `docker` is D-024's accepted substitute for rootless Podman — a standard rootful-daemon container with `--network none`, never reported as `podman`'s stronger isolation claim. The subprocess-jail fallback is weaker isolation still and is reported as such everywhere it is used — it is not a silent substitution.",
             "enum": [
               "podman",
               "docker",

@@ -47,6 +47,14 @@ class JailUnavailableError(JailError):
     error_code = "SANDBOX_UNAVAILABLE"
 
 
+class ContainerUnavailableError(JailError):
+    """`packages.sandbox.container`: the container runtime is missing, the daemon did
+    not respond, a container failed to start, or the caller tried to use a sandbox
+    that was already closed or cancelled."""
+
+    error_code = "SANDBOX_UNAVAILABLE"
+
+
 class LimitExceededError(JailError):
     """A resource limit stopped the command. Always carries which one."""
 

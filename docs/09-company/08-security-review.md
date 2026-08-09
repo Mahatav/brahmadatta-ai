@@ -173,6 +173,15 @@ has not been written, and it has never had any effect on the control-api's own n
 
 ### SEC-02 · **HIGH** · The model-endpoint allowlist accepts cloud metadata endpoints, and an IDNA homograph of `api.openai.com`
 
+**Resolution (issue #93).** The control-API policy now normalises hostnames with pinned
+`idna==3.18` before deciding and rejects any non-case-only transformation; explicitly
+denies metadata/link-local/CGNAT/EC2 metadata ranges before the non-global allowlist;
+rejects metadata hostnames; and permits bare compose labels only through the
+default-empty `MODEL_SERVICE_NAMES` setting. The executed-proof cases, including the
+U+3002 OpenAI homograph and IPv4-mapped metadata address, are committed as a table-driven
+regression suite. Full result: 44 policy cases and 337 control-API tests pass. **SEC-02 is
+CLOSED.**
+
 **Location** — `apps/control-api/contracts/model_policy.py:58-70` (`_host_is_private_ip`
 returns `not address.is_global`), `:95` (`.internal` in `_PRIVATE_SUFFIXES`), `:99` (the
 bare-label pass), `:82` (host taken from `urlparse` with no IDNA normalisation).

@@ -1,4 +1,4 @@
-# packages/sandbox — subprocess jail (#81)
+# packages/sandbox — subprocess jail (#81) and container isolation (#15)
 
 A working-directory jail, resource limits, and a hard timeout that kills the whole
 process group. Enough to build and test the demo target for the D3 gate.
@@ -208,3 +208,103 @@ property that is not delivered.
 since the thread inside `run()` is blocked on the child. It SIGTERMs the process group,
 waits out the grace period, SIGKILLs, and refuses any further commands. Leaving the
 context manager cancels and cleans up whether the caller left normally or by exception.
+
+---
+
+# `container.py` — container isolation for untrusted target code (#15)
+
+**This is the module #28's fuzzing worker runs inside.** `jail.py` above shares the
+orchestrator's user, filesystem and network; `container.py` does not.
+
+D-024 (`docs/09-company/08-security-review.md` §6) accepted a standard
+(rootful-daemon) container — `--network none`, a fixed non-root uid, every
+capability dropped, `no-new-privileges`, a read-only root filesystem, and
+runtime-enforced resource caps — as the substitute for rootless Podman, under eight
+binding conditions. **It is never described as "rootless"** (condition 8): the one
+property it does not deliver is protection against a container-runtime escape
+reaching host root. `contracts.enums.IsolationMode.CONTAINER_NO_NETWORK` [Δ #15] is
+the honest name for a run in this mode; `ROOTLESS_CONTAINER` is reserved for a
+genuine rootless run, which nothing in this codebase produces.
+
+```python
+from packages.sandbox.container import ContainerJail, ContainerJailPolicy
+
+policy = ContainerJailPolicy(image="pinned-target-image@sha256:...")
+with ContainerJail.create(policy, mission_ref=str(mission.id)) as sandbox:
+    (sandbox.root / "seed.bin").write_bytes(seed)
+    result = sandbox.run(["/usr/bin/fuzz-target", "/workspace/seed.bin"])
+# the container and the host-side worktree are both gone here, on every path out
+```
+
+| D-024 condition | Enforced by | Proven by |
+|---|---|---|
+| 1. `--network none`, no exceptions | `ContainerJailPolicy.network` (fixed, `__post_init__` refuses any other value) | `test_dns_and_tcp_egress_both_fail` — an executed DNS lookup and a raw TCP connect from inside a running container, both asserted to fail |
+| 2. `--user <uid>:<gid>`, never 0 | `ContainerJailPolicy.__post_init__` | `test_the_container_runs_as_a_fixed_non_root_user` — `id -u` run inside the container |
+| 3. `--cap-drop ALL`, `no-new-privileges` | `_docker_run_args` | `test_docker_run_args_carry_every_flag_the_eight_conditions_require` |
+| 4. Docker socket never bind-mounted | structural — the only `-v` this module ever emits is the worktree | `test_no_call_shape_can_mount_the_docker_socket` (this package) and `tests/architecture/test_container_isolation.py` (repo-wide) |
+| 5. `--read-only` + sized tmpfs; worktree is the only writable mount | `_docker_run_args`, `ContainerJailPolicy.tmpfs_mb` | `test_the_root_filesystem_is_read_only`, `test_tmp_is_writable_scratch_under_the_read_only_root` |
+| 6. `--memory`/`--cpus`/`--pids-limit`, wall-clock kill | `ContainerJailPolicy`, `ContainerJail.run` | `test_memory_limit_is_passed_to_the_runtime_and_enforced`, `test_wall_clock_timeout_is_reported_and_the_container_is_removed` |
+| 7. Teardown + orphan reaper, on crash and cancel | `ContainerJail.close`/`cancel`, module-level `reap_orphans` | `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw` |
+| 8. Never called "rootless" | `IsolationMode.CONTAINER_NO_NETWORK` | code review — there is no test for a docstring, this is what one looks like |
+
+## Why this module's teardown is simpler than `jail.py`'s
+
+`jail.py`'s README (above) documents SEC-33 at length: a subprocess that calls
+`os.setsid()` escapes the process group `killpg()` signals, because a subprocess
+jail shares the orchestrator's PID namespace. A container has its **own** PID
+namespace — `docker kill <name>` reaches the container's real PID 1, and the kernel
+tears down every process inside that namespace when PID 1 dies. There is no
+`setsid()`-style trick that gets a process out of its own PID namespace. This module
+does not need `jail.py`'s `/proc`-walking snapshot-and-sweep at all.
+
+## The worktree is `0o777`, not `0o700`
+
+`jail.py`'s jail runs as the *same* uid as the orchestrator, so `0o700` is correct —
+only the owner ever needs access. This container runs as a **different**, fixed uid
+(`policy.uid`, default `10001`). A bind-mounted `0o700` directory owned by the
+orchestrator's host uid is unwritable from inside the container — confirmed
+directly (`Permission denied` writing into a `0700` mount from a non-owning uid).
+World-writable is not a broader exposure here: the directory is created fresh per
+`ContainerJail` with an unguessable `mkdtemp` name and removed in `close()`. The
+isolation boundary is which *container* can reach it (exactly one, via the explicit
+`-v` mount), not which local uid owns it.
+
+## A macOS/colima gotcha, if you hit "permission denied" or empty files locally
+
+Docker Desktop / colima's virtiofs mount only shares `$HOME` (and a short allowlist)
+with the VM by default. A bind mount outside that set does not fail loudly — it
+silently binds an **empty, root-owned directory** inside the container instead of
+your actual files, which reads exactly like a permissions bug until you `ls -la`
+both sides and notice the container never saw your files at all. Python's default
+`tempfile.mkdtemp()` uses `/var/folders/...` on macOS, which is outside colima's
+default share. `packages/sandbox/tests/test_container_jail.py` redirects
+`tempfile.tempdir` under `$HOME` for exactly this reason — pass `parent=` to
+`ContainerJail.create()` yourself if you hit this outside the test suite. Native
+Linux (the finale's actual deployment target) has no such split.
+
+## Using `reap_orphans` for real crash recovery
+
+`ContainerJail.close()` — normal exit, failure, cancel — only runs from inside the
+process that started the container. If the orchestrator itself is killed
+(`SIGKILL`, OOM, a host crash) with a container still running, no Python code runs
+to clean it up. Every container this module starts carries the label
+`brahmadatta.sandbox=1` specifically so the *next* process to boot can find and
+remove it:
+
+```python
+from packages.sandbox.container import reap_orphans
+
+removed = reap_orphans()   # call once, early, at orchestrator startup
+```
+
+## What this module does not do
+
+* Build the target image. The caller supplies an already-built, already-pinned
+  `ContainerJailPolicy.image` — building one from a mission's source is a different
+  concern (the compiler-toolchain-engineer's adapter).
+* Require Podman. `ContainerJailPolicy.runtime` names the CLI binary (`"docker"` by
+  default, matching D-024 and `SANDBOX_RUNTIME`'s default); anything that accepts
+  the same `run`/`wait`/`stop`/`kill`/`logs`/`rm`/`inspect` subcommands works.
+* Bound aggregate disk usage beyond the sized tmpfs — which, unlike `jail.py`'s
+  `RLIMIT_FSIZE`, *is* a real ceiling the kernel refuses to exceed, not an advisory
+  one bounding only a single file.

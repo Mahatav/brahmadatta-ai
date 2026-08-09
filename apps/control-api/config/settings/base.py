@@ -148,14 +148,30 @@ MODEL_ENDPOINTS: dict[str, str] = {
     "SMALL_MODEL_BASE_URL": env.get_str("SMALL_MODEL_BASE_URL"),
     "TIER3_BASE_URL": env.get_str("TIER3_BASE_URL"),
 }
+MODEL_SERVICE_NAMES = frozenset(
+    name.strip().lower()
+    for name in env.get_str("MODEL_SERVICE_NAMES").replace(";", ",").split(",")
+    if name.strip()
+)
 
 # --- Sandbox policy defaults ---------------------------------------------------
 #
-# Consumed by the orchestrator (D2, issue #12). Declared here so the control API can
-# echo the effective policy back to the Command Center without inventing values.
+# Consumed by the orchestrator (D2, issue #12) and by
+# packages.sandbox.container.ContainerJailPolicy.from_settings (#15). Declared here
+# so the control API can echo the effective policy back to the Command Center
+# without inventing values.
+#
+# `runtime` defaults to "docker", not "podman": D-024
+# (docs/09-company/08-security-review.md §6.4) accepted a standard rootful-daemon
+# container with `--network none` as the substitute for rootless Podman, on the
+# grounds that Podman was not installed on the build host at all (SEC-11) and that
+# `--network none` answers the threats that actually matter here more completely
+# than a rootless-but-networked container would. `network` stays "deny" — the API
+# has no vocabulary for anything else, and `ContainerJailPolicy` hardcodes the
+# enforcement independently of this setting regardless.
 
 SANDBOX_POLICY = {
-    "runtime": env.get_str("SANDBOX_RUNTIME", "podman"),
+    "runtime": env.get_str("SANDBOX_RUNTIME", "docker"),
     "network": env.get_str("SANDBOX_NETWORK", "deny"),
     "cpu_limit": env.get_int("SANDBOX_CPU_LIMIT", 4),
     "memory_mb": env.get_int("SANDBOX_MEMORY_MB", 8192),
