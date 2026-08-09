@@ -44,6 +44,9 @@ DEV_ROUTABLE_EXCEPTIONS = {"command-center-deps"}
 # repository content, assemble prompts, or hold credentials.
 MUST_NEVER_BE_ROUTABLE = {"control-api", "worker", "db", "redis"}
 
+SNAPSHOT_BODY_LIMIT_MIB = 512
+SNAPSHOT_TMPFS_MIN_MIB = 640
+
 
 def _load(path: Path) -> dict:
     if not path.exists():
@@ -74,6 +77,15 @@ def _services_on_routable(doc: dict) -> set[str]:
         if routable.intersection(names):
             out.add(service)
     return out
+
+
+def _tmpfs_size_mib(service: dict, mountpoint: str = "/tmp") -> int:
+    prefix = f"{mountpoint}:size="
+    matches = [entry for entry in service.get("tmpfs") or [] if entry.startswith(prefix)]
+    assert len(matches) == 1, f"expected one sized {mountpoint} tmpfs, found {matches}"
+    value = matches[0].removeprefix(prefix)
+    assert value.endswith("m"), f"tmpfs size must be explicit MiB, got {value}"
+    return int(value.removesuffix("m"))
 
 
 @pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
@@ -138,6 +150,32 @@ def test_content_holding_services_are_never_routable(path: Path) -> None:
         f"{path.name}: {sorted(violations)} are on a routable network. "
         "These hold repository content or credentials and must never be."
     )
+
+
+@pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
+@pytest.mark.parametrize("service_name", ["nginx", "control-api"])
+def test_snapshot_buffer_tmpfs_exceeds_the_body_limit(
+    path: Path, service_name: str
+) -> None:
+    """SEC-38: a legal snapshot body must fit with bounded scratch headroom."""
+    service = (_load(path).get("services") or {}).get(service_name) or {}
+    size_mib = _tmpfs_size_mib(service)
+    assert size_mib >= SNAPSHOT_TMPFS_MIN_MIB, (
+        f"{path.name} {service_name} /tmp is {size_mib} MiB; the "
+        f"{SNAPSHOT_BODY_LIMIT_MIB} MiB snapshot ceiling requires at least "
+        f"{SNAPSHOT_TMPFS_MIN_MIB} MiB including buffering overhead"
+    )
+
+
+def test_snapshot_buffer_tmpfs_is_identical_across_profiles() -> None:
+    sizes = {
+        (path.name, service_name): _tmpfs_size_mib(
+            (_load(path).get("services") or {}).get(service_name) or {}
+        )
+        for path in (DEV, FINALE)
+        for service_name in ("nginx", "control-api")
+    }
+    assert len(set(sizes.values())) == 1, f"snapshot tmpfs sizing drifted: {sizes}"
 
 
 def test_the_finale_profile_has_no_source_mounts_into_control_api() -> None:

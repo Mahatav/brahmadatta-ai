@@ -43,9 +43,9 @@ services:
     tmpfs:
       # SEC-04 (#95): unsized before this, an unauthenticated caller could fill host RAM
       # through nginx's own request-body buffering (nginx.conf's client_max_body_size
-      # comment explains the mechanism). 256m comfortably covers the 64m body ceiling
-      # plus the client/proxy/fastcgi/uwsgi/scgi temp paths nginx.conf points at /tmp.
-      - /tmp:size=256m
+      # comment explains the mechanism). The snapshot route permits 512m, so 640m
+      # reserves 25% scratch headroom while retaining a hard memory ceiling (#132).
+      - /tmp:size=640m
       - /var/cache/nginx
       - /var/run
     cap_drop: ["ALL"]
@@ -95,10 +95,10 @@ services:
       target: dev
     container_name: brahmadatta-control-api
     <<: [*env-file, *hardening]
-    # SEC-04 (#95): mirrors the finale profile's control-api tmpfs sizing so the two
-    # profiles cannot diverge on this the way they had on APP_ENV (SEC-03).
+    # SEC-04 (#95) / SEC-38 (#132): mirrors nginx and the finale profile. Django's
+    # temporary upload handler also needs the full 512m body plus bounded headroom.
     tmpfs:
-      - /tmp:size=256m
+      - /tmp:size=640m
     environment:
       DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
       # Container-local overrides of the values in apps/control-api/.env.example, which
