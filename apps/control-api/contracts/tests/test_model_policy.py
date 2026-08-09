@@ -54,12 +54,15 @@ def test_local_endpoints_are_permitted(url: str):
     assert_local_inference_endpoint("SMALL_MODEL_BASE_URL", url)
 
 
-@override_settings(MODEL_SERVICE_NAMES=frozenset({"small-model"}))
 def test_declared_compose_service_name_is_permitted():
-    assert is_local_inference_endpoint("http://small-model:8000/v1") is True
+    assert (
+        is_local_inference_endpoint(
+            "http://small-model:8000/v1", service_names={"small-model"}
+        )
+        is True
+    )
 
 
-@override_settings(MODEL_SERVICE_NAMES=frozenset())
 def test_undeclared_bare_name_is_refused():
     assert is_local_inference_endpoint("http://small-model:8000/v1") is False
 
@@ -99,7 +102,6 @@ def test_lookalike_internal_suffix_on_a_public_domain_is_blocked():
         ("http://0.0.0.0/", False),
     ],
 )
-@override_settings(MODEL_SERVICE_NAMES=frozenset())
 def test_sec_02_executed_proof_table(url: str, allowed: bool):
     assert is_local_inference_endpoint(url) is allowed
 
@@ -121,4 +123,15 @@ def test_django_startup_check_passes_on_a_local_endpoint():
 @override_settings(MODEL_ENDPOINTS={"SMALL_MODEL_BASE_URL": "", "TIER3_BASE_URL": ""})
 def test_unset_endpoints_are_not_an_error():
     """Tier 3 is cut; an empty variable must not fail startup."""
+    assert check_model_endpoints(None) == []
+
+
+@override_settings(
+    MODEL_ENDPOINTS={"SMALL_MODEL_BASE_URL": "http://small-model:8000/v1"},
+    MODEL_SERVICE_NAMES=frozenset({"small-model"}),
+)
+def test_django_startup_check_bridges_configured_service_names():
+    """`contracts.checks` is the one place `MODEL_SERVICE_NAMES` crosses from Django
+    settings into the (Django-free) policy function. This is the only test that
+    exercises that bridge rather than passing `service_names=` directly."""
     assert check_model_endpoints(None) == []

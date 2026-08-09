@@ -13,15 +13,23 @@ entry from it cannot make an external endpoint legal.
 `contracts.checks` runs this over settings as a Django system check, so a bad value
 fails `manage.py check`, `runserver` and ASGI startup. It is not possible to boot the
 control API with an inference endpoint pointing at a hosted provider.
+
+`contracts/` has no Django dependency and never will (see this package's own
+`README`/module docstrings and `tests/architecture/test_import_direction.py`, which
+imports every module here in a bare interpreter with no `django` installed). So
+`MODEL_SERVICE_NAMES` — the one piece of this policy that is deployment
+configuration rather than a fixed rule — arrives as an explicit parameter, never
+read from `django.conf.settings` in this file. `contracts.checks`, which already
+depends on Django, is the one place that bridges the two.
 """
 
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import idna
-from django.conf import settings
 
 from contracts.errors import ExternalInferenceBlockedError
 
@@ -93,16 +101,22 @@ def _host_is_private_ip(host: str) -> bool | None:
     return not policy_address.is_global
 
 
-def _configured_service_names() -> frozenset[str]:
+def _normalize_service_names(service_names: Iterable[str]) -> frozenset[str]:
     return frozenset(
-        str(name).strip().lower()
-        for name in getattr(settings, "MODEL_SERVICE_NAMES", ())
-        if str(name).strip()
+        str(name).strip().lower() for name in service_names if str(name).strip()
     )
 
 
-def is_local_inference_endpoint(url: str) -> bool:
-    """True when `url` addresses a host inside the trust boundary."""
+def is_local_inference_endpoint(
+    url: str, *, service_names: Iterable[str] = ()
+) -> bool:
+    """True when `url` addresses a host inside the trust boundary.
+
+    `service_names` is the deployment's `MODEL_SERVICE_NAMES` allowlist (compose
+    service names a bare DNS label is trusted to name) — the caller's
+    responsibility to supply, per the module docstring. Defaults to empty, which is
+    the fail-closed behaviour: no bare label is trusted unless explicitly named.
+    """
     if not url:
         return False
 
@@ -137,12 +151,14 @@ def is_local_inference_endpoint(url: str) -> bool:
     if host.endswith(_PRIVATE_SUFFIXES):
         return True
     # Bare DNS labels are trusted only when deployment configuration names them.
-    return "." not in host and host in _configured_service_names()
+    return "." not in host and host in _normalize_service_names(service_names)
 
 
-def assert_local_inference_endpoint(setting_name: str, url: str) -> None:
+def assert_local_inference_endpoint(
+    setting_name: str, url: str, *, service_names: Iterable[str] = ()
+) -> None:
     """Raise `ExternalInferenceBlockedError` unless `url` is inside the boundary."""
-    if is_local_inference_endpoint(url):
+    if is_local_inference_endpoint(url, service_names=service_names):
         return
 
     host = (urlparse(url).hostname or "").lower()
