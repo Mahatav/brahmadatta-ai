@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from adapters.cpp.pipeline import run_reproducer, run_variant
 from adapters.cpp.sanitizer import parse_sanitizer_output
 from adapters.cpp.variants import Variant, spec_for
-from packages.sandbox import Jail
+from packages.sandbox import Jail, JailPolicy
 
 # Captured verbatim from `./build-asan/pktcfg_replay crash/crash-literal-tab.bin 5` during
 # development (AppleClang 21 / macOS arm64). Frame addresses vary by run; the grammar this
@@ -85,15 +86,27 @@ def test_clean_output_produces_no_fabricated_finding(clean_output: str) -> None:
 def test_the_seeded_defect_is_confirmed_end_to_end(tmp_path: Path, pktcfg_source: Path) -> None:
     """The full pipeline, real cmake/clang, real crash file: builds ASAN_UBSAN, replays
     the committed reproducer, and confirms the exact finding documented in
-    demo/repositories/pktcfg/README.md's defect table."""
-    with Jail.create(parent=tmp_path) as jail:
+    demo/repositories/pktcfg/README.md's defect table.
+
+    Regression test for a real CI failure: this passed locally on macOS and failed on
+    the Linux runner with `test_header` reporting a genuine (not phantom) CTest failure.
+    Root cause, reproduced directly in a `ubuntu:24.04` container: `packages.sandbox.Jail`
+    applies `RLIMIT_AS` from its policy unconditionally, `RLIMIT_AS` is not enforced on
+    Darwin at all (masking the bug locally) but is on Linux, and AddressSanitizer's
+    shadow-memory reservation (~28 TiB measured) blows through the jail's 2 GiB default —
+    every sanitizer-instrumented process aborted at startup. See
+    `adapters/cpp/variants.py`'s `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS` for the full
+    explanation; this is the fix, not a workaround around a still-broken policy."""
+    spec = spec_for(Variant.ASAN_UBSAN)
+    assert spec.min_jail_memory_bytes is not None, "ASAN_UBSAN must set a memory floor"
+    policy = JailPolicy(memory_bytes=spec.min_jail_memory_bytes)
+    with Jail.create(policy, parent=tmp_path) as jail:
         result = run_variant(pktcfg_source, jail, Variant.ASAN_UBSAN)
         # #27's other half: the baseline must stay green under sanitizers — no ctest
         # case trips the defect on its own.
         assert result.ctest.all_passed is True
 
         crash_file = pktcfg_source / "crash" / "crash-literal-tab.bin"
-        spec = spec_for(Variant.ASAN_UBSAN)
         # run_reproducer needs result.build_dir, which only exists while `jail` is open —
         # both calls stay inside this `with` block. See pipeline.py's module docstring.
         repro = run_reproducer(
@@ -105,7 +118,14 @@ def test_the_seeded_defect_is_confirmed_end_to_end(tmp_path: Path, pktcfg_source
     assert finding.tool == "ADDRESS_SANITIZER"
     assert finding.kind == "heap-buffer-overflow"
     assert finding.function == "emit_tab"
-    assert finding.file == "decode.c"
+    # Basename, not exact match: a real toolchain's SUMMARY line embeds whatever path
+    # the compiler was invoked with — Apple clang on macOS produced a bare `decode.c` in
+    # earlier manual runs, gcc on Linux embeds the full absolute compile path
+    # (`.../src/decode.c`). Both are legitimate; `finding.file` was never a documented
+    # "bare filename" contract, only this test's original, single-platform assumption
+    # was. Caught running the real suite in a Linux container (python:3.12-slim).
+    assert finding.file is not None
+    assert Path(finding.file).name == "decode.c", finding.file
     assert finding.line == 43
 
 
@@ -113,14 +133,43 @@ def test_the_seeded_defect_is_confirmed_end_to_end(tmp_path: Path, pktcfg_source
 def test_the_corrected_patch_produces_no_crash(tmp_path: Path, candidate_a_source: Path) -> None:
     """Injected-violation check on the fix itself: replaying the same crash input through
     the correctly patched binary must produce zero findings."""
-    with Jail.create(parent=tmp_path) as jail:
+    spec = spec_for(Variant.ASAN_UBSAN)
+    assert spec.min_jail_memory_bytes is not None, "ASAN_UBSAN must set a memory floor"
+    policy = JailPolicy(memory_bytes=spec.min_jail_memory_bytes)
+    with Jail.create(policy, parent=tmp_path) as jail:
         result = run_variant(candidate_a_source, jail, Variant.ASAN_UBSAN)
         assert result.ctest.all_passed is True
 
         crash_file = candidate_a_source / "crash" / "crash-literal-tab.bin"
-        spec = spec_for(Variant.ASAN_UBSAN)
         repro = run_reproducer(
             jail, result.build_dir / "pktcfg_replay", (str(crash_file), "5"), spec=spec
         )
     assert repro.crashed is False
     assert repro.findings == ()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="RLIMIT_AS is not enforced on Darwin at all, so this regression cannot "
+    "reproduce here — it is Linux-only by construction, the same way "
+    "packages/sandbox/tests/test_jail.py::test_memory_limit_stops_an_allocator is. "
+    "Confirmed reproducing in a ubuntu:24.04 Docker container while diagnosing it.",
+)
+def test_the_jails_default_memory_policy_cannot_run_asan(
+    tmp_path: Path, pktcfg_source: Path
+) -> None:
+    """Injected violation, pinning the actual CI regression: build ASAN_UBSAN inside a
+    `Jail` using the *default* `JailPolicy` (2 GiB `RLIMIT_AS`) rather than
+    `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`. Every sanitizer-instrumented test process
+    must fail to even start — proving the fix in the two tests above is load-bearing and
+    not incidentally passing for some other reason."""
+    with Jail.create(parent=tmp_path) as jail:  # no memory_bytes override — the bug
+        result = run_variant(pktcfg_source, jail, Variant.ASAN_UBSAN)
+    assert result.ctest.all_passed is False
+    assert result.ctest.total == 8
+    assert result.ctest.passed == 0, (
+        "every test should fail to even start under the default 2 GiB RLIMIT_AS"
+    )
+    failure_output = " ".join(t.output for t in result.ctest.tests)
+    assert "AddressSanitizer failed to allocate" in failure_output or "ulimit" in failure_output

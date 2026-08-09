@@ -162,6 +162,17 @@ def run_variant(
     docstring. Its `JailPolicy.wall_clock_seconds` covers the whole configure+build+ctest
     sequence, not each step individually.
 
+    **For any sanitizer variant** (`ASAN`, `UBSAN`, `ASAN_UBSAN`), ``jail`` must have been
+    created with ``JailPolicy(memory_bytes=spec_for(variant).min_jail_memory_bytes)`` —
+    `packages.sandbox.Jail` applies `RLIMIT_AS` from the policy unconditionally, and
+    `RLIMIT_AS` is incompatible with AddressSanitizer's shadow-memory reservation
+    (tens of TiB of virtual address space; see `adapters/cpp/variants.py`'s module
+    docstring). Get this wrong and every instrumented test process aborts at startup with
+    ``AddressSanitizer failed to allocate ...`` — CTest reports that as an ordinary test
+    failure (a real `status="failed"`, not a crash), not an obviously-jail-related error,
+    which is exactly what made this take a Linux CI run to surface after passing locally
+    on macOS (`RLIMIT_AS` is not enforced on Darwin at all).
+
     Raises :class:`StepFailure` (never returns a partial result) when configure or build
     does not succeed, or when CTest itself could not produce a trustworthy report. A red
     but complete CTest run is returned normally — see the module docstring.
