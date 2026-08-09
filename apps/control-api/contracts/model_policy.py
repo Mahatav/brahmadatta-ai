@@ -20,6 +20,9 @@ from __future__ import annotations
 import ipaddress
 from urllib.parse import urlparse
 
+import idna
+from django.conf import settings
+
 from contracts.errors import ExternalInferenceBlockedError
 
 #: Suffixes that denote a private/internal name. `.local` and `.internal` are the
@@ -35,6 +38,22 @@ _PRIVATE_SUFFIXES: tuple[str, ...] = (
 )
 
 _LOCAL_NAMES: frozenset[str] = frozenset({"localhost", "host.docker.internal"})
+
+_DENIED_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "169.254.0.0/16",
+        "fe80::/10",
+        "100.64.0.0/10",
+        "fd00:ec2::/32",
+        "0.0.0.0/32",
+        "::/128",
+    )
+)
+
+_METADATA_NAMES: frozenset[str] = frozenset(
+    {"metadata.google.internal", "metadata.internal"}
+)
 
 #: Belt and braces. Presence here is never what makes an endpoint illegal — the
 #: allowlist above already excludes every public host. This only sharpens the error.
@@ -58,16 +77,28 @@ _KNOWN_HOSTED_INFERENCE_HOSTS: tuple[str, ...] = (
 def _host_is_private_ip(host: str) -> bool | None:
     """True/False if `host` is an IP literal, None if it is a name.
 
-    `is_global` is the discriminator, and it is the strict one: an address is
-    permitted only when it is *not* globally routable. That covers loopback, RFC 1918
-    space, link-local, and the reserved documentation/benchmark ranges — none of which
-    can carry traffic to a hosted provider.
+    Cloud metadata/link-local/CGNAT ranges are denied before the outer non-global
+    allowlist. IPv4-mapped IPv6 is judged by its embedded IPv4 address.
     """
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return None
-    return not address.is_global
+    policy_address = getattr(address, "ipv4_mapped", None) or address
+    if any(
+        policy_address.version == network.version and policy_address in network
+        for network in _DENIED_NETWORKS
+    ):
+        return False
+    return not policy_address.is_global
+
+
+def _configured_service_names() -> frozenset[str]:
+    return frozenset(
+        str(name).strip().lower()
+        for name in getattr(settings, "MODEL_SERVICE_NAMES", ())
+        if str(name).strip()
+    )
 
 
 def is_local_inference_endpoint(url: str) -> bool:
@@ -79,24 +110,34 @@ def is_local_inference_endpoint(url: str) -> bool:
     if parsed.scheme not in {"http", "https"}:
         return False
 
-    host = (parsed.hostname or "").lower().rstrip(".")
+    raw_host = (parsed.hostname or "").rstrip(".")
+    if not raw_host:
+        return False
+    ip_verdict = _host_is_private_ip(raw_host)
+    if ip_verdict is not None:
+        return ip_verdict
+    try:
+        host = idna.encode(raw_host, uts46=True).decode("ascii")
+    except (idna.IDNAError, UnicodeError):
+        return False
+    if host.lower() != raw_host.lower():
+        return False
+    host = host.lower()
     if not host:
+        return False
+
+    if host.split(".", 1)[0] == "metadata" or host in _METADATA_NAMES:
         return False
 
     if any(host == blocked or host.endswith("." + blocked) for blocked in _KNOWN_HOSTED_INFERENCE_HOSTS):
         return False
 
-    ip_verdict = _host_is_private_ip(host)
-    if ip_verdict is not None:
-        return ip_verdict
-
     if host in _LOCAL_NAMES:
         return True
     if host.endswith(_PRIVATE_SUFFIXES):
         return True
-    # A bare label with no dots is a container/compose service name on a private
-    # network (e.g. `small-model`). Anything with a public-looking domain is not.
-    return "." not in host
+    # Bare DNS labels are trusted only when deployment configuration names them.
+    return "." not in host and host in _configured_service_names()
 
 
 def assert_local_inference_endpoint(setting_name: str, url: str) -> None:

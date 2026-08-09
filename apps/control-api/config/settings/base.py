@@ -148,6 +148,11 @@ MODEL_ENDPOINTS: dict[str, str] = {
     "SMALL_MODEL_BASE_URL": env.get_str("SMALL_MODEL_BASE_URL"),
     "TIER3_BASE_URL": env.get_str("TIER3_BASE_URL"),
 }
+MODEL_SERVICE_NAMES = frozenset(
+    name.strip().lower()
+    for name in env.get_str("MODEL_SERVICE_NAMES").replace(";", ",").split(",")
+    if name.strip()
+)
 
 # --- Sandbox policy defaults ---------------------------------------------------
 #

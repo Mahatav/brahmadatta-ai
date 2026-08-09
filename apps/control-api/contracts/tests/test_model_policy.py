@@ -25,7 +25,6 @@ ALLOWED = [
     "http://172.16.4.4:8000/v1",
     "http://small-model.internal:8000/v1",
     "http://model-host.local:8000/v1",
-    "http://small-model:8000/v1",  # compose service name
     "https://model.svc.cluster.local/v1",
     # Reserved documentation range: not globally routable, so it cannot address a
     # hosted provider.
@@ -55,6 +54,16 @@ def test_local_endpoints_are_permitted(url: str):
     assert_local_inference_endpoint("SMALL_MODEL_BASE_URL", url)
 
 
+@override_settings(MODEL_SERVICE_NAMES=frozenset({"small-model"}))
+def test_declared_compose_service_name_is_permitted():
+    assert is_local_inference_endpoint("http://small-model:8000/v1") is True
+
+
+@override_settings(MODEL_SERVICE_NAMES=frozenset())
+def test_undeclared_bare_name_is_refused():
+    assert is_local_inference_endpoint("http://small-model:8000/v1") is False
+
+
 @pytest.mark.parametrize("url", BLOCKED)
 def test_external_endpoints_are_blocked(url: str):
     assert is_local_inference_endpoint(url) is False
@@ -68,6 +77,31 @@ def test_subdomain_of_a_hosted_provider_is_blocked():
 
 def test_lookalike_internal_suffix_on_a_public_domain_is_blocked():
     assert is_local_inference_endpoint("https://api.openai.com.evil.example/v1") is False
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("https://api.openai.com/v1", False),
+        ("http://127.0.0.1:8080/v1", True),
+        ("http://169.254.169.254/", False),
+        ("http://[fd00:ec2::254]/latest/meta-data/", False),
+        ("http://metadata.google.internal/computeMetadata/v1/", False),
+        ("http://100.100.100.200/latest/meta-data/", False),
+        ("http://metadata.internal/", False),
+        ("http://openai/v1", False),
+        ("http://api。openai。com/v1", False),
+        ("http://API.OPENAI.COM/v1", False),
+        ("https://api.openai.com./v1", False),
+        ("https://my-llm-proxy.internal/v1", True),
+        ("http://[::ffff:169.254.169.254]/", False),
+        ("http://[fe80::1]/", False),
+        ("http://0.0.0.0/", False),
+    ],
+)
+@override_settings(MODEL_SERVICE_NAMES=frozenset())
+def test_sec_02_executed_proof_table(url: str, allowed: bool):
+    assert is_local_inference_endpoint(url) is allowed
 
 
 @override_settings(MODEL_ENDPOINTS={"SMALL_MODEL_BASE_URL": "https://api.openai.com/v1"})
