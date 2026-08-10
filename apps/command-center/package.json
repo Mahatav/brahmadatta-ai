@@ -3,19 +3,24 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22 <23" },
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
     "generate:api": "openapi-typescript ../../packages/schemas/openapi.json -o src/lib/api/schema.d.ts",
     "check:api": "node scripts/check-generated-api-types.mjs",
     "check": "npm run check:api && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
     "build": "npm run check && ASTRO_TELEMETRY_DISABLED=1 astro build",
-    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview"
+    "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
+    "smoke:local": "node scripts/smoke-local-command-center.mjs"
   },
   "dependencies": {
     "@astrojs/react": "4.3.0",
     "@fontsource/fragment-mono": "5.2.6",
     "@fontsource/instrument-serif": "5.2.6",
+    "@fontsource/rajdhani": "5.2.6",
+    "@fontsource/rozha-one": "5.2.6",
     "@nanostores/react": "1.0.0",
     "astro": "5.13.5",
     "nanostores": "1.0.1",
