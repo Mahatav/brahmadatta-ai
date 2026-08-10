@@ -45,6 +45,7 @@ unvalidated rather than quietly implied to be safe.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -499,6 +500,54 @@ class Reproducer(models.Model):
         db_table = "reproducer"
 
 
+class StageToolRun(models.Model):
+    """Tool metadata for one deterministic stage run (#32).
+
+    The evidence bundle needs to say exactly what ran before any model escalation:
+    tool name/version, container image digest where one existed, flags, and artifact
+    pointers. The pointers are hash-addressed metadata only; raw output stays in the
+    artifact store.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    mission = models.ForeignKey(
+        Mission, on_delete=models.CASCADE, related_name="stage_tool_runs"
+    )
+    stage = models.CharField(max_length=ENUM_MAX_LENGTH, choices=_choices(MissionStage))
+    tool_name = models.CharField(max_length=200)
+    tool_version = models.CharField(max_length=200)
+    image_digest = models.CharField(max_length=80, null=True, blank=True)
+    flags = models.JSONField(default=list)
+    artifact_refs = models.JSONField(default=list)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "stage_tool_run"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["mission", "stage"], name="stage_tool_mission_idx"),
+        ]
+
+    def clean(self) -> None:
+        if self.image_digest and not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", self.image_digest
+        ):
+            raise ValidationError(
+                "image_digest must be a pinned sha256:<64 lowercase hex> digest."
+            )
+        if not isinstance(self.flags, list) or not all(
+            isinstance(flag, str) and 0 < len(flag) <= 300 for flag in self.flags
+        ):
+            raise ValidationError("flags must be a list of non-empty strings.")
+        _validate_artifact_ref_list(self.artifact_refs)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class FuzzingReport(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     mission = models.ForeignKey(
@@ -728,6 +777,14 @@ class Artifact(models.Model):
         db_table = "artifact"
         ordering = ["created_at"]
 
+    def clean(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
+            raise ValidationError("Artifact sha256 must be 64 lowercase hex characters.")
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
 
 class Export(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -756,3 +813,24 @@ class Export(models.Model):
     class Meta:
         db_table = "export"
         ordering = ["-generated_at"]
+
+
+def _validate_artifact_ref_list(value: Any) -> None:
+    """Reject raw artifact payloads where only `ArtifactRef` metadata is allowed."""
+    from contracts.schemas.common import ArtifactRef
+
+    if not isinstance(value, list):
+        raise ValidationError("artifact_refs must be a list.")
+    forbidden_keys = {"content", "bytes", "data", "raw", "text"}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValidationError("artifact_refs must contain JSON objects.")
+        if forbidden_keys & set(item):
+            raise ValidationError(
+                "artifact_refs may only contain pointers; raw artifact content is "
+                "stored in the artifact store, not the database."
+            )
+        try:
+            ArtifactRef(**item)
+        except Exception as exc:
+            raise ValidationError(f"Invalid artifact reference: {exc}") from exc
