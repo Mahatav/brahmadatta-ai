@@ -483,7 +483,20 @@ class ContainerJail:
         ]
         for key, value in policy.extra_env.items():
             args += ["-e", f"{key}={value}"]
-        args += [policy.image, *argv]
+        # The container runs as fixed uid/gid 10001, not as the orchestrator's host
+        # user. With the image's default umask, a command that creates
+        # `/workspace/build` leaves a 0755 directory owned by uid 10001; the host can
+        # remove the top-level mount point but cannot descend into that directory to
+        # delete its contents. Set an explicit umask for every target command so
+        # teardown remains deterministic without ever running the target as root.
+        args += [
+            policy.image,
+            "sh",
+            "-c",
+            'umask 000; exec "$@"',
+            "brahmadatta-command",
+            *argv,
+        ]
         return args
 
     def _teardown_container(self, name: str, *, force: bool = False) -> int:
