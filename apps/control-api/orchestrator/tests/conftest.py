@@ -47,7 +47,13 @@ def mission(db) -> Mission:
         name="pktcfg demo",
         repository_ref="file:///demo/repositories/pktcfg",
         adapter=LanguageAdapter.C_CMAKE_CTEST.value,
-        policy={},
+        policy={
+            "patch": {
+                "allowed_paths": ["src/decode.c"],
+                "max_files_changed": 1,
+                "max_lines_changed": 40,
+            }
+        },
     )
     Authorization.objects.create(
         mission=row,

@@ -34,9 +34,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from contracts.enums import (
+    ErrorCode,
     EventType,
     MissionStage,
     MissionState,
+    PatchPolicyStatus,
     PatchProvenance,
     Severity,
     Verdict,
@@ -49,11 +51,13 @@ from contracts.errors import (
 from contracts.schemas.evidence import ModelProvenance
 from contracts.schemas.evidence import PatchCandidate as PatchCandidateSchema
 from contracts.schemas.evidence import VerificationRecord as VerificationSchema
+from contracts.schemas.missions import MissionPolicy
 from contracts.state_machine import assert_candidate_set_open, assert_stage_can_run
 from contracts.verdict import GateMatrix, derive_verdict
 from missions.lifecycle import lifecycle_write
 from missions.models import Mission, PatchCandidate, VerificationRecord
 from orchestrator import events, repository
+from orchestrator.patch_policy import evaluate_patch_policy
 
 
 def record_patch_candidate(
@@ -62,9 +66,9 @@ def record_patch_candidate(
     finding_id: UUID,
     provenance: PatchProvenance,
     diff: str,
-    files_changed: int,
-    lines_changed: int,
-    policy_status,
+    files_changed: int | None = None,
+    lines_changed: int | None = None,
+    policy_status=None,
     trace_id: str,
     model: ModelProvenance | None = None,
     policy_detail: str = "",
@@ -97,6 +101,9 @@ def record_patch_candidate(
             )
         assert_candidate_set_open(repository.load_verifications(mission.id))
 
+        mission_policy = MissionPolicy.model_validate(mission.policy or {})
+        policy_decision = evaluate_patch_policy(diff, mission_policy.patch)
+
         # Validate against the frozen schema before touching the table, so a malformed
         # candidate is a 422 rather than a row nobody can load back.
         schema = PatchCandidateSchema(
@@ -106,10 +113,10 @@ def record_patch_candidate(
             provenance=provenance,
             model=model,
             diff=diff,
-            files_changed=files_changed,
-            lines_changed=lines_changed,
-            policy_status=policy_status,
-            policy_detail=policy_detail,
+            files_changed=policy_decision.files_changed,
+            lines_changed=policy_decision.lines_changed,
+            policy_status=policy_decision.status,
+            policy_detail=policy_detail or policy_decision.detail,
             rationale=rationale,
             created_at=now,
         )
@@ -139,6 +146,20 @@ def record_patch_candidate(
             trace_id=trace_id,
             timestamp=now,
         )
+        if policy_decision.status is not PatchPolicyStatus.ACCEPTED:
+            events.emit(
+                mission,
+                EventType.PATCH_POLICY_EVALUATED,
+                f"Patch candidate rejected by policy: {policy_decision.status}.",
+                {
+                    "kind": "policy_violation",
+                    "code": ErrorCode.PATCH_POLICY_REJECTED,
+                    "detail": schema.policy_detail,
+                },
+                severity=Severity.MEDIUM,
+                trace_id=trace_id,
+                timestamp=now,
+            )
 
     return row
 
@@ -197,6 +218,18 @@ def record_verification(
                     "mission_id": str(mission.id),
                     "patch_id": str(patch.id),
                     "patch_mission_id": str(patch.mission_id),
+                },
+            )
+
+        if patch.policy_status != PatchPolicyStatus.ACCEPTED.value:
+            raise InvalidStateTransitionError(
+                f"Patch candidate {patch.id} was rejected by policy "
+                f"({patch.policy_status}) and cannot enter verification.",
+                details={
+                    "mission_id": str(mission.id),
+                    "patch_id": str(patch.id),
+                    "policy_status": patch.policy_status,
+                    "policy_detail": patch.policy_detail,
                 },
             )
 
