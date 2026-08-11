@@ -74,6 +74,25 @@ def test_baseline_event_types_match_contract() -> None:
     assert _EVENT_BASELINE_PASSED == "BASELINE_PASSED"
 
 
+def test_fuzzing_event_types_match_contract() -> None:
+    from workers.fuzzing.run import (
+        _EVENT_MISSION_FAILED,
+        _EVENT_STAGE_COMPLETED,
+        _EVENT_STAGE_STARTED,
+    )
+
+    contract_values = set(_enum_values("EventType").values())
+    assert _EVENT_STAGE_STARTED in contract_values
+    assert _EVENT_STAGE_COMPLETED in contract_values
+    assert _EVENT_MISSION_FAILED in contract_values
+
+
+def test_fuzzing_mode_names_match_contract() -> None:
+    contract_values = set(_enum_values("FuzzingMode").values())
+    assert "LIVE_CAMPAIGN" in contract_values
+    assert "NOT_RUN" in contract_values
+
+
 def test_analyzer_tool_names_used_by_variants_match_contract() -> None:
     from adapters.cpp.variants import Variant, spec_for
 
