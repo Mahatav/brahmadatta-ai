@@ -206,12 +206,35 @@ def transition(
             severity=Severity.INFO,
             timestamp=now,
         )
+        if _requires_teardown(target):
+            transaction.on_commit(
+                lambda: _run_teardown_after_commit(
+                    mission_id, trace_id=trace_id, reason=reason, now=now
+                )
+            )
 
     return TransitionResult(
         mission_id=mission.id,
         from_state=current,
         to_state=target,
         sequence=event.sequence,
+    )
+
+
+def _requires_teardown(target: MissionState) -> bool:
+    return target is MissionState.CANCELLING or is_terminal(target)
+
+
+def _run_teardown_after_commit(
+    mission_id: UUID, *, trace_id: str, reason: str, now
+) -> None:
+    from orchestrator import teardown
+
+    teardown.teardown_started_compute(
+        mission_id,
+        trace_id=trace_id,
+        reason=reason or "mission entered teardown state",
+        now=now,
     )
 
 

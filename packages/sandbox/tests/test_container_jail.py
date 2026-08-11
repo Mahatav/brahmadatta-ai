@@ -50,7 +50,11 @@ HAS_RUNTIME = shutil.which(RUNTIME) is not None
 @pytest.fixture(scope="session", autouse=True)
 def _redirect_tempdir_under_home():
     scratch = Path.home() / ".cache" / "brahmadatta-sandbox-tests"
-    scratch.mkdir(parents=True, exist_ok=True)
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        scratch = Path(tempfile.gettempdir()) / "brahmadatta-sandbox-tests"
+        scratch.mkdir(parents=True, exist_ok=True)
     previous = tempfile.tempdir
     tempfile.tempdir = str(scratch)
     try:
@@ -144,6 +148,33 @@ def test_policy_from_settings_never_reads_network():
         image=PROBE_IMAGE,
     )
     assert policy.network == "none"
+
+
+def test_reap_orphans_can_be_scoped_to_one_mission(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run_cli(runtime: str, args: list[str], *, timeout: float):
+        calls.append(args)
+        if args[:2] == ["ps", "-aq"]:
+            return subprocess.CompletedProcess(
+                [runtime, *args], 0, "abc123\ndef456\n", ""
+            )
+        return subprocess.CompletedProcess([runtime, *args], 0, "", "")
+
+    monkeypatch.setattr("packages.sandbox.container._run_cli", fake_run_cli)
+
+    removed = reap_orphans(mission_ref="mission-a")
+
+    assert removed == ["abc123", "def456"]
+    assert calls[0] == [
+        "ps",
+        "-aq",
+        "--filter",
+        f"label={SANDBOX_LABEL}",
+        "--filter",
+        "label=brahmadatta.mission=mission-a",
+    ]
+    assert calls[1:] == [["rm", "-f", "abc123"], ["rm", "-f", "def456"]]
 
 
 # --- docker socket never mounted (condition 4) -- pure, no docker needed -----------
