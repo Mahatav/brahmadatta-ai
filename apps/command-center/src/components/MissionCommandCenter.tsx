@@ -259,7 +259,14 @@ function missionProgressRows(
 ): Array<{ stage: MissionStage; label: string; detail: string; state: 'done' | 'idle' | 'running'; glyph: string }> {
   return missionStages.map(({ stage, label }) => {
     if (snapshot.completedStages.includes(stage)) {
-      return { stage, label, detail: 'complete', state: 'done', glyph: '+' };
+      const replaySkippedFuzzing = stage === 'STRESS_TEST' && snapshot.fuzzing?.mode === 'NOT_RUN';
+      return {
+        stage,
+        label,
+        detail: replaySkippedFuzzing ? 'skipped' : 'complete',
+        state: 'done',
+        glyph: replaySkippedFuzzing ? '-' : '+',
+      };
     }
     if (snapshot.stage === stage) {
       const progress = snapshot.stageProgress[stage];
@@ -288,10 +295,25 @@ function liveWorkTitle(snapshot: MissionSnapshot): string {
 function liveWorkDetail(snapshot: MissionSnapshot, streamState: string): string {
   if (snapshot.finding) {
     const line = snapshot.finding.location.line ? `:${snapshot.finding.location.line}` : '';
-    return `${snapshot.finding.severity} / ${snapshot.finding.category} / ${snapshot.finding.location.file_path}${line}`;
+    const method = discoveryMethodLabel(snapshot.finding.discovery_method);
+    const replaySource = snapshot.finding.replay_source ? ` / ${snapshot.finding.replay_source}` : '';
+    return `${method} / ${snapshot.finding.severity} / ${snapshot.finding.category} / ${snapshot.finding.location.file_path}${line}${replaySource}`;
   }
   if (snapshot.latestMessage) {
     return snapshot.latestMessage;
   }
   return `Local UI ready. Mission stream is ${streamState}.`;
+}
+
+function discoveryMethodLabel(method: string): string {
+  if (method === 'REPLAYED_REPRODUCER') {
+    return 'replayed reproducer';
+  }
+  if (method === 'FUZZING_CAMPAIGN') {
+    return 'fuzzed';
+  }
+  if (method === 'DIRECT_HARNESS') {
+    return 'direct harness';
+  }
+  return method.toLowerCase().replaceAll('_', ' ');
 }

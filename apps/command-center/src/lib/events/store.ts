@@ -8,6 +8,7 @@ export type MissionState = components['schemas']['MissionState'];
 export type MissionPosture = components['schemas']['MissionPosture'];
 export type BaselineReport = components['schemas']['BaselineReport'];
 export type FindingSummary = components['schemas']['FindingSummary'];
+export type FuzzingReport = components['schemas']['FuzzingReport'];
 export type ReproducerRecord = components['schemas']['ReproducerRecord'];
 export type ResourceUsage = components['schemas']['ResourceUsage'];
 
@@ -53,6 +54,7 @@ export interface MissionSnapshot {
   snapshotSha256: string | null;
   commitSha: string | null;
   baseline: BaselineReport | null;
+  fuzzing: FuzzingReport | null;
   finding: FindingSummary | null;
   reproducer: ReproducerRecord | null;
   resourceUsage: ResourceUsage | null;
@@ -75,6 +77,7 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   snapshotSha256: null,
   commitSha: null,
   baseline: null,
+  fuzzing: null,
   finding: null,
   reproducer: null,
   resourceUsage: null,
@@ -153,6 +156,10 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
     next.baseline = sanitizeBaselineReport(event.payload.report);
   }
 
+  if (event.payload.kind === 'fuzzing') {
+    next.fuzzing = sanitizeFuzzingReport(event.payload.report);
+  }
+
   if (event.payload.kind === 'finding') {
     next.finding = sanitizeFindingSummary(event.payload.finding);
   }
@@ -212,6 +219,20 @@ function sanitizeBaselineReport(report: BaselineReport): BaselineReport {
       : null;
   }
   return sanitized;
+}
+
+function sanitizeFuzzingReport(report: FuzzingReport): FuzzingReport {
+  return {
+    ...report,
+    engine: sanitizeDisplayText(report.engine, { fallback: 'unknown engine', maxLength: 100 }),
+    harness: sanitizeDisplayText(report.harness, { fallback: 'unknown harness', maxLength: 200 }),
+    mission_id: sanitizeDisplayText(report.mission_id, { fallback: 'unknown mission', maxLength: 120 }),
+    replay_source: report.replay_source
+      ? sanitizeDisplayText(report.replay_source, { fallback: 'replay source unavailable', maxLength: 240 })
+      : null,
+    recorded_at: sanitizeDisplayText(report.recorded_at, { fallback: 'unknown time', maxLength: 80 }),
+    sanitizers: sanitizeDisplayList(report.sanitizers ?? [], { fallback: 'unknown sanitizer', maxLength: 80, maxItems: 12 }),
+  };
 }
 
 function sanitizeFindingSummary(finding: FindingSummary): FindingSummary {
