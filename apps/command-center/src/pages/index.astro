@@ -1,25 +1,31 @@
 ---
 import { SystemStatus } from '../components/SystemStatus';
 import { LiveEventStatus } from '../components/LiveEventStatus';
+import { LocalRepositoryIntake } from '../components/LocalRepositoryIntake';
+import { MissionCommandCenter } from '../components/MissionCommandCenter';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 <BaseLayout title="Brahmadatta Command Center">
   <article class="command-center" aria-labelledby="page-title">
-    <header>
-      <p class="eyebrow">[ BRAHMADATTA AI ]</p>
-      <h1 id="page-title">Command Center</h1>
-      <p class="summary">Static Astro shell with a typed, same-origin control-plane probe.</p>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">[ ब्रह्मदत्त AI ]</p>
+        <h1 id="page-title">Brahmadatta</h1>
+      </div>
+      <p class="summary">
+        Mythic local intelligence for authorized code on this machine.
+      </p>
     </header>
 
-    <section aria-labelledby="system-status">
-      <h2 id="system-status">[ SYSTEM STATUS ]</h2>
-      <SystemStatus client:load />
+    <section class="situation-room" aria-label="Situation room">
+      <MissionCommandCenter client:load />
+      <LocalRepositoryIntake client:load />
     </section>
 
-    <section aria-labelledby="live-events">
-      <h2 id="live-events">[ LIVE EVENT INFRASTRUCTURE ]</h2>
+    <section class="control-plane" aria-labelledby="control-plane">
+      <h2 id="control-plane">[ CONTROL PLANE ]</h2>
+      <SystemStatus client:load />
       <LiveEventStatus client:load />
-      <p class="detail">The stream remains closed until an authorized mission is selected.</p>
     </section>
   </article>
 </BaseLayout>

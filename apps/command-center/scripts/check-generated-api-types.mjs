@@ -15,7 +15,7 @@ try {
   );
 
   if (result.status !== 0) {
-    process.stderr.write(result.stderr);
+    process.stderr.write(result.stderr ?? result.error?.message ?? 'openapi-typescript failed.\n');
     process.exit(result.status ?? 1);
   }
 

@@ -114,22 +114,20 @@
   /* ========================================================================
      3. TYPEFACES
 
-        Display: Instrument Serif 400 — the only weight it ships. Its stroke
-        contrast is high enough that at 48px and above it reads as a light
-        Didone, which is the effect the reference calls for.
-        Approved substitute if a glyph is missing: Bodoni Moda 400.
+        Display: Instrument Serif — a high-contrast ceremonial face. It keeps
+        the grandeur of the original direction without drifting into novelty.
+        Rozha One remains the Indian serif fallback when a glyph path fails.
 
-        Utility: Fragment Mono 400 — also a single weight. Emphasis in mono
-        is carried by case, tracking and colour, never by weight. Do not
-        synthesise a bold; browsers fake it badly and it breaks the tick grid.
+        Utility: Rajdhani — geometric, compact, and tactical. Fragment Mono
+        remains the fallback for environments that need true monospace glyphs.
 
         BOTH FONTS MUST BE SELF-HOSTED as woff2 in the Astro build. The
         finale machine may have no internet; a Google Fonts @import that
         fails drops the entire dashboard to Times New Roman.
      ======================================================================== */
 
-  --bd-font-display: "Instrument Serif", "Bodoni Moda", Didot, "Times New Roman", serif;
-  --bd-font-mono:    "Fragment Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bd-font-display: "Instrument Serif", "Rozha One", "Bodoni Moda", serif;
+  --bd-font-mono:    "Rajdhani", "Fragment Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* ========================================================================
      4. TYPE SCALE

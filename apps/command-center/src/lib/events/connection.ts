@@ -1,4 +1,10 @@
-import { $latestMissionEvent, $streamState } from './store';
+import {
+  $latestMissionEvent,
+  $streamState,
+  ingestMissionEvent,
+  resetMissionSnapshot,
+  type MissionEventEnvelope,
+} from './store';
 import type { components } from '../api/schema';
 
 type EventType = components['schemas']['EventType'];
@@ -36,6 +42,7 @@ let source: EventSource | undefined;
 
 export function connectMissionEvents(missionId: string): () => void {
   disconnectMissionEvents();
+  resetMissionSnapshot();
   $streamState.set('connecting');
 
   const encodedMissionId = encodeURIComponent(missionId);
@@ -49,6 +56,11 @@ export function connectMissionEvents(missionId: string): () => void {
         event: eventType,
         data: event.data,
       });
+      try {
+        ingestMissionEvent(JSON.parse(event.data) as MissionEventEnvelope);
+      } catch {
+        $streamState.set('error');
+      }
     });
   }
 
