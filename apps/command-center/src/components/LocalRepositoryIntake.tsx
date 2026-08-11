@@ -6,6 +6,7 @@ import {
   setLocalRepositoryContext,
   type LocalRepositoryContext,
 } from '../lib/events/store';
+import { sanitizeDisplayList, sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
 import type { ChangeEvent } from 'react';
 
 interface ScanResult {
@@ -88,7 +89,7 @@ export function LocalRepositoryIntake() {
       });
       const body = await response.json() as LocalPathScanResponse | { error?: string; message?: string };
       if (!response.ok || !('manifestLines' in body)) {
-        setStatus(('message' in body && body.message) ? body.message : 'local path scan failed');
+        setStatus(sanitizeStatus(('message' in body && body.message) ? body.message : 'local path scan failed'));
         return;
       }
       await registerRepository(body);
@@ -123,14 +124,14 @@ export function LocalRepositoryIntake() {
   async function registerRepository(scan: LocalPathScanResponse) {
     const manifestSha256 = await digestManifest(scan.manifestLines);
     const repository: LocalRepositoryContext = {
-      name: scan.name,
-      authorizedBy: authorizedBy.trim(),
+      name: sanitizeDisplayText(scan.name, { fallback: 'local repository', maxLength: 120 }),
+      authorizedBy: sanitizeDisplayText(authorizedBy.trim(), { fallback: 'authorized operator', maxLength: 120 }),
       authorizedAt: new Date().toISOString(),
       fileCount: scan.fileCount,
       totalBytes: scan.totalBytes,
       manifestSha256,
-      detectedFiles: scan.detectedFiles,
-      primaryStack: scan.primaryStack,
+      detectedFiles: sanitizeDisplayList(scan.detectedFiles, { fallback: 'unknown file', maxLength: 240, maxItems: 64 }),
+      primaryStack: sanitizeDisplayText(scan.primaryStack, { fallback: 'unknown stack', maxLength: 120 }),
       localOnly: true,
     };
     setLocalRepositoryContext(repository);
@@ -193,6 +194,10 @@ export function LocalRepositoryIntake() {
       </dl>
     </section>
   );
+}
+
+function sanitizeStatus(value: unknown): string {
+  return sanitizeDisplayText(value, { fallback: 'local path scan failed', maxLength: 220 });
 }
 
 function applyScanFile(result: ScanResult, path: string, file: File): void {
