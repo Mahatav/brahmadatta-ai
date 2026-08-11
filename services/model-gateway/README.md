@@ -87,6 +87,76 @@ schema mismatch, ambiguity), `5` bad arguments — the fallback ladder's rung-3 
 three distinguishable answers rather than one failure. It prints the exact sentence the run
 will display, which is the point of running it at pre-flight rather than at hour 30.
 
+## Issue #73 — local model prep evidence
+
+`gateway.tools.model_prep` is the D4 harness for the small local model. It does **not**
+download a model by default. The operator chooses and fetches the artifact explicitly, then
+the tool records the evidence the issue asks for:
+
+- pinned artifact hash, size, model revision and quantization
+- proof that the serving endpoint is local-only under the gateway endpoint policy
+- cold-start / first-token / throughput evidence in JSON
+- hardware snapshot beside the measurement, so numbers are not detached from the machine
+
+The safe CI path uses a deterministic fake backend and loads no model:
+
+```
+python -m gateway.tools.model_prep measure --backend fake \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --output evidence/model-prep/fake-measurement.json
+```
+
+The real operator run shape is printed by:
+
+```
+python -m gateway.tools.model_prep plan --evidence-dir evidence/model-prep
+```
+
+That plan expands to this sequence:
+
+```
+# Fetch, explicitly. This is the multi-GB step; the harness never starts it on its own.
+huggingface-cli download <repo/model> <file.gguf> \
+  --revision <pinned-revision> \
+  --local-dir .model-cache/<model>
+
+# Quantize locally when the downloaded artifact is not already quantized.
+./llama.cpp/llama-quantize <source.gguf> <target-q4_k_m.gguf> q4_K_M
+
+# Record the exact artifact that will be served.
+python -m gateway.tools.model_prep hash-artifact \
+  --artifact .model-cache/<model>/<target-q4_k_m.gguf> \
+  --model-name <model> \
+  --revision <pinned-revision> \
+  --quantization q4_K_M \
+  --output evidence/model-prep/model-artifact.json
+
+# Serve on loopback only, then prove the boundary before measuring.
+./llama.cpp/llama-server \
+  -m .model-cache/<model>/<target-q4_k_m.gguf> \
+  --host 127.0.0.1 \
+  --port 8080
+
+python -m gateway.tools.model_prep check-serving \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --output evidence/model-prep/model-serving.json
+
+# Measure through the same local-only endpoint shape the gateway permits.
+python -m gateway.tools.model_prep measure \
+  --backend openai-compatible \
+  --endpoint http://127.0.0.1:8080/v1 \
+  --model <model> \
+  --revision <pinned-revision> \
+  --artifact-sha256 <sha256> \
+  --prompt-file prompts/patch-generation.txt \
+  --prompt-version patch-prompt/3 \
+  --output evidence/model-prep/model-measurement.json
+```
+
+If the final command cannot produce `first_token_ms` and a non-empty output stream from the
+actual machine on D4, record that on #73 immediately. That is the point of the issue: a slow
+or unavailable local CPU model is a D4 fact, not a D6 surprise.
+
 ## The endpoint policy
 
 `endpoint_policy.classify()` is the gateway's egress function: the last thing between a

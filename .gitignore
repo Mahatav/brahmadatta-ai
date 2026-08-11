@@ -29,6 +29,7 @@ build/
 /artifacts/
 /evidence-out/
 *.log
+services/model-gateway/transcripts/*.json
 
 # Control API runtime state: content-addressed snapshot store, upload staging (#18).
 # Tests point these at a pytest tmp_path instead; this only guards a local dev run.
