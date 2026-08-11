@@ -105,19 +105,19 @@ export interface paths {
         };
         /**
          * Ordered event stream (SSE)
-         * @description Server-sent events over ASGI.
+         * @description Server-sent events over ASGI, backed by the persisted `MissionEvent` log.
          *
-         *     The transport is real and running today; the mission events are not, because the
-         *     orchestrator that emits them does not exist yet. Rather than fabricate telemetry
-         *     — which the product rules forbid outright — this emits the stream preamble, two
-         *     heartbeat comments, and one terminal `contract.not_implemented` frame carrying the
-         *     standard error envelope, then closes.
+         *     Every ORM read runs through `sync_to_async` in `api.sse`, once per call — this
+         *     view never holds an `asgiref` thread-pool thread between reads (CTO-C1). The
+         *     per-mission concurrent-stream cap is enforced with `sse.acquire_slot` *before*
+         *     `StreamingHttpResponse` is constructed, so a caller over the limit gets a real
+         *     `429` rather than a stream that opens and immediately closes; `sse.release_slot`
+         *     runs from the generator's `finally`, so a client disconnect (the ASGI handler
+         *     closing this generator) frees the slot regardless of which frame it happened on.
          *
-         *     That is enough to prove the thing most likely to break silently: nginx buffers
-         *     proxied responses by default, and a buffered SSE stream arrives as one lump at the
-         *     end. `X-Accel-Buffering: no` is set here as well as `proxy_buffering off` in the
-         *     nginx config (issue #10) — belt and braces, because this failure is invisible
-         *     until the demo.
+         *     `Last-Event-ID` (sent automatically by a reconnecting `EventSource`) or an
+         *     explicit `?since_sequence=` resumes from a cursor and replays every missed event
+         *     in order before the stream goes live — see `sse.event_frames`.
          */
         get: operations["streamMissionEvents"];
         put?: never;
@@ -137,7 +137,7 @@ export interface paths {
         };
         /**
          * Replay ordered events from a sequence number
-         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value.
+         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery.
          */
         get: operations["replayMissionEvents"];
         put?: never;
@@ -1036,13 +1036,25 @@ export interface components {
         InferenceMode: "LIVE_INFERENCE" | "REPLAYED_TRANSCRIPT";
         /**
          * IsolationMode
-         * @description How the target was contained (#81).
+         * @description How the target was contained (#81, #15).
          *
-         *     `SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an
-         *     acceptable D3 fallback and it must never be reported as the container path.
+         *     `SUBPROCESS_JAIL` is materially weaker than either container mode and it is an
+         *     acceptable D3 fallback; it must never be reported as a container path.
+         *
+         *     `CONTAINER_NO_NETWORK` [Δ #15] is D-024's accepted substitute for rootless
+         *     isolation: a standard (rootful-daemon) container with `--network none`, a fixed
+         *     non-root uid, every capability dropped, `no-new-privileges`, and a read-only root
+         *     filesystem — every property in `docs/09-company/08-security-review.md` §6.2
+         *     *except* the user-namespace remapping true rootless would add. D-024 condition 8
+         *     is binding: a run in this mode is never reported as `ROOTLESS_CONTAINER`, because
+         *     that would claim the one property (`--network none` aside) it does not deliver —
+         *     protection against a container-runtime escape reaching host root.
+         *
+         *     `ROOTLESS_CONTAINER` is kept for a genuine rootless Podman/Docker run, should one
+         *     ever land; nothing in this codebase produces it today.
          * @enum {string}
          */
-        IsolationMode: "ROOTLESS_CONTAINER" | "SUBPROCESS_JAIL";
+        IsolationMode: "ROOTLESS_CONTAINER" | "CONTAINER_NO_NETWORK" | "SUBPROCESS_JAIL";
         /**
          * LanguageAdapter
          * @enum {string}
@@ -1716,8 +1728,8 @@ export interface components {
             network: "deny";
             /**
              * Runtime
-             * @description Rootless container runtime, or the subprocess-jail fallback (#81). The fallback is weaker isolation and is reported as such everywhere it is used — it is not a silent substitution.
-             * @default podman
+             * @description Container runtime, or the subprocess-jail fallback (#81). `docker` is D-024's accepted substitute for rootless Podman — a standard rootful-daemon container with `--network none`, never reported as `podman`'s stronger isolation claim. The subprocess-jail fallback is weaker isolation still and is reported as such everywhere it is used — it is not a silent substitution.
+             * @default docker
              * @enum {string}
              */
             runtime: "podman" | "docker" | "subprocess-jail";
@@ -2132,6 +2144,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2219,6 +2240,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2297,6 +2327,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2393,6 +2432,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2471,6 +2519,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2567,6 +2624,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2589,7 +2655,9 @@ export interface operations {
     };
     streamMissionEvents: {
         parameters: {
-            query?: never;
+            query?: {
+                since_sequence?: number;
+            };
             header?: never;
             path: {
                 mission_id: string;
@@ -2652,8 +2720,26 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2740,6 +2826,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2818,6 +2913,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2914,6 +3018,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -2995,6 +3108,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3088,6 +3210,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -3166,6 +3297,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3261,6 +3401,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -3340,6 +3489,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3436,6 +3594,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -3514,6 +3681,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3610,6 +3786,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -3692,6 +3877,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3782,6 +3976,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -3858,6 +4061,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3954,6 +4166,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Unprocessable Content */
             422: {
                 headers: {
@@ -4030,6 +4251,15 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

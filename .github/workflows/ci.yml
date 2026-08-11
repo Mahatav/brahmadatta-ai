@@ -7,17 +7,28 @@
 # docs/04-development/31-development-setup-guide.md §Checks — it is just not spending
 # runner minutes on every pull request this week.
 #
-# What is NOT in CI, and how it is covered instead:
+# Three of those four scripts are now BACK IN, in the `ingress` job. The argument that put
+# them there is not "more checks are better", it is that each one guards a property that
+# fails SILENTLY — nothing goes red, nothing logs an error, and the first symptom is at the
+# finale. A lint failure announces itself; a buffered event stream does not.
 #
-#   ruff / mypy                         ruff.toml, mypy.ini — run locally
-#   docker compose config, nginx -t      infrastructure/scripts/nginx-validate.sh
-#   SSE survives the proxy               infrastructure/scripts/smoke-sse.sh
-#   only nginx has egress (C4)           infrastructure/scripts/egress-test.sh
-#   shellcheck, actionlint               run locally
+#   nginx -t + compose config       ingress job. ~30s. Catches a config that cannot start.
+#   SSE survives the proxy          ingress job. ~2min. Two of its four cases inject a
+#                                   violation and require the stream to break (#114).
+#   only nginx has egress (C4)      ingress job, plus the static half in
+#                                   tests/architecture/test_compose_topology.py, which runs
+#                                   in the cheap pytest job and needs nothing running.
 #
-# Those four scripts are the ones worth promoting back into CI first, in that order, when
-# the budget for it exists. `smoke-sse.sh` and `egress-test.sh` guard invariants that fail
-# silently, which is the argument for them going first.
+# What is still NOT in CI, and how it is covered instead:
+#
+#   ruff / mypy                     ruff.toml, mypy.ini — run locally
+#   shellcheck, actionlint          run locally
+#   finale-egress-evidence.sh       REHEARSAL, not CI. It builds and boots the whole finale
+#                                   stack to prove egress denial from inside the running
+#                                   container. That is the right test and the wrong cadence
+#                                   — see SEC-R3 and docs/06-operations/73-rehearsal-checklist.md,
+#                                   where it is a numbered checklist item with a place to
+#                                   record the output, not an intention.
 #
 # Design notes that survive the cut:
 #   - Actions are pinned to a commit SHA, not a tag. A tag is mutable and can be repointed
@@ -81,6 +92,71 @@ jobs:
   pytest:
     name: pytest
     runs-on: ubuntu-24.04
+
+    # BUG-022 (docs/09-company/11-qa-report.md, round 3, "major", devops + backend-developer):
+    # there was no `services:` block here at all, so the whole control API suite ran on
+    # SQLite. That does not merely fail to prove the lock-dependent properties — it HIDES
+    # their failure, and QA measured exactly how much by how, running the SAME shipped code
+    # against both engines:
+    #
+    #   TC-P0  is FOR UPDATE a lock at all?  Postgres: a second connection is REFUSED with
+    #          "could not obtain lock on row". SQLite: the second connection ACQUIRES it
+    #          immediately — the lock call compiles away to a no-op.
+    #   TC-P1  gap-free `sequence` under 8 concurrent writers x 25 events: 200/200 rows,
+    #          gap-free, on Postgres with the lock. The negative control (lock replaced by
+    #          a plain `.get()`, i.e. what an "innocent" refactor produces) LOSES 147 of
+    #          200 writes on Postgres — the unique constraint is a backstop, not a
+    #          substitute for the lock.
+    #   TC-P2  the candidate-set freeze (D-046) under an interleaved insert: 25/25 clean
+    #          under the lock, 25/25 BREACHED without it — same code, same negative-control
+    #          method.
+    #   TC-P2b the same script, same shipped code, against SQLITE: the shipped D-046
+    #          enforcement breaches 6 / 6. Not merely untested there — absent. "231 passed"
+    #          on the SQLite suite is true and describes none of this.
+    #
+    # QA's own words: "this is not a defect in the code; it is the measurement of exactly
+    # how much the CI signal is worth on this property, and it is the argument for BUG-022."
+    #
+    # The judgement call was whether to SPLIT — most tests on SQLite for speed, the
+    # lock-dependent ones on Postgres — or to run everything on Postgres. Split, rejected:
+    # every mechanism for assigning a test to the Postgres lane (a marker, a directory, a
+    # naming convention) is something a person has to remember, and a lock-dependent test
+    # that lands in the SQLite lane reports green while testing nothing — which is the exact
+    # failure mode TC-P2b just measured. There is no assignment to get wrong if there is one
+    # lane. QA's own concurrency harnesses (TC-P0/P1/P2) are throwaway scripts, not
+    # committed, and reproducing them as a permanent CI check is out of this scope — tracked
+    # as a follow-up, not silently dropped. This PR closes the SQLite-hides-it half of
+    # BUG-022 (a regression in the compose/finale posture, i.e. an accidental switch back to
+    # SQLite, now fails CI); it does not add the concurrency harnesses themselves.
+    #
+    # Cost: the service container adds roughly 10-15s, started in parallel with checkout;
+    # QA measured the suite itself at 3.6x wall-clock on Postgres vs SQLite (4.87s vs
+    # 1.29s) — round trips, not meaningfully slower in absolute terms. SQLite stays the
+    # local default via apps/control-api/config/settings/test.py's `setdefault`, so a
+    # developer with no Postgres running is unaffected; CI overrides it by exporting
+    # DATABASE_URL below. Final approval authority: CTO (technical) — recorded as a decision
+    # in this PR per BUG-022's routing ("engineering-manager to route").
+    #
+    # 16-alpine matches what QA measured against (postgres:16-alpine / PostgreSQL 16.13)
+    # and what docker-compose.finale.yml runs.
+    services:
+      postgres:
+        # postgres:16-alpine, pinned by multi-arch index digest, resolved and pull-tested
+        # in this session. Same rule as every other image pin in this repository: a tag is
+        # mutable and can be repointed under us between a green run and the next one.
+        image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-not-a-real-password
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -137,15 +213,50 @@ jobs:
       - name: Architecture tests
         run: pytest tests/ -q -rs
 
+      # The fixture and sandbox suites live outside `tests/` and outside apps/control-api,
+      # so neither existing step collected them — they passed locally and did not exist as
+      # far as CI was concerned. That made #71's central promise ("a contract change breaks
+      # the fixture loudly") true on a laptop and false on the branch that matters.
+      # Same shape as the bypass table gating only one of its two columns: a check nobody
+      # can fail is a document.
+      #
+      # This references packages/sandbox/, not services/sandbox/. An earlier version of
+      # this step (landed directly on this branch while the D-053 move was in flight)
+      # still pointed at services/sandbox/ — the exact stale-path failure mode BUG-016
+      # above already burned this project on once.
+      #
+      # SEC-34 (cybersecurity review of #113, Medium): an earlier version of this guard
+      # printed a warning and then `exit 0`d when a directory was missing — a check
+      # nobody can fail, the exact shape the CTO's own comment above this step warns
+      # about, reproduced in the guard meant to prevent it. Fixed to fail the job.
+      # `apps/control-api`'s existence check below is not the same situation and is not
+      # touched by this: at D1 that directory legitimately did not exist yet, and
+      # skipping cleanly during that bootstrap phase was correct. packages/sandbox and
+      # packages/test-fixtures are added complete in this PR — there is no "not built
+      # yet" phase for them from here on, so their absence in any future run can only
+      # mean a regression, and reports as one.
+      - name: Fixture and sandbox tests
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in packages/sandbox packages/test-fixtures; do
+            if [ ! -d "$dir" ]; then
+              echo "::error::$dir does not exist. Unlike apps/control-api at D1, this directory is not still being built — it shipped complete in PR #113. Its absence means something moved or deleted it without updating this workflow."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 1
+          fi
+          pytest packages/sandbox/tests packages/test-fixtures/tests -q -rs
+
       - name: Control API tests
         env:
           DJANGO_SETTINGS_MODULE: config.settings.test
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
           DJANGO_DEBUG: "false"
-          # sqlite so CI needs no database service. The compose stack and the finale both
-          # use PostgreSQL; anything depending on Postgres-specific behaviour needs an
-          # integration job with a service container, which is D2 work.
-          DATABASE_URL: "sqlite:///ci.sqlite3"
+          # See BUG-022 above `services:` for why this is Postgres, not sqlite:///ci.sqlite3.
+          DATABASE_URL: "postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci"
         run: |
           set -euo pipefail
           if [ ! -d apps/control-api ]; then
@@ -153,8 +264,46 @@ jobs:
             exit 0
           fi
           pip install -r apps/control-api/requirements.txt
+
+          # Drop any test_* database left on the service BEFORE running, so "a test_*
+          # database exists afterward" is evidence about THIS run and not a stale leftover.
+          # GitHub-hosted runners give every job a fresh service container, so this never
+          # fires there — it matters on a reused/self-hosted runner, and it is what caught
+          # a false pass in this PR's own local verification: a `test_ci` database left
+          # over from an earlier manual run made a genuinely broken check (DATABASE_URL
+          # pointed at sqlite, Postgres untouched) report PASS, because the check only
+          # asked "does one exist" instead of "did THIS run make one".
+          python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci')
+          conn.autocommit = True
+          names = [r[0] for r in conn.execute(\"SELECT datname FROM pg_database WHERE datname LIKE 'test%'\").fetchall()]
+          for n in names:
+              conn.execute(f'DROP DATABASE \"{n}\"')
+          print(f'pre-run cleanup: dropped {names}' if names else 'pre-run cleanup: nothing to drop')
+          "
+
           cd apps/control-api
-          pytest -q
+          # --reuse-db is CI-only, passed here rather than in pytest.ini (owned by the
+          # backend developer). Without it pytest-django DROPS the test database at
+          # teardown, and the check below would always find nothing regardless of what the
+          # suite did — verified in this session, before the pre-run drop above was added.
+          pytest -q --reuse-db
+
+          # The suite can pass while never having opened a connection to Postgres at all —
+          # that is exactly how BUG-022 went unnoticed. Assert Django actually created and
+          # used a Postgres test database THIS run, not just that pytest exited 0.
+          python -c "
+          import psycopg
+          conn = psycopg.connect('postgresql://ci:ci-only-not-a-real-password@127.0.0.1:5432/ci')
+          conn.autocommit = True
+          rows = conn.execute(\"SELECT datname FROM pg_database WHERE datname LIKE 'test%'\").fetchall()
+          assert rows, (
+              'no test_* database found on the Postgres service after this run — the '
+              'suite did not touch Postgres. Check DATABASE_URL above.'
+          )
+          print(f'ok: pytest-django created and used {[r[0] for r in rows]} on this run')
+          "
 
       # Runs AFTER the control-API install, on purpose and for the same reason as BUG-016.
       # gateway/tests/test_contract_alignment.py feeds the gateway's provenance record to
@@ -187,6 +336,71 @@ jobs:
             exit 0
           fi
           python infrastructure/scripts/testing/endpoint-policy-bypass-table.py
+
+  # ---------------------------------------------------------------------------
+  # The three scripts named at the top of this file, restored to CI. Needs nothing built —
+  # docker-compose.yml's dev target is exercised at the config level only; the images it
+  # `docker run` are the pinned upstream images (nginx-unprivileged, python), never a
+  # locally-built one, so this job does not depend on apps/control-api or
+  # apps/command-center existing and cannot be slowed down by an application build.
+  #
+  # Each of the three properties below fails SILENTLY without its check: a broken nginx
+  # config still starts on a bad day, a buffered SSE stream still returns 200, and a
+  # container quietly reattached to `external` still passes every other test in this
+  # workflow. That silence is the whole argument for spending runner minutes here.
+  ingress:
+    name: ingress (nginx -t · compose config · SSE determinism · egress topology)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # `nginx -t` against both profiles, self-signed dev TLS material generated on
+      # demand. Neither compose file's runtime images are pulled — this parses and
+      # validates the committed config, nothing more.
+      - name: nginx -t (dev + finale)
+        run: infrastructure/scripts/nginx-validate.sh
+
+      # `docker compose config` for both profiles. This is a distinct check from `nginx
+      # -t`: it validates the YAML, the interpolation, and the network/volume/profile
+      # graph — none of which nginx -t ever looks at. The six variables below are every
+      # `${VAR:?...}` in docker-compose.finale.yml — it refuses to default them on
+      # purpose (fail loud rather than silently run with a blank secret). CI has no .env
+      # at all (see the top of this file), so they are supplied inline, same as every
+      # other CI-only value in this workflow. None of these values are used to start
+      # anything — `config` only resolves and validates, it does not run a container.
+      - name: docker compose config validates (dev + finale)
+        env:
+          DATABASE_URL: "postgresql://ci:ci-only-not-a-real-password@db:5432/ci"
+          DJANGO_ALLOWED_HOSTS: "localhost"
+          DJANGO_CSRF_TRUSTED_ORIGINS: "https://localhost"
+          POSTGRES_PASSWORD: "ci-only-not-a-real-password"
+          REDIS_PASSWORD: "ci-only-not-a-real-password"
+          REDIS_URL: "redis://:ci-only-not-a-real-password@redis:6379/0"
+        run: |
+          set -euo pipefail
+          docker compose -f infrastructure/compose/docker-compose.yml config --quiet
+          echo "dev profile: config OK"
+          docker compose -f infrastructure/compose/docker-compose.finale.yml config --quiet
+          echo "finale profile: config OK"
+
+      # #114. Four cases, two of them an injected violation that must fail — see the
+      # comment block at the top of infrastructure/scripts/smoke-sse.sh.
+      - name: SSE survives the proxy
+        run: infrastructure/scripts/smoke-sse.sh
+
+      # C4 / the security review's SEC-R3 split: the expensive live-boot proof
+      # (finale-egress-evidence.sh) is a rehearsal-checklist item, re-run by cybersecurity
+      # before each rehearsal — see docs/06-operations/73-rehearsal-checklist.md. This is
+      # the cheap half that runs on every PR: it reads the compose topology as data (no
+      # build required) AND attempts real outbound connections from throwaway probe
+      # containers on the declared networks, so it catches both a compose-file regression
+      # and a case where the topology reads right and Docker did something else.
+      - name: only nginx has egress (C4)
+        run: infrastructure/scripts/egress-test.sh
 
   # ---------------------------------------------------------------------------
   # Without this, issue #6's acceptance criterion — "a contract change breaks the frontend
@@ -250,3 +464,48 @@ jobs:
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-ci-only-not-a-real-secret
           DATABASE_URL: "sqlite:///ci.sqlite3"
         run: infrastructure/scripts/openapi-contract-check.sh
+
+  # ---------------------------------------------------------------------------
+  # #16/#17/#27 (compiler-toolchain-engineer). "A suite CI does not collect is a suite
+  # that does not exist" — this job is that line acted on. Without it, every claim in
+  # adapters/cpp/tests and workers/baseline/tests — including the notrun-is-not-a-pass
+  # regression test and the D3 gate rehearsal — would be true only on a laptop.
+  #
+  # ubuntu-24.04's default image ships cmake, make, gcc/g++ (with libasan/libubsan) and
+  # `patch`, so no extra install step is needed for the demo target
+  # (demo/repositories/pktcfg, plain CMake + CTest, no third-party dependencies). Versions
+  # actually present are printed so a drifted runner image is visible in the log rather
+  # than silently changing what "the toolchain" means between runs — the same reasoning
+  # as the compiler/CMake version fields the adapter itself records per run
+  # (adapters/cpp/toolchain.py).
+  cpp-adapter:
+    name: C/C++ adapter (#16, #17, #27)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Toolchain versions actually used this run
+        run: |
+          set -euo pipefail
+          cmake --version
+          ctest --version
+          cc --version || true
+          patch --version | head -1
+
+      - name: Install test tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: C/C++ adapter and baseline worker tests
+        run: |
+          set -euo pipefail
+          if [ ! -d adapters/cpp ]; then
+            echo "adapters/cpp does not exist yet — nothing to test"
+            exit 0
+          fi
+          pytest adapters/cpp/tests workers/baseline/tests -q -rs

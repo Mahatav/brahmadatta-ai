@@ -1250,9 +1250,10 @@
         "type": "string"
       },
       "IsolationMode": {
-        "description": "How the target was contained (#81).\n\n`SUBPROCESS_JAIL` is materially weaker than a rootless container. It is an\nacceptable D3 fallback and it must never be reported as the container path.",
+        "description": "How the target was contained (#81, #15).\n\n`SUBPROCESS_JAIL` is materially weaker than either container mode and it is an\nacceptable D3 fallback; it must never be reported as a container path.\n\n`CONTAINER_NO_NETWORK` [Δ #15] is D-024's accepted substitute for rootless\nisolation: a standard (rootful-daemon) container with `--network none`, a fixed\nnon-root uid, every capability dropped, `no-new-privileges`, and a read-only root\nfilesystem — every property in `docs/09-company/08-security-review.md` §6.2\n*except* the user-namespace remapping true rootless would add. D-024 condition 8\nis binding: a run in this mode is never reported as `ROOTLESS_CONTAINER`, because\nthat would claim the one property (`--network none` aside) it does not deliver —\nprotection against a container-runtime escape reaching host root.\n\n`ROOTLESS_CONTAINER` is kept for a genuine rootless Podman/Docker run, should one\never land; nothing in this codebase produces it today.",
         "enum": [
           "ROOTLESS_CONTAINER",
+          "CONTAINER_NO_NETWORK",
           "SUBPROCESS_JAIL"
         ],
         "title": "IsolationMode",
@@ -2645,8 +2646,8 @@
             "type": "string"
           },
           "runtime": {
-            "default": "podman",
-            "description": "Rootless container runtime, or the subprocess-jail fallback (#81). The fallback is weaker isolation and is reported as such everywhere it is used — it is not a silent substitution.",
+            "default": "docker",
+            "description": "Container runtime, or the subprocess-jail fallback (#81). `docker` is D-024's accepted substitute for rootless Podman — a standard rootful-daemon container with `--network none`, never reported as `podman`'s stronger isolation claim. The subprocess-jail fallback is weaker isolation still and is reported as such everywhere it is used — it is not a silent substitution.",
             "enum": [
               "podman",
               "docker",
@@ -3491,6 +3492,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3595,6 +3606,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -3703,6 +3724,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -3823,6 +3854,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3931,6 +3972,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -4050,6 +4101,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -4084,7 +4145,7 @@
     },
     "/api/v1/missions/{mission_id}/events": {
       "get": {
-        "description": "Server-sent events over ASGI.\n\nThe transport is real and running today; the mission events are not, because the\norchestrator that emits them does not exist yet. Rather than fabricate telemetry\n— which the product rules forbid outright — this emits the stream preamble, two\nheartbeat comments, and one terminal `contract.not_implemented` frame carrying the\nstandard error envelope, then closes.\n\nThat is enough to prove the thing most likely to break silently: nginx buffers\nproxied responses by default, and a buffered SSE stream arrives as one lump at the\nend. `X-Accel-Buffering: no` is set here as well as `proxy_buffering off` in the\nnginx config (issue #10) — belt and braces, because this failure is invisible\nuntil the demo.",
+        "description": "Server-sent events over ASGI, backed by the persisted `MissionEvent` log.\n\nEvery ORM read runs through `sync_to_async` in `api.sse`, once per call — this\nview never holds an `asgiref` thread-pool thread between reads (CTO-C1). The\nper-mission concurrent-stream cap is enforced with `sse.acquire_slot` *before*\n`StreamingHttpResponse` is constructed, so a caller over the limit gets a real\n`429` rather than a stream that opens and immediately closes; `sse.release_slot`\nruns from the generator's `finally`, so a client disconnect (the ASGI handler\nclosing this generator) frees the slot regardless of which frame it happened on.\n\n`Last-Event-ID` (sent automatically by a reconnecting `EventSource`) or an\nexplicit `?since_sequence=` resumes from a cursor and replays every missed event\nin order before the stream goes live — see `sse.event_frames`.",
         "operationId": "streamMissionEvents",
         "parameters": [
           {
@@ -4095,6 +4156,17 @@
               "format": "uuid",
               "title": "Mission Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since_sequence",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Since Sequence",
+              "type": "integer"
             }
           }
         ],
@@ -4159,6 +4231,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -4168,6 +4250,16 @@
               }
             },
             "description": "Unprocessable Content"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Too Many Requests"
           },
           "501": {
             "content": {
@@ -4193,7 +4285,7 @@
     },
     "/api/v1/missions/{mission_id}/events/replay": {
       "get": {
-        "description": "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value.",
+        "description": "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery.",
         "operationId": "replayMissionEvents",
         "parameters": [
           {
@@ -4290,6 +4382,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -4398,6 +4500,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -4516,6 +4628,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -4648,6 +4770,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -4766,6 +4898,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -4873,6 +5015,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -5005,6 +5157,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5124,6 +5286,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5242,6 +5414,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5349,6 +5531,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -5468,6 +5660,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5586,6 +5788,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5684,6 +5896,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5776,6 +5998,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {
@@ -5894,6 +6126,16 @@
             },
             "description": "Conflict"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -5990,6 +6232,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
           },
           "422": {
             "content": {

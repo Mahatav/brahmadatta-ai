@@ -44,7 +44,9 @@ services:
     <<: *hardening
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95) / SEC-38 (#132): bounded, with 25% headroom above the 512m
+      # snapshot body ceiling. See the matching development-profile comment.
+      - /tmp:size=640m
       - /var/cache/nginx
       - /var/run
     cap_drop: ["ALL"]
@@ -95,7 +97,8 @@ services:
     <<: [*env-file, *hardening]
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95) / SEC-38 (#132): Django may spool the full snapshot body here.
+      - /tmp:size=640m
     cap_drop: ["ALL"]
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.finale

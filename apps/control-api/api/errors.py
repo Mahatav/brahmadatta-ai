@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.core.exceptions import RequestDataTooBig
 from django.http import Http404, HttpRequest, HttpResponse
 from ninja.errors import AuthenticationError, HttpError
 from ninja.errors import ValidationError as NinjaValidationError
@@ -30,6 +31,7 @@ ERROR_RESPONSES: dict[int, Any] = {
     403: ErrorEnvelope,
     404: ErrorEnvelope,
     409: ErrorEnvelope,
+    413: ErrorEnvelope,
     422: ErrorEnvelope,
     501: ErrorEnvelope,
 }
@@ -77,6 +79,21 @@ def register_exception_handlers(api) -> None:
                 {"errors": exc.errors},
             ),
             status=422,
+        )
+
+    @api.exception_handler(RequestDataTooBig)
+    def _request_too_large(
+        request: HttpRequest, exc: RequestDataTooBig
+    ) -> HttpResponse:
+        """Fail closed without turning a configured request limit into a 500."""
+        return api.create_response(
+            request,
+            envelope(
+                request,
+                ErrorCode.VALIDATION_ERROR,
+                "Request body exceeds the application memory limit.",
+            ),
+            status=413,
         )
 
     @api.exception_handler(AuthenticationError)

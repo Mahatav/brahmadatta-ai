@@ -25,11 +25,12 @@ DEBUG_CHECK_ID = "brahmadatta.E004"
 def check_model_endpoints(app_configs: Any, **kwargs: Any) -> list[CheckMessage]:
     """No configured inference endpoint may be a hosted third party."""
     messages: list[CheckMessage] = []
+    service_names = getattr(settings, "MODEL_SERVICE_NAMES", ())
     for name, url in getattr(settings, "MODEL_ENDPOINTS", {}).items():
         if not url:
             continue
         try:
-            assert_local_inference_endpoint(name, url)
+            assert_local_inference_endpoint(name, url, service_names=service_names)
         except ExternalInferenceBlockedError as exc:
             messages.append(
                 Error(

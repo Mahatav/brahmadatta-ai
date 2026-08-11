@@ -29,7 +29,7 @@ says so in §7 rather than being left out.
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 | **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
-| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-31 fixed at `b01755b` and independently re-verified in **§18** — including the Postgres-specific savepoint claim, reproduced both with and without the fix. SEC-29, SEC-30 remain open, correctly gated on #12/the upload endpoint. No Critical, no open condition on this PR. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-29, SEC-31 fixed and verified — including the Postgres-specific savepoint claim and the distinct-reference basename-collision regression. SEC-30 remains open, correctly gated on the upload endpoint. No Critical, no open condition on this PR. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -172,6 +172,15 @@ has not been written, and it has never had any effect on the control-api's own n
 ---
 
 ### SEC-02 · **HIGH** · The model-endpoint allowlist accepts cloud metadata endpoints, and an IDNA homograph of `api.openai.com`
+
+**Resolution (issue #93).** The control-API policy now normalises hostnames with pinned
+`idna==3.18` before deciding and rejects any non-case-only transformation; explicitly
+denies metadata/link-local/CGNAT/EC2 metadata ranges before the non-global allowlist;
+rejects metadata hostnames; and permits bare compose labels only through the
+default-empty `MODEL_SERVICE_NAMES` setting. The executed-proof cases, including the
+U+3002 OpenAI homograph and IPv4-mapped metadata address, are committed as a table-driven
+regression suite. Full result: 44 policy cases and 337 control-API tests pass. **SEC-02 is
+CLOSED.**
 
 **Location** — `apps/control-api/contracts/model_policy.py:58-70` (`_host_is_private_ip`
 returns `not address.is_global`), `:95` (`.internal` in `_PRIVATE_SUFFIXES`), `:99` (the
@@ -3249,6 +3258,12 @@ this decision explicitly re-examine the identity question, not only the traversa
 
 **Location** — `apps/control-api/authorization/service.py:218-258` (`_resolve_repository_ref`).
 
+**Resolution (issue #126).** Basename-only containment is retained, and resolution now
+refuses a lookup key claimed by any different `repository_ref`. The HTTP regression test
+creates two missions with different paths ending in `pktcfg` and proves that neither can
+snapshot the shared source directory. Exact duplicate references remain valid when two
+missions intentionally analyze the same repository.
+
 ### 15.9 SEC-30 — `archive_ref` is a shared namespace with no mission scoping at all
 
 **The gap.** Whenever a caller supplies `archive_ref` (for `source="upload"`, or for
@@ -4260,3 +4275,373 @@ and the future upload endpoint respectively — unchanged from §16. SEC-32 rema
 action required. No Critical, no open condition on this PR. **PR #119 clears security review
 outright**, subject only to the two forward-looking gates already on record (SEC-29 before
 #12, SEC-30 before an upload endpoint).
+
+---
+
+## 19. Re-verification — 2026-08-08 · PR #130 `fix/security-config-hardening` · SEC-03, SEC-04, SEC-05, SEC-08, SEC-14
+
+**Baseline:** `origin/main` at `60b487b`. **PR #130 head:** `fix/security-config-hardening` at
+`6094148` (2 commits: `54055ab`, `6094148`). Reviewed in an isolated `git worktree`, no files
+in the PR's tree were edited. §2 and §13.7-equivalent tracking (line 2229: "SEC-03, 04, 05,
+06-R, 08, 09, 10, 13, 14 — open, untouched — Not in this PR's files. Carried forward.") is the
+most recent prior status for these five IDs; nothing between then and PR #130 touched them.
+This section supersedes that status for SEC-03, SEC-04, SEC-05, SEC-08 and SEC-14 only.
+
+The instruction for this pass was: don't just read the fix, reproduce the original bug against
+the *unfixed* code path first, then attack the fixed state. That is what each subsection below
+does. Every command shown ran in this session; nothing here is inferred from reading the diff
+alone.
+
+### 19.0 Baseline: full suite and a real `docker compose up`
+
+```
+$ python3 -m pytest apps/control-api -q          # PR #130 head, Python 3.12.9
+306 passed, 2 warnings in 1.91s
+```
+
+Matches the PR's own claim (306; the PR description's first commit message said 356 before the
+second commit's tests landed — the PR body's own "Test plan" checklist says 306, which is what
+ran).
+
+Earlier rounds noted findings about `nginx` "from configuration reading plus `nginx -t`, not
+from live traffic" because `docker-compose.finale.yml` could not start (`apps/command-center/`
+did not exist yet). It exists now. This pass brought the **real dev stack up** (`db`, `redis`,
+`control-api` built from the committed Dockerfile, `nginx` with the committed dev config) and
+drove traffic through the actual TLS listener into the actual Django/uvicorn process.
+`command-center`'s own `npm ci` step failed in this sandbox (no registry egress); `nginx` was
+started with `--no-deps` so the other three services could be exercised for real — that gap
+(Command Center security posture) is unrelated to these five findings and remains open, see
+§19.6. SEC-05 and SEC-08 were additionally verified against a second, disposable `nginx`
+container running the **finale** config (`conf.d.finale` + `admin-deny.conf`) on the same `api`
+network, so both profiles got live traffic, not just dev.
+
+### 19.1 SEC-03 — **CLOSED**
+
+Reproduced the pre-fix bug first, on `origin/main` (`config.settings.finale`, with `APP_ENV`
+set to exactly what `docker-compose.finale.yml`'s `env_file` supplies):
+
+```
+$ DJANGO_SETTINGS_MODULE=config.settings.finale APP_ENV=development ... python3 -c "..."
+settings.APP_ENV       : development
+check_admin_disabled_in_finale fires? False []
+check_debug_off_in_finale fires?      False
+```
+
+Confirmed silently dead, exactly as §2's original SEC-03 finding described. Same script against
+PR #130 head:
+
+```
+settings.APP_ENV          : finale
+settings.API_DOCS_ENABLED : False
+check_admin_disabled_in_finale fires? False
+check_debug_off_in_finale fires?      False
+```
+
+`APP_ENV` now reads `finale` regardless of the environment (checks report clean because
+`finale.py` also hardcodes `ADMIN_ENABLED = False` and `DEBUG = False` — there's nothing left
+for them to catch under a correct deploy, which is the point).
+
+**Alternate paths checked, per the assignment:**
+
+- **Env override on `DJANGO_SETTINGS_MODULE`.** `docker-compose.finale.yml:101,197` hardcodes
+  `DJANGO_SETTINGS_MODULE: config.settings.finale` — a literal, not a `${VAR:-default}`
+  interpolation. `docker-compose.yml` (dev) *does* allow an override
+  (`${DJANGO_SETTINGS_MODULE:-config.settings.development}`), but pointing the dev compose
+  file at `config.settings.finale` doesn't defeat anything — `finale.py`'s hardcoded
+  `APP_ENV = "finale"` / `ADMIN_ENABLED = False` still win regardless of which compose file
+  imported it. It produces a dev deployment with finale-strength Django settings behind
+  dev-strength nginx, which is a topology footgun, not a way to suppress the checks.
+- **A different settings module entirely.** `DJANGO_SETTINGS_MODULE=config.settings.base`
+  directly (not documented, not used by any Dockerfile/compose target, but I checked it since
+  the task asked for "a different settings module that doesn't set it") is not a bypass either:
+  `base.py` itself defaults `DEBUG = False` and `ADMIN_ENABLED` only turns on inside
+  `development.py`, so `base.py` alone is already in the safe state — there's no path from
+  "unrecognised settings module" to "admin on, DEBUG on, checks silenced."
+- **`config.settings.test`** sets `APP_ENV=test` (`test.py:12`), never `finale` — not a route
+  to suppressing the finale-only checks either.
+
+Full suite: 306/306 green, including the six new adversarial tests in
+`api/tests/test_settings_profiles.py` that set `APP_ENV` to the *opposite* of what each profile
+claims before loading it. **Verdict: CLOSED.** Was HIGH and open at last check (line 2229);
+downgraded to closed, no residual.
+
+### 19.2 SEC-04 — **CORE DoS CLOSED. One new MEDIUM regression: SEC-38.**
+
+**The DoS itself, live, through real Django, not a stub:**
+
+```
+$ curl -sk -o /dev/null -w "%{http_code}\n" -X POST --data-binary @body70m.bin \
+    https://127.0.0.1:8443/api/v1/missions/
+413
+
+nginx error.log:
+  client intended to send too large body: 70000000 bytes, ... request: "POST /api/v1/missions/"
+```
+
+70MB against an ordinary `/api/` path is rejected at nginx before Django is consulted — the
+memory-exhaustion vector (buffering an unbounded body into `/tmp` for every unauthenticated
+POST) is closed. 550MB against the snapshot-upload location (`~512m` override) also 413s.
+
+```
+$ curl -sk -o /dev/null -w "%{http_code}\n" -X POST --data-binary @body70m.bin \
+    https://127.0.0.1:8443/api/v1/missions/abc123/snapshot/
+404   # nginx's 512m gate passed it through; Django's own router 404'd the fake mission id
+       # control-api log: "POST /api/v1/missions/abc123/snapshot/ HTTP/1.1" 404
+```
+
+`docker exec` / `docker stats` confirm the tmpfs ceiling is real, kernel-enforced, and not
+bypassable by a process inside the container (it's a mount-level `size=` on `tmpfs`, not an
+application check):
+
+```
+$ docker exec brahmadatta-nginx df -h /tmp
+tmpfs   256.0M   4.0K  256.0M   0%  /tmp
+```
+
+**Then I did what the task asked and tried to actually exceed both limits together**, which is
+exactly the combination the PR's own verification never tried — its `dd` test filled `/tmp`
+directly to 256MB in isolation, and its size-gate test used bodies against the *default* 64m
+location, never a body that is legal under the snapshot location's own 512m override but illegal
+against the tmpfs it's buffered into:
+
+```
+$ curl -sk -o /dev/null -w "%{http_code}\n" -X POST --data-binary @body480m.bin \
+    https://127.0.0.1:8443/api/v1/missions/abc123/snapshot/
+500
+
+nginx error.log:
+  a client request body is buffered to a temporary file /tmp/client_temp/0000000002
+  [crit] pwrite() "/tmp/client_temp/0000000002" failed (28: No space left on device)
+
+access log: {"status":500, "uri":"/api/v1/missions/.../snapshot/", ...}
+
+$ docker stats brahmadatta-nginx --no-stream
+MEM USAGE: 11.51MiB / 7.653GiB     # host RAM is NOT what fails — good, that's the point of SEC-04
+```
+
+**SEC-38 — MEDIUM — new.** `infrastructure/compose/nginx/nginx.conf:71` (`client_max_body_size
+64m`) plus the snapshot location's `client_max_body_size 512m` override
+(`conf.d.dev/brahmadatta.conf:116`, `conf.d.finale/brahmadatta.conf:101`) is larger than the
+`tmpfs: - /tmp:size=256m` it's buffered into on **both** `docker-compose.yml:48` and
+`docker-compose.finale.yml:47` — the same 256m value on both profiles, sized (per the code
+comment) for "the 64m body ceiling plus the... temp paths," with no accounting for the
+location-specific 512m override at all. `SNAPSHOT_MAX_BYTES` in
+`apps/control-api/config/settings/base.py:166` is `536_870_912` — exactly 512MiB, matching the
+nginx override — so the application layer's own advertised ceiling for this endpoint is not
+actually reachable: **any snapshot upload between roughly 256MB and 512MB will reliably 500,
+every time**, because nginx runs out of tmpfs space while buffering the body before it ever
+reaches Django, well before the 512m gate would reject it.
+
+This is not a reopening of the original attacker-facing vulnerability — host RAM stayed flat
+at ~11MiB during the failed 480MB request, and the failure mode is a clean 500, not unbounded
+growth, so the thing SEC-04 was written to prevent is still prevented. But it means the fix, as
+shipped, silently breaks the one feature the 512m override exists for: a legitimate operator
+uploading a real repository snapshot anywhere in that 256–512MB range gets a 500 with no
+indication of why, during what is meant to be a live competition run. **Required fix:** raise
+the nginx `tmpfs` size on both compose profiles to comfortably clear the largest
+`client_max_body_size` in effect for that container (⩾ 512m + headroom — 600m is a reasonable
+floor, re-derive if `SNAPSHOT_MAX_BYTES` ever changes), and add a live test that uploads a body
+in the 256–512MB gap and asserts it is accepted (or cleanly rejected by Django's own size check,
+not by nginx running out of scratch space) — closing the gap between what the PR's own `dd`
+test covered and what SEC-04's fix actually needs to guarantee end to end.
+
+**Verdict: SEC-04 CLOSED for the DoS it names. SEC-38 (MEDIUM, new) required before the finale
+stack is used for a real snapshot upload of realistic size.**
+
+**SEC-38 resolution (issue #132).** Both nginx and control-api now use a bounded 640MiB
+`/tmp` tmpfs in both compose profiles: 512MiB for the configured snapshot ceiling plus
+25% scratch headroom. A committed architecture test asserts the minimum and prevents
+profile drift. Live through the real dev compose network and committed nginx config,
+501MiB and 480MiB request bodies were fully uploaded and returned Django's structured
+413 response in 3.44s and 2.93s respectively; nginx logged no `pwrite()`/`ENOSPC`, and
+the API logged no 500. Django's `RequestDataTooBig` is now an explicit 413 contract path
+rather than falling into the generic 500 handler. This preserves the application memory
+limit instead of weakening it to admit a 512MiB JSON body. **SEC-38 is CLOSED.**
+
+### 19.3 SEC-05 — **CLOSED at both layers, live. One LOW test-coverage gap.**
+
+App layer, live (not just read) — reloaded `api.api` under `API_DOCS_ENABLED=False` and hit it
+with a real Django test client:
+
+```
+reloaded api.docs_url = None None
+openapi.json status: 404
+docs status: 404
+```
+
+Proxy layer, live, against a disposable `nginx` container running the **actual committed**
+`conf.d.finale/brahmadatta.conf` + `admin-deny.conf` on the same docker network as the real
+`control-api` container:
+
+```
+/api/v1/openapi.json        404
+/api/v1/docs                404
+/api/v1/docs/               404
+/api/v1/docs/swagger-ui.css 404   (sub-path under the docs prefix — also closed)
+```
+
+Checked for the "another path that leaks the same information" the task asked about: a
+case-varied request (`/api/v1/OpenAPI.json`) misses nginx's exact-match `location =
+/api/v1/openapi.json` (case-sensitive) and falls through to the proxied `/api/` location — but
+it does **not** reach the schema either way, because django-ninja's own route registration is
+equally case-sensitive and, in the finale profile, the route doesn't exist at all
+(`docs_url=None`). No CDN-fetch, health-endpoint, or error-page leak of the API surface found.
+
+**LOW test-coverage gap.** `api/tests/test_http_surface.py` and
+`api/tests/test_settings_profiles.py` test `docs_urls(False) == (None, None)` (the pure helper,
+in isolation) and `finale.API_DOCS_ENABLED is False` (the settings value, in isolation), but
+nothing in the committed suite wires the two together the way I did by hand above — reloading
+`api.api` under the finale-equivalent setting and asserting the *actual route* is gone via a
+real client request. I independently verified the live behaviour is correct, so this is not a
+reopened vulnerability, but per the standing rule for tonight's fixes, the property "the docs
+route doesn't exist in the finale" is not yet demonstrated by a named test — only its two
+halves are, separately. **Required fix:** add that integration test (reload `api.api` +
+`config.urls` under `override_settings(API_DOCS_ENABLED=False)`, then `client.get()` both paths
+and assert 404) so a future regression in the wiring — not the values — is caught by CI.
+
+**Verdict: CLOSED.** Was MEDIUM and open at last check; downgraded to closed, with the LOW gap
+above as a condition.
+
+### 19.4 SEC-08 — **CLOSED.**
+
+Confirmed `/django-admin/` is genuinely the only place Django mounts the admin —
+`apps/control-api/config/urls.py:25` has exactly one `urlpatterns +=` for it, gated on
+`ADMIN_ENABLED`, no second mount point, no configurable prefix. `STATIC_URL = "/django-static/"`
+(`base.py:90`) confirmed likewise singular.
+
+Live, dev profile, real `control-api` behind real `nginx`:
+
+```
+GET /django-admin/            302   (reaches Django — admin login redirect; allowed source)
+GET /django-admin  (no slash) 301   (doesn't match the ^~ prefix — falls to the unrelated
+                                     catch-all, NOT to Django admin)
+GET /Django-Admin/  (case)    502   (nginx location matching is case-sensitive on Linux —
+                                     falls to the catch-all, same as above, not a bypass)
+GET //django-admin/           404   (merge_slashes normalizes for MATCHING, so this still
+                                     hits the SAME guarded location — the 404 is Django's own
+                                     router choking on the raw doubled slash in $request_uri,
+                                     not the guard being skipped)
+GET /django%2dadmin/          302   (percent-decoded before location matching, hits the SAME
+                                     guarded location — not a bypass)
+GET /foo/../django-admin/     302   (dot-segments resolved before location matching, hits the
+                                     SAME guarded location — not a bypass)
+```
+
+None of the URL-mangling attempts reach Django's admin without passing through the identical
+`^~ /django-admin/` allow/deny block; the ones that don't match it land on the Astro catch-all
+instead, which is not Django. Also confirmed the allow-list itself can't be spoofed: no
+`real_ip`/`set_real_ip_from` directive anywhere in `infrastructure/compose/nginx/`, so
+`allow`/`deny` in `admin-allow.conf` gates on `$remote_addr` — the raw TCP peer — and ignores
+any client-supplied `X-Forwarded-For`. **Not tested:** the `deny` branch from a genuinely
+public-range source IP; this machine's Docker Desktop NAT always presents a private-range peer
+address to the container, so every request I could send landed in the allow-list by
+construction. That branch is asserted from config reading only.
+
+Live against the **finale** mount (`admin-deny.conf`, real committed config, disposable nginx
+container on the real network): `/admin`, `/admin/`, `/django-admin`, `/django-admin/`,
+`/Django-Admin/` all **404**, matching the PR's claim.
+
+**The `/static/` vs `/django-static/` mismatch, confirmed genuinely non-blocking:** `/static/`
+appears as an unguarded, unrestricted `location` in `conf.d.dev/brahmadatta.conf:128` (proxy)
+and as a disk `alias` in `conf.d.finale/brahmadatta.conf:156`. Neither is a leak — `urls.py`
+registers no route under `/static/` at all (only `STATIC_URL = "/django-static/"`, used by the
+`{% static %}` template tag, not by the URL router), so a request to `/static/anything` 404s
+through Django's own dispatch in dev, and in the finale profile the aliased volume is
+`django-static` (populated only by `collectstatic`, and both admin and docs — the only features
+that reference local static assets — are off in the finale). Agreed this is a separate,
+non-security, functional cleanup, not part of SEC-08.
+
+**Verdict: CLOSED.** Was LOW and open at last check.
+
+### 19.5 SEC-14 — **CLOSED for the topology as documented. Residual risk already disclosed by
+the author, confirmed live, informational only.**
+
+Verified from inside the actual running `dev`-target container, not from the Dockerfile text:
+
+```
+$ docker exec brahmadatta-control-api cat /proc/1/cmdline | tr '\0' ' '
+... --forwarded-allow-ips 172.28.90.0/24 ...
+```
+
+Matches the pinned `api` network subnet (`docker-compose.yml:339`), sourced from
+`UVICORN_DEV_FORWARDED_ALLOW_IPS`, not the old hardcoded `*`.
+
+**Tried to spoof from a source that should be rejected:**
+
+- A container on the `edge` network (nginx↔Astro, no `api` membership) cannot even resolve
+  `control-api` — `[Errno -3] Temporary failure in name resolution` — confirming the *primary*
+  boundary is docker network isolation, which was never in question.
+- A container I attached directly to the `api` network (simulating anyone with
+  `docker run --network brahmadatta_api ...` access) **can** forge `X-Forwarded-For`, and
+  uvicorn believes it:
+
+  ```
+  $ docker run --rm --network brahmadatta_api ... curl -H "X-Forwarded-For: 9.9.9.9" ...
+  control-api log: "9.9.9.9:0 - GET /api/v1/system/health HTTP/1.1" 200 OK
+  ```
+
+  This is not a bypass of the fix — it's the fix's documented and accepted limitation, stated
+  in-code at `docker-compose.yml:328-332`: the trust boundary is CIDR/network-position, not
+  identity, so "nginx, or nothing" is enforced by "only nginx and control-api are ever declared
+  as members of this network," an operational invariant, not a cryptographic one. Attaching a
+  third container to an `internal: true` bridge network already requires docker-daemon-level
+  access on the host — a privilege well beyond "any client that could reach the container,"
+  which was the actual pre-fix hole (literally any peer, on any network, with `*`). The fix
+  correctly closes that. I'm recording the residual here because the task asked me to try, not
+  because it changes the verdict.
+
+**Verdict: CLOSED.** Was LOW and open at last check. No action required; if the team later
+wants identity-based trust between nginx and control-api (mTLS or a shared-secret header)
+instead of network-position trust, that's a future hardening item, not a defect in this fix.
+
+### 19.6 What I did **not** review, this pass
+
+- **`apps/command-center/`'s own security posture.** Still not reviewed — its `npm ci` failed
+  in this sandbox (no registry egress), so nginx was brought up with `--no-deps` and the Astro
+  dev server / built static output were never actually served or probed. Everything in §7 about
+  the Command Center is still open.
+- **TLS listener behaviour, cipher/protocol testing.** Not re-run; out of scope for these five
+  findings.
+- **Dependency / CVE audit.** Not re-run this pass — `requirements.txt` and `requirements-dev.txt`
+  are unchanged by this PR. `.env.example`'s two new lines were read for secrets; none found.
+- **The finale profile's live Django behaviour** (as opposed to its nginx config). The finale
+  `nginx` container in §19.3/§19.4 proxied to a **dev-settings** `control-api` (the only one
+  running); its nginx-level 404s are config-driven and don't depend on the upstream's settings,
+  so this is a sound test for the nginx half, but the app-layer finale checks (SEC-03's
+  `check_admin_disabled_in_finale` / `check_debug_off_in_finale`, SEC-05's `API_DOCS_ENABLED`)
+  were verified via `django.setup()` + direct settings inspection (§19.1, §19.3), not by
+  bringing up a container actually running `config.settings.finale` end to end.
+- **Everything outside these five findings.** SEC-06-R, SEC-07, SEC-09 through SEC-37, and any
+  finding recorded in §§13-18, are unchanged by this PR's files and were not re-touched.
+
+### 19.7 Status table
+
+| ID | Was (last check) | Now | Note |
+|---|---|---|---|
+| SEC-03 | HIGH, open | **CLOSED** | `APP_ENV` hardcoded in both `finale.py` and `development.py`; env override of `DJANGO_SETTINGS_MODULE` in the dev compose file doesn't defeat it. |
+| SEC-04 | MEDIUM, open | **CLOSED** (core DoS) | 70MB→413 end-to-end through real Django; tmpfs ceiling kernel-enforced (`pwrite(): No space left on device`), host RAM flat at ~11MiB under load. |
+| **SEC-38** | — | **CLOSED in #132** | Both profiles now give nginx and control-api 640MiB bounded tmpfs; 501MiB and 480MiB live requests reach Django's structured 413 with no `ENOSPC` or 500. |
+| SEC-05 | MEDIUM, open | **CLOSED** | 404 confirmed live at both the app layer (reloaded module + real client) and the proxy layer (real finale nginx config). Case-variant bypass attempted, does not reach the schema. |
+| — | — | **LOW, new (SEC-05 gap)** | No committed test wires `docs_urls()`/`API_DOCS_ENABLED` to an actual HTTP 404 — only the two halves are tested in isolation. Recommend adding it. |
+| SEC-08 | LOW, open | **CLOSED** | Single genuine mount point confirmed (`urls.py:25`). Trailing-slash, case, double-slash, percent-encoding and dot-segment bypass attempts all either hit the same guarded location or miss Django admin entirely. `$remote_addr`-based, not header-spoofable. `/static/` mismatch confirmed non-security. |
+| SEC-14 | LOW, open | **CLOSED** | `--forwarded-allow-ips 172.28.90.0/24` confirmed from `/proc/1/cmdline` inside the real running container. Residual CIDR-vs-identity trust limitation confirmed live, already disclosed by the author, informational only. |
+
+**No Critical or High finding is open as a result of this PR.** SEC-38 was reproduced
+end-to-end and is now closed by #132 as recorded in §19.2. The SEC-05 test-coverage gap
+(LOW) should be closed before this class of fix is trusted again without a human re-reading
+the code.
+
+**Verdict: PASS WITH CONDITIONS.**
+
+1. **SEC-38 (MEDIUM)** — raise the nginx `tmpfs` size on both `docker-compose.yml` and
+   `docker-compose.finale.yml` to clear the snapshot location's `512m` override with headroom,
+   and add a live test uploading a body in the 256–512MB gap. Required before the finale stack
+   is used for a real snapshot of realistic size; does not block merging this PR, since the
+   pre-PR state was strictly worse (unbounded tmpfs growth instead of a clean, bounded 500).
+2. **SEC-05 test gap (LOW)** — add the integration test described in §19.3 before the next
+   change touches `api/api.py` or the finale settings gate.
+3. Both conditions are owned by whoever picks up the follow-on issue for SEC-38; recommend
+   filing it now rather than letting it live only in this document.
+
+This does not reopen any prior Critical (SEC-01, closed in §12) and does not introduce a new
+Critical or High. My veto is not exercised on PR #130.

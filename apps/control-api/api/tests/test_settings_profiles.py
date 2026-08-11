@@ -55,6 +55,19 @@ def test_finale_profile_disables_the_admin_even_when_the_env_asks_for_it():
     assert finale.SESSION_COOKIE_SECURE is True
 
 
+def test_finale_profile_disables_api_docs_even_when_the_env_asks_for_it():
+    """SEC-05 (#96). Mirrors the admin assertion above — not env-driven, deliberately."""
+    with environment(
+        APP_ENV="finale",
+        CONTROL_API_DOCS_ENABLED="true",
+        DJANGO_SECRET_KEY="finale-profile-import-test-key-000000000000",
+        DATABASE_URL="sqlite://:memory:",
+    ):
+        finale = load_profile("config.settings.finale")
+
+    assert finale.API_DOCS_ENABLED is False
+
+
 def test_development_profile_offers_the_admin():
     with environment(
         APP_ENV="development",
@@ -65,6 +78,58 @@ def test_development_profile_offers_the_admin():
 
     assert development.ADMIN_ENABLED is True
     assert "django.contrib.admin" in development.INSTALLED_APPS
+
+
+# --- SEC-03: APP_ENV must not be a stray environment variable's to win ------------
+
+
+def test_finale_profile_pins_app_env_even_when_the_environment_disagrees():
+    """docker-compose.finale.yml's env_file supplies APP_ENV=development (SEC-03) — the
+    exact environment the finale container actually boots with. If the profile trusted
+    that value, both APP_ENV-gated system checks (check_admin_disabled_in_finale,
+    check_debug_off_in_finale) would silently never fire in the finale."""
+    with environment(
+        APP_ENV="development",
+        DJANGO_SECRET_KEY="finale-profile-import-test-key-000000000000",
+        DATABASE_URL="sqlite://:memory:",
+    ):
+        finale = load_profile("config.settings.finale")
+
+    assert finale.APP_ENV == "finale"
+
+
+def test_development_profile_pins_app_env_even_when_the_environment_disagrees():
+    """Mirror of the finale assertion above. The development profile must not present
+    itself as APP_ENV=finale and suppress finale-only checks for a stack that isn't."""
+    with environment(
+        APP_ENV="finale",
+        DJANGO_SECRET_KEY="development-profile-import-test-key-0000000",
+        DATABASE_URL="sqlite://:memory:",
+    ):
+        development = load_profile("config.settings.development")
+
+    assert development.APP_ENV == "development"
+
+
+def test_finale_checks_fire_under_the_real_finale_environment():
+    """The regression this issue is actually about: not just that APP_ENV reads
+    'finale', but that the two checks it gates now fire when something drifts back to
+    an insecure state, using the exact env docker-compose.finale.yml produces."""
+    with environment(
+        APP_ENV="development",
+        DJANGO_SECRET_KEY="finale-profile-import-test-key-000000000000",
+        DATABASE_URL="sqlite://:memory:",
+    ):
+        finale = load_profile("config.settings.finale")
+
+    with override_settings(
+        APP_ENV=finale.APP_ENV,
+        ADMIN_ENABLED=True,
+        INSTALLED_APPS=[*finale.INSTALLED_APPS, "django.contrib.admin"],
+        DEBUG=True,
+    ):
+        assert [m.id for m in check_admin_disabled_in_finale(None)] == [ADMIN_CHECK_ID]
+        assert check_debug_off_in_finale(None) != []
 
 
 @override_settings(

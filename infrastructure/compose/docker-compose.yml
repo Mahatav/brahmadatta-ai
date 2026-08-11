@@ -41,7 +41,11 @@ services:
     <<: *hardening
     read_only: true
     tmpfs:
-      - /tmp
+      # SEC-04 (#95): unsized before this, an unauthenticated caller could fill host RAM
+      # through nginx's own request-body buffering (nginx.conf's client_max_body_size
+      # comment explains the mechanism). The snapshot route permits 512m, so 640m
+      # reserves 25% scratch headroom while retaining a hard memory ceiling (#132).
+      - /tmp:size=640m
       - /var/cache/nginx
       - /var/run
     cap_drop: ["ALL"]
@@ -91,6 +95,10 @@ services:
       target: dev
     container_name: brahmadatta-control-api
     <<: [*env-file, *hardening]
+    # SEC-04 (#95) / SEC-38 (#132): mirrors nginx and the finale profile. Django's
+    # temporary upload handler also needs the full 512m body plus bounded headroom.
+    tmpfs:
+      - /tmp:size=640m
     environment:
       DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
       # Container-local overrides of the values in apps/control-api/.env.example, which
@@ -100,6 +108,24 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,control-api,nginx}
       DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://localhost:8443,http://localhost:8080}
+      # SEC-14 (#98): the `api` network's pinned subnet (see the `networks:` block below),
+      # not `*`. Before this, the dev target trusted X-Forwarded-Proto / X-Forwarded-For
+      # from ANY client that could reach the container — which is only nginx today, but
+      # "only nginx today" was configuration, not enforcement.
+      #
+      # The CONTAINER env var is UVICORN_FORWARDED_ALLOW_IPS — that name is fixed, it is
+      # what the Dockerfile's dev-target CMD reads. Its VALUE here is sourced from a
+      # DIFFERENTLY-named compose interpolation variable, UVICORN_DEV_FORWARDED_ALLOW_IPS,
+      # and that split is deliberate, not decorative: docker-compose.yml (this file) and
+      # docker-compose.finale.yml both read the SAME repository-root .env
+      # (docker-compose.finale.yml's own header, point 3), and .env.example already
+      # defines UVICORN_FORWARDED_ALLOW_IPS=172.31.0.0/24 for the finale edge subnet under
+      # "Finale only". Reusing that name here would have meant `${UVICORN_FORWARDED_ALLOW_IPS
+      # :-172.28.90.0/24}` silently resolved to the FINALE value the moment a developer
+      # copied .env.example to .env — Compose's `:-default` only fires when the variable is
+      # completely unset, and .env sets it. Caught in this session by actually bringing the
+      # dev stack up and reading the container's real environment, not by inspection.
+      UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_DEV_FORWARDED_ALLOW_IPS:-172.28.90.0/24}
       PYTHONPATH: /app
     volumes:
       - ../../apps/control-api:/app
@@ -298,9 +324,19 @@ networks:
   # server a route out to make something work, that must not silently hand egress to the
   # process holding repository snapshots and operator credentials. Separate networks make
   # that a deliberate act instead of a side effect.
+  #
+  # SEC-14 (#98): the subnet is pinned rather than left to Docker's auto-allocation so it
+  # can be trusted by uvicorn's --forwarded-allow-ips in the control-api dev target — see
+  # UVICORN_FORWARDED_ALLOW_IPS below. Only nginx and control-api are ever members, and the
+  # network is `internal: true`, so trusting "anything with an address on this /24" is
+  # trusting "nginx, or nothing" rather than "anything that can reach the container".
   api:
     driver: bridge
     internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.90.0/24
 
   # nginx <-> the Astro dev server. No gateway.
   edge:

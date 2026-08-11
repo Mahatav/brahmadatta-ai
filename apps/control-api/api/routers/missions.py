@@ -1,9 +1,15 @@
 """Mission API.
 
-Every operation below is contract-frozen and returns 501 until the orchestrator lands
-(issue #12). The request and response schemas are real and complete — that is the
-point of the freeze: the Command Center can be built and typed against this surface
-today, and the pipeline fills it in behind.
+Most operations below are contract-frozen and return 501 until the orchestrator's
+transition-driving endpoints land (issue #12 landed the state machine itself; wiring
+`create`/`start`/`pause`/`cancel` etc. through it is separate, later work). The
+request and response schemas are real and complete — that is the point of the
+freeze: the Command Center can be built and typed against this surface today, and
+the pipeline fills it in behind.
+
+The event log is not one of those stubs: `GET .../events` (SSE) and
+`GET .../events/replay` (#13) are fully implemented against the persisted
+`MissionEvent` table, independent of whether the rest of the lifecycle is wired up.
 
 Authorization is checked before anything else in every handler, so the 403 path is
 exercised now rather than being retrofitted around working code later.
@@ -11,19 +17,20 @@ exercised now rather than being retrofitted around working code later.
 
 from __future__ import annotations
 
-import asyncio
-import json
 from uuid import UUID
 
 from django.http import HttpRequest, StreamingHttpResponse
-from ninja import Query, Router
+from ninja import Query, Router, Status
 
+from api import sse
 from api.auth import OPERATOR_ROLES, READ_ROLES, require_role
-from api.errors import ERROR_RESPONSES, envelope
+from api.errors import ERROR_RESPONSES
+from api.trace import get_trace_id
+from authorization import service
+from authorization.errors import MissionNotFoundError
 from contracts.authorization import AuthorizationRecord, AuthorizationRequest
-from contracts.enums import ErrorCode
 from contracts.errors import NotImplementedYetError
-from contracts.schemas.common import Acknowledgement, Page
+from contracts.schemas.common import Acknowledgement, ErrorEnvelope, Page
 from contracts.schemas.envelope import MissionEvent
 from contracts.schemas.missions import (
     CancelRequest,
@@ -36,11 +43,12 @@ from contracts.schemas.missions import (
     SnapshotRequest,
     StartRequest,
 )
+from missions.models import Mission
+from missions.models import MissionEvent as MissionEventRow  # avoid shadowing the schema
 
 router = Router(tags=["missions"])
 
 ORCHESTRATOR_ISSUE = "#12 (orchestrator state machine)"
-EVIDENCE_ISSUE = "#20 (evidence database)"
 
 #: OpenAPI description of the SSE response. django-ninja cannot express a
 #: `text/event-stream` body through `response=`, so it is declared explicitly and
@@ -116,7 +124,10 @@ def authorize_mission(
     request: HttpRequest, mission_id: UUID, payload: AuthorizationRequest
 ):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    record = service.authorize_mission(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(201, record)
 
 
 @router.post(
@@ -127,7 +138,10 @@ def authorize_mission(
 )
 def create_snapshot(request: HttpRequest, mission_id: UUID, payload: SnapshotRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    record = service.create_mission_snapshot(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(201, record)
 
 
 @router.post(
@@ -180,7 +194,10 @@ def cancel_mission(request: HttpRequest, mission_id: UUID, payload: CancelReques
     summary="Replay ordered events from a sequence number",
     description=(
         "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a "
-        "client that sees a jump replays from its last known value."
+        "client that sees a jump replays from its last known value. Reads the same "
+        "persisted `MissionEvent` log the stream tails, through the same schema "
+        "conversion (`api.sse.to_schema`) — there is one definition of what an event "
+        "looks like, not one for the live path and a second for gap recovery."
     ),
     operation_id="replayMissionEvents",
 )
@@ -191,48 +208,63 @@ def replay_events(
     limit: int = Query(default=200, ge=1, le=500),
 ):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(EVIDENCE_ISSUE)
+    if not Mission.objects.filter(pk=mission_id).exists():
+        raise MissionNotFoundError()
+
+    query = MissionEventRow.objects.filter(
+        mission_id=mission_id, sequence__gt=since_sequence
+    ).order_by("sequence")
+    total = query.count()
+    rows = list(query[:limit])
+    return Page[MissionEvent](
+        items=[sse.to_schema(row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=since_sequence,
+    )
 
 
 @router.get(
     "/missions/{mission_id}/events",
-    response=ERROR_RESPONSES,
+    response={429: ErrorEnvelope, **ERROR_RESPONSES},
     summary="Ordered event stream (SSE)",
     operation_id="streamMissionEvents",
     openapi_extra=SSE_OPENAPI,
 )
-async def stream_events(request: HttpRequest, mission_id: UUID):
-    """Server-sent events over ASGI.
+async def stream_events(
+    request: HttpRequest,
+    mission_id: UUID,
+    since_sequence: int = Query(default=0, ge=0),
+):
+    """Server-sent events over ASGI, backed by the persisted `MissionEvent` log.
 
-    The transport is real and running today; the mission events are not, because the
-    orchestrator that emits them does not exist yet. Rather than fabricate telemetry
-    — which the product rules forbid outright — this emits the stream preamble, two
-    heartbeat comments, and one terminal `contract.not_implemented` frame carrying the
-    standard error envelope, then closes.
+    Every ORM read runs through `sync_to_async` in `api.sse`, once per call — this
+    view never holds an `asgiref` thread-pool thread between reads (CTO-C1). The
+    per-mission concurrent-stream cap is enforced with `sse.acquire_slot` *before*
+    `StreamingHttpResponse` is constructed, so a caller over the limit gets a real
+    `429` rather than a stream that opens and immediately closes; `sse.release_slot`
+    runs from the generator's `finally`, so a client disconnect (the ASGI handler
+    closing this generator) frees the slot regardless of which frame it happened on.
 
-    That is enough to prove the thing most likely to break silently: nginx buffers
-    proxied responses by default, and a buffered SSE stream arrives as one lump at the
-    end. `X-Accel-Buffering: no` is set here as well as `proxy_buffering off` in the
-    nginx config (issue #10) — belt and braces, because this failure is invisible
-    until the demo.
+    `Last-Event-ID` (sent automatically by a reconnecting `EventSource`) or an
+    explicit `?since_sequence=` resumes from a cursor and replays every missed event
+    in order before the stream goes live — see `sse.event_frames`.
     """
     require_role(request, *READ_ROLES)
 
-    body = envelope(
-        request,
-        ErrorCode.NOT_IMPLEMENTED,
-        f"Mission event stream is contract-frozen but not implemented yet; "
-        f"tracked by {ORCHESTRATOR_ISSUE}.",
-        {"mission_id": str(mission_id), "tracked_by": ORCHESTRATOR_ISSUE},
-    )
+    if not await sse.mission_exists(mission_id):
+        raise MissionNotFoundError()
+
+    cursor = sse.resolve_cursor(request, since_sequence)
+
+    await sse.acquire_slot(mission_id)
 
     async def frames():
-        yield b": brahmadatta stream open\n\n"
-        for _ in range(2):
-            await asyncio.sleep(0.25)
-            yield b": heartbeat\n\n"
-        payload = json.dumps(body, separators=(",", ":")).encode()
-        yield b"event: contract.not_implemented\ndata: " + payload + b"\n\n"
+        try:
+            async for frame in sse.event_frames(mission_id, cursor):
+                yield frame
+        finally:
+            await sse.release_slot(mission_id)
 
     response = StreamingHttpResponse(frames(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache, no-transform"

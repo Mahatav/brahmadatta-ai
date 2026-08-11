@@ -15,12 +15,14 @@ from django.db import IntegrityError
 
 from contracts.enums import EventType, LanguageAdapter, MissionState, Severity
 from missions.models import (
+    Artifact,
     Authorization,
     Job,
     JobKind,
     Mission,
     MissionEvent,
     Snapshot,
+    StageToolRun,
 )
 
 pytestmark = pytest.mark.django_db
@@ -278,3 +280,74 @@ def test_a_candidate_cannot_be_inserted_into_a_frozen_mission_by_any_path(
         )
     assert "froze its candidate set" in str(excinfo.value)
     assert PatchCandidate.objects.filter(mission=mission).count() == 0
+
+
+# --- #32: evidence metadata stores pointers, not artifact payloads ---------------
+
+
+def test_stage_tool_run_records_tool_version_image_digest_and_flags(mission: Mission):
+    row = StageToolRun.objects.create(
+        mission=mission,
+        stage="STRESS_TEST",
+        tool_name="pktcfg_replay",
+        tool_version="0.1.0",
+        image_digest=f"sha256:{'a' * 64}",
+        flags=["--asan", "--ubsan", "--runs=5"],
+        artifact_refs=[
+            {
+                "uri": "artifact://mission/corpus/pktcfg-seed-corpus",
+                "kind": "seed-corpus",
+                "sha256": "b" * 64,
+                "size_bytes": 1024,
+            }
+        ],
+        started_at=NOW,
+        finished_at=NOW,
+    )
+
+    assert row.tool_name == "pktcfg_replay"
+    assert row.flags == ["--asan", "--ubsan", "--runs=5"]
+
+
+def test_stage_tool_run_refuses_raw_artifact_content(mission: Mission):
+    with pytest.raises(ValidationError) as excinfo:
+        StageToolRun.objects.create(
+            mission=mission,
+            stage="STRESS_TEST",
+            tool_name="pktcfg_replay",
+            tool_version="0.1.0",
+            flags=["--runs=5"],
+            artifact_refs=[
+                {
+                    "uri": "artifact://mission/reproducer/crash.bin",
+                    "kind": "crash-input",
+                    "sha256": "c" * 64,
+                    "size_bytes": 22,
+                    "content": "raw bytes do not belong in the database",
+                }
+            ],
+        )
+
+    assert "raw artifact content" in str(excinfo.value)
+
+
+def test_artifact_index_is_hash_only(mission: Mission):
+    artifact = Artifact.objects.create(
+        mission=mission,
+        kind="ctest-log",
+        sha256="d" * 64,
+        size_bytes=4096,
+    )
+
+    assert artifact.sha256 == "d" * 64
+    assert not hasattr(artifact, "content")
+
+
+def test_artifact_index_refuses_non_sha256_keys(mission: Mission):
+    with pytest.raises(ValidationError):
+        Artifact.objects.create(
+            mission=mission,
+            kind="ctest-log",
+            sha256="not-a-digest",
+            size_bytes=4096,
+        )
