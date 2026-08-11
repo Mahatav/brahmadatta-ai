@@ -55,12 +55,9 @@ convention: it was an id accepted from a request and never compared to the thing
 supposed to belong to. `mission_id`, `repository_ref` (the authorization-declaration
 check) and `archive_sha256`/`Artifact.sha256` are each checked against the locked
 mission row or the mission-scoped record it produced — see `service.py`'s own
-docstring for exactly where each check lives. **`archive_ref` is the one exception, not
-an instance of the pattern being closed:** it resolves under the fixed
-`SNAPSHOT_STAGING_ROOT` boundary but is never compared to the requesting mission at
-all — a real, filed gap (SEC-30, round-4 security review), tracked against the future
-upload endpoint rather than fixed here, since nothing populates `SNAPSHOT_STAGING_ROOT`
-outside a test fixture yet. An earlier draft of this docstring claimed `archive_ref` is
-"never used to locate bytes on disk at all" — that was wrong the moment
-`_materialize_source` shipped; it is exactly what locates them for `source="upload"`.
+docstring for exactly where each check lives. `archive_ref` now follows the same
+shape for SEC-30: `_materialize_source` resolves it under
+`SNAPSHOT_STAGING_ROOT/<mission_id>`, using the locked mission row rather than a flat
+global staging namespace. The upload endpoint is still future work, but its writer
+must stage bytes into that same mission-owned directory for the reader to see them.
 """

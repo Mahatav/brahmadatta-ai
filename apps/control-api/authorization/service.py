@@ -319,12 +319,13 @@ def _materialize_source(
 ) -> tuple[Path, Callable[[], None]]:
     """A real file on disk to hash, plus a cleanup callback for any temp file made.
 
-    Three cases, all resolved against a fixed boundary rather than a caller-chosen
-    one: an uploaded archive under `SNAPSHOT_STAGING_ROOT`, an already-materialized
-    export under the same root (`source="git"` with `archive_ref` set — e.g. produced
-    by a future ingest job per the architecture spec's note that a remote fetch belongs
-    ahead of this endpoint, not inside it), or a fresh deterministic tar built from the
-    mission's own repository directory under `SNAPSHOT_SOURCE_ROOT`.
+    Three cases, all resolved against fixed, mission-owned boundaries rather than a
+    caller-chosen one: an uploaded archive under
+    `SNAPSHOT_STAGING_ROOT/<mission_id>`, an already-materialized export under the
+    same mission staging namespace (`source="git"` with `archive_ref` set — e.g.
+    produced by a future ingest job per the architecture spec's note that a remote
+    fetch belongs ahead of this endpoint, not inside it), or a fresh deterministic
+    tar built from the mission's own repository directory under `SNAPSHOT_SOURCE_ROOT`.
     """
     if payload.source == "upload" or payload.archive_ref:
         if not payload.archive_ref:
@@ -332,12 +333,18 @@ def _materialize_source(
                 "source='upload' requires archive_ref.",
                 details={"source": payload.source},
             )
-        path = _resolve_under_root(Path(settings.SNAPSHOT_STAGING_ROOT), payload.archive_ref)
+        staging_root = archive.mission_staging_root(
+            Path(settings.SNAPSHOT_STAGING_ROOT), mission.id
+        )
+        path = _resolve_under_root(staging_root, payload.archive_ref)
         if not path.is_file():
             raise SnapshotArtifactUnavailableError(
-                "No archive at archive_ref in the snapshot staging root. Stage the "
-                "archive before recording the snapshot.",
-                details={"archive_ref": payload.archive_ref},
+                "No archive at archive_ref in this mission's snapshot staging root. "
+                "Stage the archive for this mission before recording the snapshot.",
+                details={
+                    "archive_ref": payload.archive_ref,
+                    "mission_id": str(mission.id),
+                },
             )
         return path, lambda: None
 
