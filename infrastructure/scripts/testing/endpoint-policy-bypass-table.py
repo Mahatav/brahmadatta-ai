@@ -60,13 +60,12 @@ import sys
 from pathlib import Path
 
 #: Mismatches `contracts/model_policy.py` is known to have, measured 2026-08-08 against
-#: `main` at 66c3057 (34 of the original 60 cases), then re-measured the same day against
-#: `main` after adding the SEC-24 and SEC-25 regression cases (39 of 68 — the file has
-#: neither the translation-wrapper fix nor a length guard, so 5 of the 8 new cases are
-#: additional, expected mismatches, not new discoveries). Lower it in the same commit that
-#: fixes cases; the script fails if it is stale in either direction. Goes to 0 when D-050's
-#: consolidation lands.
-CONTROL_BASELINE = 39
+#: `main` at 66c3057 (34 of the original 60 cases), then re-measured after adding
+#: the SEC-24 and SEC-25 regression cases (39 of 68), and lowered again after the
+#: control validator picked up the service-name and private-suffix fixes (18 of 68).
+#: Lower it in the same commit that fixes cases; the script fails if it is stale in
+#: either direction. Goes to 0 when D-050's consolidation lands.
+CONTROL_BASELINE = 18
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GATEWAY = REPO_ROOT / "services" / "model-gateway"
