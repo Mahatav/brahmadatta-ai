@@ -60,6 +60,7 @@ _UBSAN_SUMMARY = re.compile(
     r"(?::(?P<col>\d+))?\s+in\s+(?P<function>\S+)",
     re.MULTILINE,
 )
+_SYMBOL_OFFSET = re.compile(r"\+0x[0-9a-fA-F]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,12 +116,16 @@ def _parse_stack(block: str) -> tuple[StackFrame, ...]:
         frames.append(
             StackFrame(
                 index=int(match.group("index")),
-                function=match.group("function"),
+                function=_normalize_function(match.group("function")),
                 file=match.group("file"),
                 line=int(match.group("line")) if match.group("line") else None,
             )
         )
     return tuple(frames)
+
+
+def _normalize_function(function: str) -> str:
+    return _SYMBOL_OFFSET.sub("", function)
 
 
 def _asan_finding(text: str, header: re.Match[str]) -> SanitizerFinding:
@@ -140,7 +145,7 @@ def _asan_finding(text: str, header: re.Match[str]) -> SanitizerFinding:
     summary = _ASAN_SUMMARY.search(text)
     if summary:
         kind = summary.group("kind")
-        function = summary.group("function")
+        function = _normalize_function(summary.group("function"))
         file = summary.group("file")
         line = int(summary.group("line"))
     elif stack:
@@ -180,7 +185,7 @@ def _ubsan_findings(text: str) -> tuple[SanitizerFinding, ...]:
         summary = _UBSAN_SUMMARY.search(block)
         if summary:
             kind = summary.group("kind")
-            function = summary.group("function")
+            function = _normalize_function(summary.group("function"))
             file = summary.group("file")
             line = int(summary.group("line"))
         elif stack:
