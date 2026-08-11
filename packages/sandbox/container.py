@@ -253,7 +253,11 @@ def _run_cli(
 
 
 def reap_orphans(
-    *, runtime: str = "docker", label: str = SANDBOX_LABEL, timeout: float = 15.0
+    *,
+    runtime: str = "docker",
+    label: str = SANDBOX_LABEL,
+    mission_ref: str | None = None,
+    timeout: float = 15.0,
 ) -> list[str]:
     """Remove every container carrying `label`, regardless of which process — or
     whether any live process at all — started it.
@@ -268,9 +272,10 @@ def reap_orphans(
 
     Returns the container ids removed, so a caller can log or assert on the count.
     """
-    listed = _run_cli(
-        runtime, ["ps", "-aq", "--filter", f"label={label}"], timeout=timeout
-    )
+    filters = ["--filter", f"label={label}"]
+    if mission_ref is not None:
+        filters += ["--filter", f"label=brahmadatta.mission={mission_ref}"]
+    listed = _run_cli(runtime, ["ps", "-aq", *filters], timeout=timeout)
     ids = [line for line in listed.stdout.split() if line]
     for container_id in ids:
         _run_cli(runtime, ["rm", "-f", container_id], timeout=timeout)
