@@ -20,7 +20,7 @@ import pytest
 from django.conf import settings
 from django.test import Client, override_settings
 
-from authorization.archive import build_tar_from_directory
+from authorization.archive import build_tar_from_directory, mission_staging_root
 from contracts.enums import LanguageAdapter, MissionState
 from missions.models import Artifact, Authorization, Mission, Snapshot
 
@@ -87,6 +87,15 @@ def expected_digest(source_dir: Path, tmp_path: Path) -> str:
     out = tmp_path / "expected.tar"
     build_tar_from_directory(source_dir, out)
     return hashlib.sha256(out.read_bytes()).hexdigest()
+
+
+def stage_upload_archive(
+    roots: dict[str, Path], mission: Mission, source_dir: Path, archive_ref: str
+) -> str:
+    staged_path = mission_staging_root(roots["staging_root"], mission.id) / archive_ref
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    build_tar_from_directory(source_dir, staged_path)
+    return hashlib.sha256(staged_path.read_bytes()).hexdigest()
 
 
 def authorize_payload(**overrides) -> dict:
@@ -348,6 +357,50 @@ def test_a_digest_the_server_cannot_verify_is_refused(
     assert Snapshot.objects.filter(mission=mission).count() == 0
     mission.refresh_from_db()
     assert mission.state_enum is MissionState.AUTHORIZED
+
+
+def test_upload_archive_ref_is_scoped_to_the_requesting_mission(
+    client: Client, mission: Mission, roots, repo_dir: Path
+):
+    """SEC-30: an archive staged for mission B cannot be read by mission A just
+    because both operators know the same archive_ref string."""
+    other = Mission.objects.create(
+        name="pktcfg-upload-owner",
+        repository_ref="file:///demo/repositories/pktcfg-upload-owner",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    digest = stage_upload_archive(roots, other, repo_dir, "build.tar")
+
+    _authorize(client, mission)
+    response = post(
+        client,
+        f"/api/v1/missions/{mission.id}/snapshot",
+        {"source": "upload", "archive_ref": "build.tar", "archive_sha256": digest},
+        OPERATOR,
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONFLICT"
+    assert Snapshot.objects.filter(mission=mission).count() == 0
+    assert Artifact.objects.filter(pk=digest).count() == 0
+    mission.refresh_from_db()
+    assert mission.state_enum is MissionState.AUTHORIZED
+
+    post(
+        client,
+        f"/api/v1/missions/{other.id}/authorize",
+        authorize_payload(repository_ref=other.repository_ref),
+        OPERATOR,
+    )
+    owner_response = post(
+        client,
+        f"/api/v1/missions/{other.id}/snapshot",
+        {"source": "upload", "archive_ref": "build.tar", "archive_sha256": digest},
+        OPERATOR,
+    )
+    assert owner_response.status_code == 201
+    assert Snapshot.objects.get(mission=other).archive_sha256 == digest
+    assert Artifact.objects.get(pk=digest).mission_id == other.id
 
 
 def test_a_swapped_archive_is_refused(client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path):

@@ -29,7 +29,7 @@ says so in §7 rather than being left out.
 | **Overall security posture of the reviewed surface** | **BLOCKED — one Critical open (SEC-01).** *(Lifted in §12.8 after SEC-01 was fixed and re-verified.)* |
 | **PR #110 — `feat/state-machine`** | **PASS WITH CONDITIONS** — SEC-15, SEC-16 and SEC-18 before merge. No Critical open; the veto is not exercised. Full round-2 pass in **§13**. |
 | **PR #111 — `feat/model-gateway`** | **PASS WITH CONDITIONS** — SEC-24 and SEC-25 before merge. Bypass table re-run by me: **gateway 0 of 60**, control-api 34 of 60. **#78 may close** once SEC-02 and SEC-19 are filed against #93 with an owner. Round-3 pass in **§14**. |
-| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-29, SEC-31 fixed and verified — including the Postgres-specific savepoint claim and the distinct-reference basename-collision regression. SEC-30 remains open, correctly gated on the upload endpoint. No Critical, no open condition on this PR. |
+| **PR #119 — `feat/authorize-snapshot`** | **PASS.** Round-4 findings SEC-26–SEC-32 in **§16**; SEC-26, SEC-27, SEC-28, SEC-29, SEC-30, SEC-31 fixed and verified — including the Postgres-specific savepoint claim, the distinct-reference basename-collision regression, and mission-scoped staged archive resolution. No Critical, no open condition on this PR. |
 
 **SEC-01 is a critical finding and it blocks deployment of the finale stack.** It does not
 block continued development, and it does not block PR #74. It blocks bringing
@@ -2967,7 +2967,7 @@ mission row rather than against what the caller merely claims.
 | `AuthorizationRequest.repository_ref` | `mission.repository_ref` (the locked row), exact string equality | `service.py:88-94` | **Independently re-verified by injection** — disabled the check, `test_authorization_for_a_different_repository_is_refused` and `test_a_refused_authorize_leaves_no_authorization_row_behind` went red (403→201), restored, green again. §15.3. |
 | `SnapshotRequest.archive_sha256` (caller's assertion) | The digest actually computed by re-hashing the bytes the server itself streamed to disk (`store.ingest_from_path`) | `service.py:161-167` | Read + the PR's own `test_a_digest_the_server_cannot_verify_is_refused` / `test_a_swapped_archive_is_refused`, both still green in my run. Not independently re-injected by me — time-boxed to the two checks in §15.3 instead. |
 | `Artifact.sha256` (content-addressed) | Every **other** mission's claim on the same digest | `service.py:171-173` | **Independently re-verified by injection** — disabled the check, `test_an_archive_digest_already_claimed_by_another_mission_is_refused` went red (409→201), restored, green again. §15.3. **Also independently re-verified under real concurrent Postgres writers**, where it found a real gap — SEC-27, §15.5. |
-| `archive_ref` (staging-root path) | The fixed `SNAPSHOT_STAGING_ROOT` boundary, never against the mission | `service.py:201-215, 261-286` | Read. **Not** checked against the mission at all — this is real, and it is SEC-30, not a false alarm: `archive_ref` is a shared, flat, non-mission-scoped namespace by design. |
+| `archive_ref` (staging-root path) | The mission staging boundary: `SNAPSHOT_STAGING_ROOT/<mission_id>/<archive_ref>` | `archive.py:65-75`, `service.py:201-215, 261-286` | Fixed for SEC-30. The regression stages `build.tar` for mission B and proves mission A cannot read it by naming the same `archive_ref`; only mission B can snapshot those staged bytes. |
 | `repository_ref` used to locate bytes | The fixed `SNAPSHOT_SOURCE_ROOT` boundary, by basename only | `service.py:218-258` | Read + symlink-escape and `..`-traversal manual probes, both correctly refused (§15.6 details the one gap that basename-only resolution has, which is not a traversal — it's a collision — SEC-29). |
 
 **Net finding of the probe itself: the pattern SEC-15 named — an id accepted from a request and
@@ -3264,9 +3264,9 @@ creates two missions with different paths ending in `pktcfg` and proves that nei
 snapshot the shared source directory. Exact duplicate references remain valid when two
 missions intentionally analyze the same repository.
 
-### 15.9 SEC-30 — `archive_ref` is a shared namespace with no mission scoping at all
+### 15.9 SEC-30 — `archive_ref` staging is mission-scoped
 
-**The gap.** Whenever a caller supplies `archive_ref` (for `source="upload"`, or for
+**Original gap.** Whenever a caller supplies `archive_ref` (for `source="upload"`, or for
 `source="git"` with `archive_ref` also set — both real, tested code paths per the PR body's scope
 decision 2), it is resolved under `SNAPSHOT_STAGING_ROOT` and is **never compared to the requesting
 mission in any way** (`service.py:261-286` — contrast with `_resolve_repository_ref`, which at
@@ -3305,6 +3305,17 @@ be resolved as part of, not after, whichever PR adds one.
 
 **Location** — `apps/control-api/authorization/service.py:261-286` (`_materialize_source`),
 `:201-215` (`_resolve_under_root`).
+
+**Resolution (issue #127).** Staged archive resolution now derives the readable namespace from the
+locked mission row: `authorization.archive.mission_staging_root()` defines the contract as
+`SNAPSHOT_STAGING_ROOT/<mission_id>`, and `_materialize_source()` resolves every `archive_ref`
+under that mission-specific root before checking whether the file exists. A staged filename is
+therefore no longer globally claimable. The HTTP regression test
+`test_upload_archive_ref_is_scoped_to_the_requesting_mission` stages `build.tar` for mission B,
+then proves mission A cannot snapshot those bytes by submitting the same `archive_ref` and digest;
+mission B can still snapshot the same staged file successfully. The future upload endpoint still
+needs to write into this same helper-defined namespace, but the snapshot reader is now fail-closed
+if it does not.
 
 ### 15.10 SEC-31 — the module's own docstring cites tests that do not exist
 
@@ -3403,8 +3414,9 @@ proven," genuinely not yet testable — for the other nine.
 3. **The `.env.example` new keys' effect on the finale/development profile system checks** beyond
    `manage.py check` passing on the test profile. I did not run the finale-profile checks against
    these four new settings specifically.
-4. **A live upload endpoint.** Does not exist; SEC-30's exploit path is analyzed against the code as
-   written, not executed against a running upload flow.
+4. **A live upload endpoint.** Does not exist; SEC-30's original exploit path is now closed in the
+   snapshot reader with a fixture-staged archive. The future upload writer still needs to use the
+   same `mission_staging_root()` namespace.
 5. **Concurrent `authorize_mission` calls racing a `create_mission_snapshot` call for the same
    mission** (as opposed to same-endpoint races, which §15.4/§15.5 cover). Not run.
 6. **Resource/DoS behavior of `build_tar_from_directory`** against a very large or very deep
@@ -3443,8 +3455,9 @@ HTTP surface reachable today.
 
 5. **SEC-29 (MEDIUM)** — resolve the basename-collision identity gap before `create_mission` (#12)
    lands and `repository_ref` becomes operator-reachable.
-6. **SEC-30 (MEDIUM)** — namespace `archive_ref`/staged uploads per-mission before an upload
-   endpoint ships.
+6. **SEC-30 (MEDIUM)** — closed for the snapshot reader: `archive_ref` resolves under
+   `SNAPSHOT_STAGING_ROOT/<mission_id>`. The future upload endpoint must stage into that same
+   namespace.
 7. **SEC-32 (INFO)** — no action required now; re-examine `Authorization.snapshot_sha256` binding
    the moment any flow can produce a second snapshot for one mission.
 
@@ -4252,8 +4265,9 @@ substance. Confirmed `api/routers/missions.py` was not touched by this commit
 `preflight`/`start` "do not exist yet, and cannot yet" remains true. The adjacent claim they
 also fixed — the docstring previously asserted `archive_ref` "is never used to locate bytes
 on disk at all," which was already false in the original PR (`_materialize_source` uses it
-for exactly that, for `source="upload"`) — is now correctly rewritten to name this as the
-still-open SEC-30, tracked against the future upload endpoint, not claimed as resolved. I
+for exactly that, for `source="upload"`) — was later rewritten to name SEC-30. Issue #127 now
+closes that gap in the snapshot reader by resolving `archive_ref` below
+`SNAPSHOT_STAGING_ROOT/<mission_id>` and pinning the cross-mission fixture regression. I
 reviewed this adjacent change because it touches the same file and the same property ("is
 the enforcement claim accurate"), not because I am expanding this round's scope — it is a
 direct tightening of a claim adjacent to the one I originally flagged, and it is accurate.
@@ -4270,11 +4284,11 @@ independently. **The standard held.**
 ### 18.6 Updated verdict
 
 **PASS.** All four merge conditions from §16 (SEC-26, SEC-27, SEC-28, SEC-31) are closed and
-independently re-verified. SEC-29 and SEC-30 remain open, correctly untouched, gated on #12
-and the future upload endpoint respectively — unchanged from §16. SEC-32 remains INFO, no
-action required. No Critical, no open condition on this PR. **PR #119 clears security review
-outright**, subject only to the two forward-looking gates already on record (SEC-29 before
-#12, SEC-30 before an upload endpoint).
+independently re-verified. SEC-29 remains closed under the basename-collision regression, and
+SEC-30 is now closed in the snapshot reader under issue #127's mission-scoped staging fix.
+SEC-32 remains INFO, no action required. No Critical, no open condition on this PR. **PR #119
+clears security review outright**, subject only to the forward-looking requirement that any
+future upload endpoint writes staged bytes into the same mission namespace.
 
 ---
 

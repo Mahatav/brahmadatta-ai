@@ -40,6 +40,7 @@ import tarfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from uuid import UUID
 
 from authorization.errors import UnreadableArchiveError
 
@@ -61,6 +62,16 @@ def _is_safe_member_name(name: str) -> bool:
 class ArchiveInfo:
     file_count: int
     bytes_total: int
+
+
+def mission_staging_root(staging_root: Path, mission_id: UUID) -> Path:
+    """Return the upload-staging namespace reserved for one mission.
+
+    The upload endpoint is not implemented yet, but `source="upload"` already reads
+    archives by `archive_ref`. Keeping this path shape here gives that future writer
+    the same mission-bound contract that the snapshot reader enforces today.
+    """
+    return staging_root / str(mission_id)
 
 
 def enumerate_members(path: Path) -> ArchiveInfo:
