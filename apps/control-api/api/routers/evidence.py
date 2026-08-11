@@ -31,10 +31,11 @@ from contracts.schemas.evidence import (
     PatchCandidate,
     VerificationRecord,
 )
+from orchestrator import evidence_repository
 
 router = Router(tags=["evidence"])
 
-EVIDENCE_ISSUE = "#20 (evidence database)"
+EVIDENCE_ISSUE = "#32 (evidence database)"
 VERIFICATION_ISSUE = "#28 (verification gates)"
 
 
@@ -51,7 +52,10 @@ def list_findings(
     offset: int = Query(default=0, ge=0),
 ):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(EVIDENCE_ISSUE)
+    items, total = evidence_repository.list_findings(
+        mission_id, limit=limit, offset=offset
+    )
+    return Page(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get(
@@ -62,7 +66,7 @@ def list_findings(
 )
 def get_finding(request: HttpRequest, mission_id: UUID, finding_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(EVIDENCE_ISSUE)
+    return evidence_repository.get_finding_detail(mission_id, finding_id)
 
 
 @router.get(
@@ -79,7 +83,7 @@ def get_finding(request: HttpRequest, mission_id: UUID, finding_id: UUID):
 )
 def get_baseline(request: HttpRequest, mission_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError("#18 (baseline worker)")
+    return evidence_repository.get_baseline_report(mission_id)
 
 
 @router.get(
@@ -90,7 +94,7 @@ def get_baseline(request: HttpRequest, mission_id: UUID):
 )
 def get_fuzzing(request: HttpRequest, mission_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError("#24 (fuzzing harness)")
+    return evidence_repository.get_fuzzing_report(mission_id)
 
 
 @router.get(
@@ -106,7 +110,10 @@ def list_patches(
     offset: int = Query(default=0, ge=0),
 ):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError("#26 (patch generation)")
+    items, total = evidence_repository.list_patch_candidates(
+        mission_id, limit=limit, offset=offset
+    )
+    return Page(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get(
@@ -122,7 +129,7 @@ def list_patches(
 )
 def get_verification(request: HttpRequest, mission_id: UUID, patch_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(VERIFICATION_ISSUE)
+    return evidence_repository.get_patch_verification(mission_id, patch_id)
 
 
 @router.get(
