@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { getSystemHealth, type SystemHealth } from '../lib/api/client';
+import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
 
 type RequestState =
   | { kind: 'loading' }
@@ -18,7 +19,10 @@ export function SystemStatus() {
         if (!controller.signal.aborted) {
           setState({
             kind: 'error',
-            message: error instanceof Error ? error.message : 'The control API request failed.',
+            message: sanitizeDisplayText(
+              error instanceof Error ? error.message : 'The control API request failed.',
+              { fallback: 'The control API request failed.', maxLength: 220 },
+            ),
           });
         }
       },
@@ -42,10 +46,10 @@ export function SystemStatus() {
         [ {connected ? '+' : '!'} CONTROL API · {connected ? 'CONNECTED' : 'DEGRADED'} ]
       </p>
       <dl>
-        <div><dt>STATUS</dt><dd>{health.status}</dd></div>
-        <div><dt>SERVICE</dt><dd>{health.service}</dd></div>
-        <div><dt>VERSION</dt><dd>{health.version}</dd></div>
-        <div><dt>TRACE</dt><dd>{health.trace_id}</dd></div>
+        <div><dt>STATUS</dt><dd>{sanitizeDisplayText(health.status, { fallback: 'unknown', maxLength: 80 })}</dd></div>
+        <div><dt>SERVICE</dt><dd>{sanitizeDisplayText(health.service, { fallback: 'unknown', maxLength: 120 })}</dd></div>
+        <div><dt>VERSION</dt><dd>{sanitizeDisplayText(health.version, { fallback: 'unknown', maxLength: 80 })}</dd></div>
+        <div><dt>TRACE</dt><dd>{sanitizeDisplayText(health.trace_id, { fallback: 'unknown', maxLength: 120 })}</dd></div>
       </dl>
     </div>
   );

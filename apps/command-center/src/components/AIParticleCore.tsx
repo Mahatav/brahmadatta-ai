@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { LocalRepositoryContext, MissionSnapshot, StreamState } from '../lib/events/store';
+import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
 import type { FormEvent } from 'react';
 
 type AiMode = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking';
@@ -28,7 +29,10 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
   const [mode, setMode] = useState<AiMode>('idle');
   const [prompt, setPrompt] = useState('');
   const [transcript, setTranscript] = useState('Core idle. Scan a local repo, then ask a question.');
-  const selectedRepository = localRepository?.name ?? 'no repo selected';
+  const selectedRepository = sanitizeDisplayText(localRepository?.name ?? 'no repo selected', {
+    fallback: 'no repo selected',
+    maxLength: 120,
+  });
   const hasContext = Boolean(localRepository || snapshot.missionId);
 
   const particles = useMemo(() => makeParticles(), []);
@@ -170,10 +174,10 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
           : 'idle';
     setMode(nextMode);
     if (nextMode === 'listening') {
-      setTranscript(`Listening for input. Context: ${selectedRepository}.`);
+      setTranscript(sanitizeDisplayText(`Listening for input. Context: ${selectedRepository}.`, { maxLength: 220 }));
     }
     if (nextMode === 'transcribing') {
-      setTranscript(`Transcribing locally. Context: ${selectedRepository}.`);
+      setTranscript(sanitizeDisplayText(`Transcribing locally. Context: ${selectedRepository}.`, { maxLength: 220 }));
     }
     if (nextMode === 'thinking') {
       setTranscript(hasContext ? 'Thinking over the local code map.' : 'Scan a local repo so the core has code to reason about.');
@@ -186,14 +190,14 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
       return;
     }
     setMode('thinking');
-    const request = prompt.trim();
+    const request = sanitizeDisplayText(prompt.trim(), { fallback: 'empty request', maxLength: 220 });
     setPrompt('');
     window.setTimeout(() => {
       setMode('speaking');
       setTranscript(
-        hasContext
+        sanitizeDisplayText(hasContext
           ? `Local draft captured for ${selectedRepository}: ${request}`
-          : `I need a scanned local repo before I can answer: ${request}`,
+          : `I need a scanned local repo before I can answer: ${request}`, { maxLength: 280 }),
       );
     }, 700);
   }

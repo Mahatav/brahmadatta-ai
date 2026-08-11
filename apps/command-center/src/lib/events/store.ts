@@ -1,4 +1,5 @@
 import { atom } from 'nanostores';
+import { sanitizeDisplayList, sanitizeDisplayText } from '../security/renderSafety.mjs';
 import type { components } from '../api/schema';
 
 export type MissionEventEnvelope = components['schemas']['MissionEvent'];
@@ -97,16 +98,17 @@ export function ingestMissionEvent(event: MissionEventEnvelope): void {
 export function setMissionRepositoryContext(repositoryRef: string): void {
   $missionSnapshot.set({
     ...$missionSnapshot.get(),
-    repositoryRef,
+    repositoryRef: sanitizeDisplayText(repositoryRef, { fallback: 'unknown repository', maxLength: 180 }),
   });
 }
 
 export function setLocalRepositoryContext(repository: LocalRepositoryContext): void {
-  $localRepository.set(repository);
+  const sanitizedRepository = sanitizeLocalRepositoryContext(repository);
+  $localRepository.set(sanitizedRepository);
   $missionSnapshot.set({
     ...$missionSnapshot.get(),
-    repositoryRef: `local:${repository.name}`,
-    snapshotSha256: repository.manifestSha256,
+    repositoryRef: sanitizeDisplayText(`local:${sanitizedRepository.name}`, { maxLength: 180 }),
+    snapshotSha256: sanitizeDisplayText(sanitizedRepository.manifestSha256, { fallback: 'not created', maxLength: 80 }),
   });
 }
 
@@ -117,8 +119,8 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
     firstTimestamp: snapshot.firstTimestamp ?? event.timestamp,
     latestTimestamp: event.timestamp,
     latestSequence: event.sequence,
-    latestMessage: event.message,
-    traceId: event.trace_id,
+    latestMessage: sanitizeDisplayText(event.message, { fallback: '', maxLength: 360 }),
+    traceId: sanitizeDisplayText(event.trace_id, { fallback: 'unknown trace', maxLength: 120 }),
     state: event.state,
     stage: event.stage ?? snapshot.stage,
   };
@@ -141,20 +143,22 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
   }
 
   if (event.payload.kind === 'snapshot') {
-    next.snapshotSha256 = event.payload.snapshot_sha256;
-    next.commitSha = event.payload.commit_sha ?? null;
+    next.snapshotSha256 = sanitizeDisplayText(event.payload.snapshot_sha256, { fallback: 'not created', maxLength: 80 });
+    next.commitSha = event.payload.commit_sha
+      ? sanitizeDisplayText(event.payload.commit_sha, { fallback: 'unknown commit', maxLength: 80 })
+      : null;
   }
 
   if (event.payload.kind === 'baseline') {
-    next.baseline = event.payload.report;
+    next.baseline = sanitizeBaselineReport(event.payload.report);
   }
 
   if (event.payload.kind === 'finding') {
-    next.finding = event.payload.finding;
+    next.finding = sanitizeFindingSummary(event.payload.finding);
   }
 
   if (event.payload.kind === 'reproducer') {
-    next.reproducer = event.payload.reproducer;
+    next.reproducer = sanitizeReproducerRecord(event.payload.reproducer);
   }
 
   if (event.payload.kind === 'resource_usage') {
@@ -163,8 +167,8 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
 
   if (event.payload.kind === 'teardown') {
     const resource: ReleasedResource = {
-      kind: event.payload.resource_kind,
-      id: event.payload.resource_id,
+      kind: sanitizeDisplayText(event.payload.resource_kind, { fallback: 'resource', maxLength: 80 }),
+      id: sanitizeDisplayText(event.payload.resource_id, { fallback: 'unknown resource', maxLength: 140 }),
       released: event.payload.released,
     };
     next.releasedResources = [
@@ -174,4 +178,76 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
   }
 
   return next;
+}
+
+function sanitizeLocalRepositoryContext(repository: LocalRepositoryContext): LocalRepositoryContext {
+  return {
+    ...repository,
+    name: sanitizeDisplayText(repository.name, { fallback: 'local repository', maxLength: 120 }),
+    authorizedBy: sanitizeDisplayText(repository.authorizedBy, { fallback: 'authorized operator', maxLength: 120 }),
+    authorizedAt: sanitizeDisplayText(repository.authorizedAt, { fallback: 'unknown time', maxLength: 80 }),
+    manifestSha256: sanitizeDisplayText(repository.manifestSha256, { fallback: 'not created', maxLength: 80 }),
+    detectedFiles: sanitizeDisplayList(repository.detectedFiles, { fallback: 'unknown file', maxLength: 240, maxItems: 64 }),
+    primaryStack: sanitizeDisplayText(repository.primaryStack, { fallback: 'unknown stack', maxLength: 120 }),
+  };
+}
+
+function sanitizeBaselineReport(report: BaselineReport): BaselineReport {
+  const sanitized: BaselineReport = {
+    ...report,
+    adapter: sanitizeDisplayText(report.adapter, { fallback: 'unknown adapter', maxLength: 120 }),
+    mission_id: sanitizeDisplayText(report.mission_id, { fallback: 'unknown mission', maxLength: 120 }),
+    recorded_at: sanitizeDisplayText(report.recorded_at, { fallback: 'unknown time', maxLength: 80 }),
+  };
+  if (report.log_ref !== undefined) {
+    sanitized.log_ref = report.log_ref
+      ? {
+          ...report.log_ref,
+          kind: sanitizeDisplayText(report.log_ref.kind, { fallback: 'artifact', maxLength: 80 }),
+          sha256: report.log_ref.sha256
+            ? sanitizeDisplayText(report.log_ref.sha256, { fallback: 'unknown hash', maxLength: 80 })
+            : null,
+          uri: sanitizeDisplayText(report.log_ref.uri, { fallback: 'artifact unavailable', maxLength: 240 }),
+        }
+      : null;
+  }
+  return sanitized;
+}
+
+function sanitizeFindingSummary(finding: FindingSummary): FindingSummary {
+  return {
+    ...finding,
+    fingerprint: sanitizeDisplayText(finding.fingerprint, { fallback: 'unknown fingerprint', maxLength: 180 }),
+    id: sanitizeDisplayText(finding.id, { fallback: 'unknown finding', maxLength: 120 }),
+    mission_id: sanitizeDisplayText(finding.mission_id, { fallback: 'unknown mission', maxLength: 120 }),
+    replay_source: finding.replay_source
+      ? sanitizeDisplayText(finding.replay_source, { fallback: 'replay source unavailable', maxLength: 240 })
+      : null,
+    title: sanitizeDisplayText(finding.title, { fallback: 'Untitled finding', maxLength: 240 }),
+    location: {
+      ...finding.location,
+      file_path: sanitizeDisplayText(finding.location.file_path, { fallback: 'unknown file', maxLength: 240 }),
+      function: finding.location.function
+        ? sanitizeDisplayText(finding.location.function, { fallback: 'unknown function', maxLength: 160 })
+        : null,
+    },
+  };
+}
+
+function sanitizeReproducerRecord(reproducer: ReproducerRecord): ReproducerRecord {
+  return {
+    ...reproducer,
+    created_at: sanitizeDisplayText(reproducer.created_at, { fallback: 'unknown time', maxLength: 80 }),
+    finding_id: sanitizeDisplayText(reproducer.finding_id, { fallback: 'unknown finding', maxLength: 120 }),
+    id: sanitizeDisplayText(reproducer.id, { fallback: 'unknown reproducer', maxLength: 120 }),
+    test_command: sanitizeDisplayText(reproducer.test_command, { fallback: 'test command unavailable', maxLength: 240 }),
+    artifact: {
+      ...reproducer.artifact,
+      kind: sanitizeDisplayText(reproducer.artifact.kind, { fallback: 'artifact', maxLength: 80 }),
+      sha256: reproducer.artifact.sha256
+        ? sanitizeDisplayText(reproducer.artifact.sha256, { fallback: 'unknown hash', maxLength: 80 })
+        : null,
+      uri: sanitizeDisplayText(reproducer.artifact.uri, { fallback: 'artifact unavailable', maxLength: 240 }),
+    },
+  };
 }
