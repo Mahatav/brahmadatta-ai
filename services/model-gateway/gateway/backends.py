@@ -5,12 +5,10 @@ path" criterion is a structural property rather than a promise: `ModelGateway` c
 `produce()` and then does the identical validation, provenance construction and labelling
 regardless of which object answered.
 
-**There is no live backend in this build.** `UnavailableLiveBackend` raises. A CPU-served
-quantized model is issues #35/#36 and no model has been served in this repository — see the
-README's "Not run". `UnavailableLiveBackend` exists so that the absence is an explicit,
-named error rather than a `None` that produces a confusing traceback at the worst moment,
-and so that "we never wired it up" cannot be mistaken in a log for "the model tried and
-failed".
+`UnavailableLiveBackend` remains the default because the gateway must not invent a live
+model when the operator has not configured one. D5 adds `gateway.ollama.OllamaCodeLlamaBackend`
+as the local CodeLlama implementation; callers still pass it explicitly so "live inference"
+is a configured claim, not a default.
 """
 
 from __future__ import annotations
@@ -71,7 +69,7 @@ class LiveBackend(Protocol):
 
 
 class UnavailableLiveBackend:
-    """The live backend in this build: it refuses, loudly, with a reason."""
+    """Default live backend: refuses, loudly, until a real backend is configured."""
 
     model_name = ""
     model_revision = ""
@@ -81,8 +79,8 @@ class UnavailableLiveBackend:
     def generate(self, request: GenerationRequest) -> tuple[PatchCandidate, int, int | None]:
         raise LiveBackendUnavailableError(
             "no live model backend is wired into this build. Live CPU generation is "
-            "issues #35/#36; this build ships the replay path only. This is not a "
-            "generation failure — nothing was attempted.",
+            "available only when the operator supplies a backend such as the D5 Ollama "
+            "CodeLlama backend. This is not a generation failure — nothing was attempted.",
             details={"mission_prompt_sha256": request.prompt_sha256},
         )
 

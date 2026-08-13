@@ -25,7 +25,7 @@ from gateway.errors import (
 from gateway.schemas import GenerationRequest
 from gateway.service import ModelGateway, build_gateway
 from gateway.settings import GatewayMode, GatewaySettings, from_environment
-from gateway.tests.conftest import ExplodingLiveBackend, SpyingStore
+from gateway.tests.conftest import ExplodingLiveBackend, FakeLiveBackend, SpyingStore
 from gateway.transcripts import TranscriptStore
 
 
@@ -62,7 +62,7 @@ def test_a_live_failure_raises_and_never_reaches_for_a_transcript(
 def test_the_absence_of_a_live_backend_is_its_own_error(
     live_settings: GatewaySettings, request_: GenerationRequest, recorded: str
 ) -> None:
-    """ "We never wired it up" must not read in a log as "the model tried and failed"."""
+    """ "No backend was configured" must not read as "the model tried and failed"."""
     with pytest.raises(LiveBackendUnavailableError) as caught:
         build_gateway(live_settings).generate(request_)
     assert "nothing was attempted" in str(caught.value)
@@ -84,6 +84,35 @@ def test_build_gateway_binds_one_source_and_does_not_reconsider(
         "ModelGateway.generate must contain no exception handler and no reference to a "
         "second source. A `try live / except: replay` here is the silent fallback."
     )
+
+
+def test_live_endpoint_boundary_is_asserted_on_every_generation(
+    live_settings: GatewaySettings,
+    request_: GenerationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = GatewaySettings(
+        mode=live_settings.mode,
+        endpoint=live_settings.endpoint,
+        transcript_root=live_settings.transcript_root,
+        resolve_endpoint=True,
+    ).validate()
+    calls: list[str] = []
+
+    def fake_boundary_check(setting_name: str, endpoint: str, *, service_names: object) -> list[str]:
+        calls.append(f"{setting_name}:{endpoint}:{service_names}")
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr("gateway.service.assert_resolves_inside_boundary", fake_boundary_check)
+
+    gateway = build_gateway(settings, live_backend=FakeLiveBackend())
+    gateway.generate(request_)
+    gateway.generate(request_)
+
+    assert calls == [
+        "MODEL_ENDPOINT:http://127.0.0.1:8080/v1:frozenset()",
+        "MODEL_ENDPOINT:http://127.0.0.1:8080/v1:frozenset()",
+    ]
 
 
 def test_replay_mode_must_be_asked_for_by_name() -> None:

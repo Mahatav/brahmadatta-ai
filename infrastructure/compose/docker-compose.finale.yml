@@ -212,6 +212,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  model-host:
+    profiles: ["model"]
+    image: ollama/ollama@sha256:f478761c18fea69b1624e095bce0f8aab06825d09ccabcd0f88828db0df185ce
+    container_name: brahmadatta-finale-model-host
+    <<: *hardening
+    mem_limit: ${MODEL_HOST_MEM_LIMIT:-8g}
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"
+
 networks:
   # C4: only nginx sits here, and only this network has a gateway. Everything that can hold
   # a repository snapshot or assemble a prompt is on `edge`/`backend`, both internal, and
@@ -239,3 +259,4 @@ volumes:
   nginx-logs:
   django-static:
   evidence:
+  ollama-models:

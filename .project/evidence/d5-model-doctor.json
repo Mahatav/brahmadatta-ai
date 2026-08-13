@@ -1,0 +1,38 @@
+{
+  "backend": "ollama",
+  "checks": {
+    "endpoint_reachable": false,
+    "model_present": false,
+    "schema_probe_passed": false
+  },
+  "degraded_state": {
+    "active": true,
+    "reason": "local CodeLlama is not proven reachable",
+    "tier": "deterministic"
+  },
+  "hardware": {
+    "cpu_count": 10,
+    "machine": "arm64",
+    "memory_bytes": 17179869184,
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "kind": "ollama-codellama-doctor",
+  "message": "<urlopen error [Errno 61] Connection refused>",
+  "model": {
+    "artifact_sha256": "",
+    "name": "codellama:7b-instruct",
+    "revision": "ollama-library/codellama"
+  },
+  "recorded_at": "2026-08-13T04:24:54.428088+00:00",
+  "schema_version": "model-prep/1",
+  "serving": {
+    "endpoint": "http://127.0.0.1:11434/api",
+    "local_only": true,
+    "policy_reason": "loopback or private address (127.0.0.0/8)",
+    "policy_rule": "allowed-network",
+    "service_names": []
+  },
+  "status": "unreachable"
+}

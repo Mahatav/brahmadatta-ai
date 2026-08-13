@@ -167,9 +167,9 @@ def parse_libfuzzer_metrics(
     if stat_match:
         executions = max(executions, int(stat_match.group("execs")))
 
-    discovered = set(artifact_paths)
+    discovered = {_normalize_crash_artifact(path) for path in artifact_paths}
     for match in _CRASH_RE.finditer(output):
-        discovered.add(match.group("path").rstrip("'\""))
+        discovered.add(_normalize_crash_artifact(match.group("path").rstrip("'\"")))
 
     sanitizer_names = {
         name.replace("Sanitizer", "").lower() for name in _SANITIZER_RE.findall(output)
@@ -185,6 +185,14 @@ def parse_libfuzzer_metrics(
         artifact_paths=tuple(sorted(discovered)),
         sanitizers=sanitizers,
     )
+
+
+def _normalize_crash_artifact(path: str) -> str:
+    """Store crash artifacts by workspace-relative path, regardless of fuzzer wording."""
+    marker = f"{FUZZ_ARTIFACT_DIR}/"
+    if marker in path:
+        return marker + path.rsplit(marker, 1)[1]
+    return path
 
 
 def run_libfuzzer_campaign(
@@ -231,6 +239,7 @@ def run_libfuzzer_campaign(
             "-B",
             build_dir,
             "-DCMAKE_BUILD_TYPE=Debug",
+            "-DPKTCFG_SANITIZE=ON",
             "-DPKTCFG_FUZZ=ON",
             "-DCMAKE_C_COMPILER=clang",
         ]

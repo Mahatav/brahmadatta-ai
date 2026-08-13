@@ -90,6 +90,68 @@ def test_check_serving_records_local_policy_rule(tmp_path: Path) -> None:
     assert serving["policy_rule"] == "allowed-network"
 
 
+def test_doctor_reports_missing_codellama_as_degraded(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    output = tmp_path / "doctor.json"
+
+    monkeypatch.setattr(
+        model_prep,
+        "get_json",
+        lambda url, timeout: {"models": [{"name": "llama3.2:latest"}]},
+    )
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_BLOCKED
+    )
+
+    payload = _load(output)
+    assert payload["kind"] == "ollama-codellama-doctor"
+    assert payload["status"] == "model-missing"
+    assert payload["checks"]["endpoint_reachable"] is True
+    assert payload["checks"]["model_present"] is False
+    assert payload["degraded_state"]["active"] is True
+    assert "codellama:7b-instruct" in payload["message"]
+
+
+def test_doctor_reports_codellama_ready(tmp_path: Path, monkeypatch: Any) -> None:
+    output = tmp_path / "doctor.json"
+
+    monkeypatch.setattr(
+        model_prep,
+        "get_json",
+        lambda url, timeout: {"models": [{"model": "codellama:7b-instruct"}]},
+    )
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+
+    payload = _load(output)
+    assert payload["status"] == "ready"
+    assert payload["checks"]["endpoint_reachable"] is True
+    assert payload["checks"]["model_present"] is True
+    assert payload["degraded_state"]["active"] is False
+
+
 def test_fake_measure_goes_through_gateway_and_emits_evidence(tmp_path: Path) -> None:
     output = tmp_path / "measurement.json"
 
@@ -130,13 +192,78 @@ def test_fake_measure_goes_through_gateway_and_emits_evidence(tmp_path: Path) ->
     assert payload["prompt"]["response_schema_version"] == "patch-candidate/1"
 
 
+def test_ollama_measure_records_codellama_stream_evidence(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    output = tmp_path / "measurement.json"
+    seen: dict[str, Any] = {}
+
+    def fake_iter_response_lines(url: str, payload: dict[str, Any], timeout: float):
+        seen["url"] = url
+        seen["payload"] = payload
+        yield json.dumps(
+            {
+                "message": {
+                    "content": (
+                        '{"diff":"--- a/src/parse.c\\n+++ b/src/parse.c\\n@@\\n-a\\n+b\\n",'
+                    )
+                },
+                "done": False,
+            }
+        )
+        yield json.dumps(
+            {
+                "message": {
+                    "content": (
+                        '"rationale":"Bounds check.","touched_files":["src/parse.c"],'
+                        '"confidence":0.52}'
+                    )
+                },
+                "done": False,
+            }
+        )
+        yield json.dumps({"done": True, "eval_count": 64, "eval_duration": 2_000_000_000})
+
+    monkeypatch.setattr(model_prep, "iter_response_lines", fake_iter_response_lines)
+
+    assert (
+        model_prep.main(
+            [
+                "measure",
+                "--backend",
+                "ollama",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+
+    assert seen["url"] == "http://127.0.0.1:11434/api/chat"
+    assert seen["payload"]["model"] == "codellama:7b-instruct"
+    assert seen["payload"]["stream"] is True
+    payload = _load(output)
+    assert payload["backend"] == "ollama-codellama-stream"
+    assert payload["serving"]["local_only"] is True
+    assert payload["model"]["name"] == "codellama:7b-instruct"
+    measurement = payload["measurement"]
+    assert measurement["output_stream_chunks"] == 2
+    assert measurement["observed_output_chars"] > 0
+    assert measurement["ollama_eval_count"] == 64
+    assert measurement["parsed_patch_candidate"] is True
+    assert measurement["parse_error"] == ""
+
+
 def test_plan_prints_exact_operator_command_shape(capsys: Any) -> None:
     assert model_prep.main(["plan", "--evidence-dir", "evidence/d4-model"]) == 0
 
     captured = capsys.readouterr()
-    assert "huggingface-cli download" in captured.out
-    assert "llama-quantize" in captured.out
+    assert "ollama pull codellama:7b-instruct" in captured.out
+    assert "http://127.0.0.1:11434/api" in captured.out
     assert "hash-artifact" in captured.out
+    assert "model-doctor.json" in captured.out
     assert "check-serving" in captured.out
-    assert "measure --backend openai-compatible" in captured.out
+    assert "measure --backend ollama" in captured.out
     assert "evidence/d4-model/model-measurement.json" in captured.out

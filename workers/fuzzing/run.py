@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,7 @@ class FuzzingOutcome:
     artifact_refs: tuple[str, ...] = ()
     toolchain: FuzzToolchainRecord | None = None
     failure: FuzzFailure | None = None
+    run_output_excerpt: str = ""
     raw_events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     @property
@@ -67,6 +68,7 @@ class FuzzingOutcome:
             "artifact_refs": list(self.artifact_refs),
             "toolchain": self.toolchain.as_dict() if self.toolchain else None,
             "failure": self.failure.as_dict() if self.failure else None,
+            "run_output_excerpt": self.run_output_excerpt,
         }
 
 
@@ -79,7 +81,7 @@ def run_fuzzing_stage(
 ) -> FuzzingOutcome:
     """Run the D4 live libFuzzer campaign and return an evidence-shaped outcome."""
     mission_id_str = str(mission_id)
-    recorded_at = datetime.now(timezone.utc)
+    recorded_at = datetime.now(UTC)
     try:
         result = run_libfuzzer_campaign(
             source_dir,
@@ -131,6 +133,9 @@ def run_fuzzing_stage(
         coverage=metrics.coverage,
         artifact_refs=metrics.artifact_paths,
         toolchain=result.toolchain,
+        run_output_excerpt=_excerpt(result.run.stdout + "\n" + result.run.stderr)
+        if result.run is not None
+        else "",
         raw_events=result.events,
     )
 
@@ -203,6 +208,7 @@ def _not_run_from_failure(
         sanitizers=(),
         recorded_at=recorded_at,
         failure=failure,
+        run_output_excerpt=failure.detail,
         raw_events=(),
     )
 
@@ -217,3 +223,7 @@ def _summary_message(outcome: FuzzingOutcome) -> str:
         f"Fuzzing complete: {outcome.executions} executions, "
         f"{outcome.unique_crashes} unique crashes in {outcome.runtime_seconds:.1f}s"
     )
+
+
+def _excerpt(output: str, *, limit: int = 12000) -> str:
+    return output[-limit:]

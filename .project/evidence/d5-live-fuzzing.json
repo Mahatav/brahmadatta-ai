@@ -1,0 +1,147 @@
+{
+  "events": [
+    {
+      "evidence_refs": [],
+      "id": "1cc0a0d5-a7f5-475d-850c-7c151de0ad4e",
+      "message": "Building and running the libFuzzer harness.",
+      "metrics": {},
+      "mission_id": "d5-live-fuzzing-2026-08-12",
+      "payload": {
+        "detail": "cmake -DPKTCFG_FUZZ=ON; libFuzzer headless campaign",
+        "kind": "stage_progress",
+        "percent_complete": 0.0,
+        "stage": "STRESS_TEST"
+      },
+      "sequence": 1,
+      "severity": "INFO",
+      "stage": "STRESS_TEST",
+      "state": "STRESS_TEST",
+      "status": "RUNNING",
+      "timestamp": "2026-08-13T03:57:06.963537+00:00",
+      "type": "STAGE_STARTED"
+    },
+    {
+      "evidence_refs": [
+        "fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42"
+      ],
+      "id": "5427331d-c231-4533-a30c-e3eab8bcf466",
+      "message": "Fuzzing complete: 1878 executions, 1 unique crashes in 0.4s",
+      "metrics": {
+        "coverage": 187.0,
+        "crashes_found": 1.0,
+        "executions": 1878.0,
+        "runtime_seconds": 0.3716549170203507,
+        "unique_crashes": 1.0
+      },
+      "mission_id": "d5-live-fuzzing-2026-08-12",
+      "payload": {
+        "kind": "fuzzing",
+        "report": {
+          "artifact_refs": [
+            "fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42"
+          ],
+          "corpus_size": 8,
+          "coverage": 187,
+          "crashes_found": 1,
+          "engine": "libFuzzer",
+          "executions": 1878,
+          "failure": null,
+          "finding_ids": [],
+          "harness": "pktcfg_fuzz_one_input",
+          "mission_id": "d5-live-fuzzing-2026-08-12",
+          "mode": "LIVE_CAMPAIGN",
+          "recorded_at": "2026-08-13T03:57:06.963537+00:00",
+          "replay_source": null,
+          "run_output_excerpt": "\nINFO: Running with entropic power schedule (0xFF, 100).\nINFO: Seed: 433348601\nINFO: Loaded 1 modules   (342 inline 8-bit counters): 342 [0xaaaab2d53df8, 0xaaaab2d53f4e), \nINFO: Loaded 1 PC tables (342 PCs): 342 [0xaaaab2d53f50,0xaaaab2d554b0), \nINFO:        8 files found in /workspace/source/corpus\nINFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes\nINFO: seed corpus: files: 8 min: 8b max: 54b total: 198b rss: 32Mb\n#9\tINITED cov: 155 ft: 251 corp: 8/198b exec/s: 0 rss: 34Mb\n#10\tNEW    cov: 155 ft: 252 corp: 9/206b lim: 54 exec/s: 0 rss: 34Mb L: 8/54 MS: 1 ChangeBinInt-\n#11\tNEW    cov: 156 ft: 293 corp: 10/260b lim: 54 exec/s: 0 rss: 34Mb L: 54/54 MS: 1 ShuffleBytes-\n#15\tNEW    cov: 157 ft: 294 corp: 11/264b lim: 54 exec/s: 0 rss: 35Mb L: 4/54 MS: 4 InsertByte-ChangeByte-ShuffleBytes-CrossOver-\n#16\tNEW    cov: 164 ft: 329 corp: 12/291b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 CrossOver-\n#17\tNEW    cov: 165 ft: 330 corp: 13/311b lim: 54 exec/s: 0 rss: 35Mb L: 20/54 MS: 1 CopyPart-\n#19\tNEW    cov: 166 ft: 331 corp: 14/341b lim: 54 exec/s: 0 rss: 35Mb L: 30/54 MS: 2 ChangeByte-ChangeBit-\n#35\tNEW    cov: 169 ft: 334 corp: 15/370b lim: 54 exec/s: 0 rss: 35Mb L: 29/54 MS: 1 ShuffleBytes-\n#46\tNEW    cov: 169 ft: 344 corp: 16/397b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ShuffleBytes-\n#49\tNEW    cov: 170 ft: 358 corp: 17/430b lim: 54 exec/s: 0 rss: 35Mb L: 33/54 MS: 3 ChangeByte-ChangeByte-EraseBytes-\n#60\tREDUCE cov: 170 ft: 358 corp: 17/429b lim: 54 exec/s: 0 rss: 35Mb L: 7/54 MS: 1 EraseBytes-\n#61\tNEW    cov: 175 ft: 365 corp: 18/457b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 InsertByte-\n#135\tREDUCE cov: 175 ft: 365 corp: 18/454b lim: 54 exec/s: 0 rss: 35Mb L: 4/54 MS: 4 ShuffleBytes-ShuffleBytes-CopyPart-EraseBytes-\n#146\tREDUCE cov: 175 ft: 365 corp: 18/452b lim: 54 exec/s: 0 rss: 35Mb L: 2/54 MS: 1 EraseBytes-\n#157\tREDUCE cov: 175 ft: 365 corp: 18/440b lim: 54 exec/s: 0 rss: 35Mb L: 18/54 MS: 1 EraseBytes-\n#164\tNEW    cov: 175 ft: 366 corp: 19/467b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 2 CrossOver-ChangeByte-\n#240\tREDUCE cov: 175 ft: 366 corp: 19/466b lim: 54 exec/s: 0 rss: 35Mb L: 1/54 MS: 1 EraseBytes-\n#266\tNEW    cov: 175 ft: 375 corp: 20/493b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#274\tREDUCE cov: 175 ft: 375 corp: 20/486b lim: 54 exec/s: 0 rss: 35Mb L: 11/54 MS: 3 ChangeByte-ChangeBit-EraseBytes-\n#280\tREDUCE cov: 175 ft: 375 corp: 20/483b lim: 54 exec/s: 0 rss: 35Mb L: 8/54 MS: 1 EraseBytes-\n#311\tNEW    cov: 175 ft: 380 corp: 21/522b lim: 54 exec/s: 0 rss: 35Mb L: 39/54 MS: 1 CopyPart-\n#342\tNEW    cov: 175 ft: 382 corp: 22/550b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 CopyPart-\n#418\tNEW    cov: 175 ft: 388 corp: 23/578b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 InsertByte-\n#420\tNEW    cov: 175 ft: 391 corp: 24/606b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 2 CrossOver-ShuffleBytes-\n#513\tNEW    cov: 177 ft: 393 corp: 25/634b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 3 ChangeBit-ChangeASCIIInt-ChangeByte-\n#711\tREDUCE cov: 177 ft: 393 corp: 25/627b lim: 54 exec/s: 0 rss: 35Mb L: 47/54 MS: 3 ShuffleBytes-ChangeBinInt-EraseBytes-\n#742\tREDUCE cov: 177 ft: 393 corp: 25/622b lim: 54 exec/s: 0 rss: 35Mb L: 15/54 MS: 1 EraseBytes-\n#743\tNEW    cov: 178 ft: 394 corp: 26/649b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#819\tNEW    cov: 178 ft: 396 corp: 27/676b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#910\tNEW    cov: 178 ft: 402 corp: 28/703b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeByte-\n#976\tNEW    cov: 181 ft: 405 corp: 29/730b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeBinInt-\n#1182\tNEW    cov: 183 ft: 407 corp: 30/764b lim: 54 exec/s: 0 rss: 36Mb L: 34/54 MS: 1 CrossOver-\n#1198\tNEW    cov: 187 ft: 412 corp: 31/791b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeByte-\n#1389\tREDUCE cov: 187 ft: 412 corp: 31/790b lim: 54 exec/s: 0 rss: 36Mb L: 3/54 MS: 1 EraseBytes-\n#1581\tREDUCE cov: 187 ft: 412 corp: 31/789b lim: 54 exec/s: 0 rss: 37Mb L: 2/54 MS: 2 CopyPart-EraseBytes-\n#1617\tNEW    cov: 187 ft: 415 corp: 32/816b lim: 54 exec/s: 0 rss: 37Mb L: 27/54 MS: 1 CrossOver-\n#1689\tREDUCE cov: 187 ft: 415 corp: 32/814b lim: 54 exec/s: 0 rss: 37Mb L: 13/54 MS: 2 ChangeByte-EraseBytes-\n#1785\tREDUCE cov: 187 ft: 415 corp: 32/813b lim: 54 exec/s: 0 rss: 37Mb L: 27/54 MS: 1 CrossOver-\n=================================================================\n==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x50200000e79a at pc 0xaaaab2cf17ac bp 0xffffc61f3450 sp 0xffffc61f3448\nWRITE of size 1 at 0x50200000e79a thread T0\n    #0 0xaaaab2cf17a8 in pkt_decode_into /workspace/source/src/decode.c:128:32\n    #1 0xaaaab2ceef8c in pkt_parse /workspace/source/src/parse.c:126:28\n    #2 0xaaaab2ced0c0 in pktcfg_fuzz_one_input /workspace/source/src/fuzz_entry.c:26:14\n    #3 0xaaaab2cecebc in LLVMFuzzerTestOneInput /workspace/source/fuzz/pktcfg_fuzz.c:23:12\n    #4 0xaaaab2bf6f60 in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56f60) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #5 0xaaaab2bf6680 in fuzzer::Fuzzer::RunOne(unsigned char const*, unsigned long, bool, fuzzer::InputInfo*, bool, bool*) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56680) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #6 0xaaaab2bf8550 in fuzzer::Fuzzer::MutateAndTestOne() (/workspace/build-libfuzzer/pktcfg_fuzz+0x58550) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #7 0xaaaab2bf9190 in fuzzer::Fuzzer::Loop(std::vector<fuzzer::SizedFile, std::allocator<fuzzer::SizedFile>>&) (/workspace/build-libfuzzer/pktcfg_fuzz+0x59190) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #8 0xaaaab2be6c3c in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/workspace/build-libfuzzer/pktcfg_fuzz+0x46c3c) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #9 0xaaaab2c100e8 in main (/workspace/build-libfuzzer/pktcfg_fuzz+0x700e8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #10 0xffffa01e7740  (/lib/aarch64-linux-gnu/libc.so.6+0x27740) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #11 0xffffa01e7814 in __libc_start_main (/lib/aarch64-linux-gnu/libc.so.6+0x27814) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #12 0xaaaab2bdc9ec in _start (/workspace/build-libfuzzer/pktcfg_fuzz+0x3c9ec) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n\n0x50200000e79a is located 0 bytes after 10-byte region [0x50200000e790,0x50200000e79a)\nallocated by thread T0 here:\n    #0 0xaaaab2cafae8 in malloc (/workspace/build-libfuzzer/pktcfg_fuzz+0x10fae8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #1 0xaaaab2ceeb74 in pkt_parse /workspace/source/src/parse.c:120:24\n    #2 0xaaaab2ced0c0 in pktcfg_fuzz_one_input /workspace/source/src/fuzz_entry.c:26:14\n    #3 0xaaaab2cecebc in LLVMFuzzerTestOneInput /workspace/source/fuzz/pktcfg_fuzz.c:23:12\n    #4 0xaaaab2bf6f60 in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56f60) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #5 0xaaaab2bf6680 in fuzzer::Fuzzer::RunOne(unsigned char const*, unsigned long, bool, fuzzer::InputInfo*, bool, bool*) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56680) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #6 0xaaaab2bf8550 in fuzzer::Fuzzer::MutateAndTestOne() (/workspace/build-libfuzzer/pktcfg_fuzz+0x58550) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #7 0xaaaab2bf9190 in fuzzer::Fuzzer::Loop(std::vector<fuzzer::SizedFile, std::allocator<fuzzer::SizedFile>>&) (/workspace/build-libfuzzer/pktcfg_fuzz+0x59190) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #8 0xaaaab2be6c3c in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/workspace/build-libfuzzer/pktcfg_fuzz+0x46c3c) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #9 0xaaaab2c100e8 in main (/workspace/build-libfuzzer/pktcfg_fuzz+0x700e8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #10 0xffffa01e7740  (/lib/aarch64-linux-gnu/libc.so.6+0x27740) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #11 0xffffa01e7814 in __libc_start_main (/lib/aarch64-linux-gnu/libc.so.6+0x27814) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #12 0xaaaab2bdc9ec in _start (/workspace/build-libfuzzer/pktcfg_fuzz+0x3c9ec) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n\nSUMMARY: AddressSanitizer: heap-buffer-overflow /workspace/source/src/decode.c:128:32 in pkt_decode_into\nShadow bytes around the buggy address:\n  0x50200000e500: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x50200000e580: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x50200000e600: fa fa fd fa fa fa fd fa fa fa fd fd fa fa fd fd\n  0x50200000e680: fa fa fd fd fa fa fd fd fa fa fd fa fa fa fd fd\n  0x50200000e700: fa fa fd fd fa fa fd fd fa fa fd fd fa fa 00 00\n=>0x50200000e780: fa fa 00[02]fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000ea00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==1==ABORTING\nMS: 3 CrossOver-ChangeASCIIInt-CMP- DE: \"\\000\\011\"-; base unit: 4cea9b7d5aaf1de665bf5ce0e821d0156e4d34ef\n0x50,0x4b,0x54,0x43,0x1,0x1,0x0,0x0,0x3,0x1,0xc,0x0,0x72,0x61,0x77,0x5c,0x78,0x50,0x0,0x9,0x34,0x31,0x5c,0x78,0x30,0x30,0x58,0x78,0x34,0x4b,0x54,0x43,0x1,0x1,0x0,0x0,0x4,0x0,\nPKTC\\001\\001\\000\\000\\003\\001\\014\\000raw\\\\xP\\000\\01141\\\\x00Xx4KTC\\001\\001\\000\\000\\004\\000\nartifact_prefix='/workspace/fuzz-artifacts/'; Test unit written to /workspace/fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42\nBase64: UEtUQwEBAAADAQwAcmF3XHhQAAk0MVx4MDBYeDRLVEMBAQAABAA=\nstat::number_of_executed_units: 1878\nstat::average_exec_per_sec:     0\nstat::new_units_added:          37\nstat::slowest_unit_time_sec:    0\nstat::peak_rss_mb:              37\n",
+          "runtime_seconds": 0.3716549170203507,
+          "sanitizers": [
+            "address"
+          ],
+          "toolchain": {
+            "image": "silkeh/clang@sha256:f5ce959d91f059acf5a4b3f1c19f46713c4b2881c7d7cd1d5143ca1d1412277f",
+            "image_digest": "sha256:f5ce959d91f059acf5a4b3f1c19f46713c4b2881c7d7cd1d5143ca1d1412277f",
+            "isolation_mode": "CONTAINER_NO_NETWORK",
+            "pinned": true,
+            "tools": [
+              {
+                "name": "cmake",
+                "path": "cmake",
+                "version": "3.25.1"
+              },
+              {
+                "name": "clang",
+                "path": "clang",
+                "version": "19.1.7"
+              }
+            ]
+          },
+          "unique_crashes": 1
+        }
+      },
+      "sequence": 2,
+      "severity": "HIGH",
+      "stage": "STRESS_TEST",
+      "state": "STRESS_TEST",
+      "status": "SUCCEEDED",
+      "timestamp": "2026-08-13T03:57:06.963537+00:00",
+      "type": "STAGE_COMPLETED"
+    }
+  ],
+  "fuzzing": {
+    "artifact_refs": [
+      "fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42"
+    ],
+    "corpus_size": 8,
+    "coverage": 187,
+    "crashes_found": 1,
+    "engine": "libFuzzer",
+    "executions": 1878,
+    "failure": null,
+    "finding_ids": [],
+    "harness": "pktcfg_fuzz_one_input",
+    "mission_id": "d5-live-fuzzing-2026-08-12",
+    "mode": "LIVE_CAMPAIGN",
+    "recorded_at": "2026-08-13T03:57:06.963537+00:00",
+    "replay_source": null,
+    "run_output_excerpt": "\nINFO: Running with entropic power schedule (0xFF, 100).\nINFO: Seed: 433348601\nINFO: Loaded 1 modules   (342 inline 8-bit counters): 342 [0xaaaab2d53df8, 0xaaaab2d53f4e), \nINFO: Loaded 1 PC tables (342 PCs): 342 [0xaaaab2d53f50,0xaaaab2d554b0), \nINFO:        8 files found in /workspace/source/corpus\nINFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes\nINFO: seed corpus: files: 8 min: 8b max: 54b total: 198b rss: 32Mb\n#9\tINITED cov: 155 ft: 251 corp: 8/198b exec/s: 0 rss: 34Mb\n#10\tNEW    cov: 155 ft: 252 corp: 9/206b lim: 54 exec/s: 0 rss: 34Mb L: 8/54 MS: 1 ChangeBinInt-\n#11\tNEW    cov: 156 ft: 293 corp: 10/260b lim: 54 exec/s: 0 rss: 34Mb L: 54/54 MS: 1 ShuffleBytes-\n#15\tNEW    cov: 157 ft: 294 corp: 11/264b lim: 54 exec/s: 0 rss: 35Mb L: 4/54 MS: 4 InsertByte-ChangeByte-ShuffleBytes-CrossOver-\n#16\tNEW    cov: 164 ft: 329 corp: 12/291b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 CrossOver-\n#17\tNEW    cov: 165 ft: 330 corp: 13/311b lim: 54 exec/s: 0 rss: 35Mb L: 20/54 MS: 1 CopyPart-\n#19\tNEW    cov: 166 ft: 331 corp: 14/341b lim: 54 exec/s: 0 rss: 35Mb L: 30/54 MS: 2 ChangeByte-ChangeBit-\n#35\tNEW    cov: 169 ft: 334 corp: 15/370b lim: 54 exec/s: 0 rss: 35Mb L: 29/54 MS: 1 ShuffleBytes-\n#46\tNEW    cov: 169 ft: 344 corp: 16/397b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ShuffleBytes-\n#49\tNEW    cov: 170 ft: 358 corp: 17/430b lim: 54 exec/s: 0 rss: 35Mb L: 33/54 MS: 3 ChangeByte-ChangeByte-EraseBytes-\n#60\tREDUCE cov: 170 ft: 358 corp: 17/429b lim: 54 exec/s: 0 rss: 35Mb L: 7/54 MS: 1 EraseBytes-\n#61\tNEW    cov: 175 ft: 365 corp: 18/457b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 InsertByte-\n#135\tREDUCE cov: 175 ft: 365 corp: 18/454b lim: 54 exec/s: 0 rss: 35Mb L: 4/54 MS: 4 ShuffleBytes-ShuffleBytes-CopyPart-EraseBytes-\n#146\tREDUCE cov: 175 ft: 365 corp: 18/452b lim: 54 exec/s: 0 rss: 35Mb L: 2/54 MS: 1 EraseBytes-\n#157\tREDUCE cov: 175 ft: 365 corp: 18/440b lim: 54 exec/s: 0 rss: 35Mb L: 18/54 MS: 1 EraseBytes-\n#164\tNEW    cov: 175 ft: 366 corp: 19/467b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 2 CrossOver-ChangeByte-\n#240\tREDUCE cov: 175 ft: 366 corp: 19/466b lim: 54 exec/s: 0 rss: 35Mb L: 1/54 MS: 1 EraseBytes-\n#266\tNEW    cov: 175 ft: 375 corp: 20/493b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#274\tREDUCE cov: 175 ft: 375 corp: 20/486b lim: 54 exec/s: 0 rss: 35Mb L: 11/54 MS: 3 ChangeByte-ChangeBit-EraseBytes-\n#280\tREDUCE cov: 175 ft: 375 corp: 20/483b lim: 54 exec/s: 0 rss: 35Mb L: 8/54 MS: 1 EraseBytes-\n#311\tNEW    cov: 175 ft: 380 corp: 21/522b lim: 54 exec/s: 0 rss: 35Mb L: 39/54 MS: 1 CopyPart-\n#342\tNEW    cov: 175 ft: 382 corp: 22/550b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 CopyPart-\n#418\tNEW    cov: 175 ft: 388 corp: 23/578b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 1 InsertByte-\n#420\tNEW    cov: 175 ft: 391 corp: 24/606b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 2 CrossOver-ShuffleBytes-\n#513\tNEW    cov: 177 ft: 393 corp: 25/634b lim: 54 exec/s: 0 rss: 35Mb L: 28/54 MS: 3 ChangeBit-ChangeASCIIInt-ChangeByte-\n#711\tREDUCE cov: 177 ft: 393 corp: 25/627b lim: 54 exec/s: 0 rss: 35Mb L: 47/54 MS: 3 ShuffleBytes-ChangeBinInt-EraseBytes-\n#742\tREDUCE cov: 177 ft: 393 corp: 25/622b lim: 54 exec/s: 0 rss: 35Mb L: 15/54 MS: 1 EraseBytes-\n#743\tNEW    cov: 178 ft: 394 corp: 26/649b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#819\tNEW    cov: 178 ft: 396 corp: 27/676b lim: 54 exec/s: 0 rss: 35Mb L: 27/54 MS: 1 ChangeByte-\n#910\tNEW    cov: 178 ft: 402 corp: 28/703b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeByte-\n#976\tNEW    cov: 181 ft: 405 corp: 29/730b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeBinInt-\n#1182\tNEW    cov: 183 ft: 407 corp: 30/764b lim: 54 exec/s: 0 rss: 36Mb L: 34/54 MS: 1 CrossOver-\n#1198\tNEW    cov: 187 ft: 412 corp: 31/791b lim: 54 exec/s: 0 rss: 36Mb L: 27/54 MS: 1 ChangeByte-\n#1389\tREDUCE cov: 187 ft: 412 corp: 31/790b lim: 54 exec/s: 0 rss: 36Mb L: 3/54 MS: 1 EraseBytes-\n#1581\tREDUCE cov: 187 ft: 412 corp: 31/789b lim: 54 exec/s: 0 rss: 37Mb L: 2/54 MS: 2 CopyPart-EraseBytes-\n#1617\tNEW    cov: 187 ft: 415 corp: 32/816b lim: 54 exec/s: 0 rss: 37Mb L: 27/54 MS: 1 CrossOver-\n#1689\tREDUCE cov: 187 ft: 415 corp: 32/814b lim: 54 exec/s: 0 rss: 37Mb L: 13/54 MS: 2 ChangeByte-EraseBytes-\n#1785\tREDUCE cov: 187 ft: 415 corp: 32/813b lim: 54 exec/s: 0 rss: 37Mb L: 27/54 MS: 1 CrossOver-\n=================================================================\n==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x50200000e79a at pc 0xaaaab2cf17ac bp 0xffffc61f3450 sp 0xffffc61f3448\nWRITE of size 1 at 0x50200000e79a thread T0\n    #0 0xaaaab2cf17a8 in pkt_decode_into /workspace/source/src/decode.c:128:32\n    #1 0xaaaab2ceef8c in pkt_parse /workspace/source/src/parse.c:126:28\n    #2 0xaaaab2ced0c0 in pktcfg_fuzz_one_input /workspace/source/src/fuzz_entry.c:26:14\n    #3 0xaaaab2cecebc in LLVMFuzzerTestOneInput /workspace/source/fuzz/pktcfg_fuzz.c:23:12\n    #4 0xaaaab2bf6f60 in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56f60) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #5 0xaaaab2bf6680 in fuzzer::Fuzzer::RunOne(unsigned char const*, unsigned long, bool, fuzzer::InputInfo*, bool, bool*) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56680) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #6 0xaaaab2bf8550 in fuzzer::Fuzzer::MutateAndTestOne() (/workspace/build-libfuzzer/pktcfg_fuzz+0x58550) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #7 0xaaaab2bf9190 in fuzzer::Fuzzer::Loop(std::vector<fuzzer::SizedFile, std::allocator<fuzzer::SizedFile>>&) (/workspace/build-libfuzzer/pktcfg_fuzz+0x59190) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #8 0xaaaab2be6c3c in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/workspace/build-libfuzzer/pktcfg_fuzz+0x46c3c) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #9 0xaaaab2c100e8 in main (/workspace/build-libfuzzer/pktcfg_fuzz+0x700e8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #10 0xffffa01e7740  (/lib/aarch64-linux-gnu/libc.so.6+0x27740) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #11 0xffffa01e7814 in __libc_start_main (/lib/aarch64-linux-gnu/libc.so.6+0x27814) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #12 0xaaaab2bdc9ec in _start (/workspace/build-libfuzzer/pktcfg_fuzz+0x3c9ec) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n\n0x50200000e79a is located 0 bytes after 10-byte region [0x50200000e790,0x50200000e79a)\nallocated by thread T0 here:\n    #0 0xaaaab2cafae8 in malloc (/workspace/build-libfuzzer/pktcfg_fuzz+0x10fae8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #1 0xaaaab2ceeb74 in pkt_parse /workspace/source/src/parse.c:120:24\n    #2 0xaaaab2ced0c0 in pktcfg_fuzz_one_input /workspace/source/src/fuzz_entry.c:26:14\n    #3 0xaaaab2cecebc in LLVMFuzzerTestOneInput /workspace/source/fuzz/pktcfg_fuzz.c:23:12\n    #4 0xaaaab2bf6f60 in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56f60) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #5 0xaaaab2bf6680 in fuzzer::Fuzzer::RunOne(unsigned char const*, unsigned long, bool, fuzzer::InputInfo*, bool, bool*) (/workspace/build-libfuzzer/pktcfg_fuzz+0x56680) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #6 0xaaaab2bf8550 in fuzzer::Fuzzer::MutateAndTestOne() (/workspace/build-libfuzzer/pktcfg_fuzz+0x58550) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #7 0xaaaab2bf9190 in fuzzer::Fuzzer::Loop(std::vector<fuzzer::SizedFile, std::allocator<fuzzer::SizedFile>>&) (/workspace/build-libfuzzer/pktcfg_fuzz+0x59190) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #8 0xaaaab2be6c3c in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/workspace/build-libfuzzer/pktcfg_fuzz+0x46c3c) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #9 0xaaaab2c100e8 in main (/workspace/build-libfuzzer/pktcfg_fuzz+0x700e8) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n    #10 0xffffa01e7740  (/lib/aarch64-linux-gnu/libc.so.6+0x27740) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #11 0xffffa01e7814 in __libc_start_main (/lib/aarch64-linux-gnu/libc.so.6+0x27814) (BuildId: 6f268ff546c56d7f14e9501a55698cc2d0ab4732)\n    #12 0xaaaab2bdc9ec in _start (/workspace/build-libfuzzer/pktcfg_fuzz+0x3c9ec) (BuildId: 8f63b9bbf59e3f8a0a933c7ed6c65d4b367d6428)\n\nSUMMARY: AddressSanitizer: heap-buffer-overflow /workspace/source/src/decode.c:128:32 in pkt_decode_into\nShadow bytes around the buggy address:\n  0x50200000e500: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x50200000e580: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x50200000e600: fa fa fd fa fa fa fd fa fa fa fd fd fa fa fd fd\n  0x50200000e680: fa fa fd fd fa fa fd fd fa fa fd fa fa fa fd fd\n  0x50200000e700: fa fa fd fd fa fa fd fd fa fa fd fd fa fa 00 00\n=>0x50200000e780: fa fa 00[02]fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000e980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x50200000ea00: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==1==ABORTING\nMS: 3 CrossOver-ChangeASCIIInt-CMP- DE: \"\\000\\011\"-; base unit: 4cea9b7d5aaf1de665bf5ce0e821d0156e4d34ef\n0x50,0x4b,0x54,0x43,0x1,0x1,0x0,0x0,0x3,0x1,0xc,0x0,0x72,0x61,0x77,0x5c,0x78,0x50,0x0,0x9,0x34,0x31,0x5c,0x78,0x30,0x30,0x58,0x78,0x34,0x4b,0x54,0x43,0x1,0x1,0x0,0x0,0x4,0x0,\nPKTC\\001\\001\\000\\000\\003\\001\\014\\000raw\\\\xP\\000\\01141\\\\x00Xx4KTC\\001\\001\\000\\000\\004\\000\nartifact_prefix='/workspace/fuzz-artifacts/'; Test unit written to /workspace/fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42\nBase64: UEtUQwEBAAADAQwAcmF3XHhQAAk0MVx4MDBYeDRLVEMBAQAABAA=\nstat::number_of_executed_units: 1878\nstat::average_exec_per_sec:     0\nstat::new_units_added:          37\nstat::slowest_unit_time_sec:    0\nstat::peak_rss_mb:              37\n",
+    "runtime_seconds": 0.3716549170203507,
+    "sanitizers": [
+      "address"
+    ],
+    "toolchain": {
+      "image": "silkeh/clang@sha256:f5ce959d91f059acf5a4b3f1c19f46713c4b2881c7d7cd1d5143ca1d1412277f",
+      "image_digest": "sha256:f5ce959d91f059acf5a4b3f1c19f46713c4b2881c7d7cd1d5143ca1d1412277f",
+      "isolation_mode": "CONTAINER_NO_NETWORK",
+      "pinned": true,
+      "tools": [
+        {
+          "name": "cmake",
+          "path": "cmake",
+          "version": "3.25.1"
+        },
+        {
+          "name": "clang",
+          "path": "clang",
+          "version": "19.1.7"
+        }
+      ]
+    },
+    "unique_crashes": 1
+  },
+  "gate": {
+    "artifact_refs": [
+      "fuzz-artifacts/crash-e69b6432796ff881e0bb17806229dbf5f89e9f42"
+    ],
+    "crashes_found": 1,
+    "executions": 1878,
+    "mode": "LIVE_CAMPAIGN",
+    "name": "D5_LIVE_LIBFUZZER_SANITIZER_CRASH",
+    "passed": true,
+    "runtime_seconds": 0.3716549170203507,
+    "sanitizer_confirmed": true,
+    "unique_crashes": 1
+  },
+  "mission_id": "d5-live-fuzzing-2026-08-12",
+  "recorded_at": "2026-08-13T03:57:06.963537+00:00",
+  "schema": "brahmadatta.d5_fuzzing_gate.v1"
+}

@@ -9,8 +9,13 @@ export type MissionPosture = components['schemas']['MissionPosture'];
 export type BaselineReport = components['schemas']['BaselineReport'];
 export type FindingSummary = components['schemas']['FindingSummary'];
 export type FuzzingReport = components['schemas']['FuzzingReport'];
+export type GateMatrix = components['schemas']['GateMatrix'];
+export type GateResult = components['schemas']['GateResult'];
+export type MissionVerdictSummary = components['schemas']['MissionVerdictSummary'];
+export type PatchCandidate = components['schemas']['PatchCandidate'];
 export type ReproducerRecord = components['schemas']['ReproducerRecord'];
 export type ResourceUsage = components['schemas']['ResourceUsage'];
+export type VerificationRecord = components['schemas']['VerificationRecord'];
 
 export type StreamState = 'idle' | 'connecting' | 'open' | 'stale' | 'closed' | 'error';
 
@@ -57,6 +62,9 @@ export interface MissionSnapshot {
   fuzzing: FuzzingReport | null;
   finding: FindingSummary | null;
   reproducer: ReproducerRecord | null;
+  patchCandidates: PatchCandidate[];
+  verifications: VerificationRecord[];
+  verdictSummary: MissionVerdictSummary | null;
   resourceUsage: ResourceUsage | null;
   releasedResources: ReleasedResource[];
 }
@@ -80,6 +88,9 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   fuzzing: null,
   finding: null,
   reproducer: null,
+  patchCandidates: [],
+  verifications: [],
+  verdictSummary: null,
   resourceUsage: null,
   releasedResources: [],
 };
@@ -166,6 +177,26 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
 
   if (event.payload.kind === 'reproducer') {
     next.reproducer = sanitizeReproducerRecord(event.payload.reproducer);
+  }
+
+  if (event.payload.kind === 'patch_candidate') {
+    const patch = sanitizePatchCandidate(event.payload.patch);
+    next.patchCandidates = [
+      ...snapshot.patchCandidates.filter((item) => item.id !== patch.id),
+      patch,
+    ];
+  }
+
+  if (event.payload.kind === 'verification') {
+    const verification = event.payload.verification;
+    next.verifications = [
+      ...snapshot.verifications.filter((item) => item.id !== verification.id),
+      verification,
+    ];
+  }
+
+  if (event.payload.kind === 'mission_verdict') {
+    next.verdictSummary = event.payload.summary;
   }
 
   if (event.payload.kind === 'resource_usage') {
@@ -270,5 +301,17 @@ function sanitizeReproducerRecord(reproducer: ReproducerRecord): ReproducerRecor
         : null,
       uri: sanitizeDisplayText(reproducer.artifact.uri, { fallback: 'artifact unavailable', maxLength: 240 }),
     },
+  };
+}
+
+function sanitizePatchCandidate(patch: PatchCandidate): PatchCandidate {
+  return {
+    ...patch,
+    diff: sanitizeDisplayText(patch.diff, { fallback: 'diff unavailable', maxLength: 200000 }),
+    id: sanitizeDisplayText(patch.id, { fallback: 'unknown patch', maxLength: 120 }),
+    mission_id: sanitizeDisplayText(patch.mission_id, { fallback: 'unknown mission', maxLength: 120 }),
+    finding_id: sanitizeDisplayText(patch.finding_id, { fallback: 'unknown finding', maxLength: 120 }),
+    policy_detail: sanitizeDisplayText(patch.policy_detail, { fallback: '', maxLength: 240 }),
+    rationale: sanitizeDisplayText(patch.rationale, { fallback: '', maxLength: 1200 }),
   };
 }

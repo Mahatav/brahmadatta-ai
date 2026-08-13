@@ -1,10 +1,8 @@
 """Fixtures shared by the replay tests.
 
-`FakeLiveBackend` is a stand-in for a served model and is the only thing in this package
-that produces a `PatchCandidate` without reading a file. It is emphatically **not** a
-model: no model has been served in this repository, and every test that uses this fixture
-is testing the gateway's plumbing, not a model's output. Issues #35/#36 provide the real
-one.
+`FakeLiveBackend` is a stand-in for a served model and is emphatically **not** a model.
+D5's Ollama CodeLlama backend is tested separately with mocked local HTTP responses; every
+test that uses this fixture is testing gateway plumbing, not model quality.
 
 The diff it returns is the real bounds fix from `demo/repositories/pktcfg` so that a replay
 run produces something a verification gate could plausibly be pointed at, rather than a

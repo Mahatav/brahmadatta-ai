@@ -1,0 +1,41 @@
+{
+  "artifact": {
+    "bytes": 3044,
+    "media_type": "text/html",
+    "network_dependency": false,
+    "path": "fallback-demo-d6.html",
+    "playable_offline": true,
+    "sha256": "1c1b74e68067cadf2a68f7c8fa4c9e4d069dc8dedc12f0b93f238d3fc931f977"
+  },
+  "captions": [
+    "D5 live libFuzzer campaign produced a sanitizer-confirmed crash.",
+    "Fuzzing ran 0.3716549170203507 seconds and found 1 crash.",
+    "The minimized reproducer replayed 5 of 5 times from a clean build.",
+    "D6 verdict loop produced both verdicts twice consecutively: 2 runs recorded.",
+    "Static delta and renewed fuzzing are disclosed as NOT_RUN where cut by plan."
+  ],
+  "claim": "offline playable evidence replay",
+  "kind": "fallback-demonstration",
+  "recorded_at": "2026-08-13T04:24:03.497307+00:00",
+  "schema_version": "fallback-demo/1",
+  "scope": {
+    "d5_steps_1_to_4": true,
+    "d6_steps_1_to_7_with_both_verdicts": true,
+    "d7_all_nine_steps": false,
+    "not_staged_or_reshot": true
+  },
+  "source_evidence": [
+    {
+      "path": ".project/evidence/d5-live-fuzzing.json",
+      "sha256": "12ef977e6bc5e0b54b703ac59b4cf3389bc8b3d1722c961db878a20fe0fea921"
+    },
+    {
+      "path": ".project/evidence/d5-reproducer-gate.json",
+      "sha256": "5f1e4d736adbcd65e1c0cf0fb9c4c1a71d4c54d97bc8f8fccbfdd95ac8404c78"
+    },
+    {
+      "path": ".project/evidence/d6-verdict-loop-gate.json",
+      "sha256": "a867f4a9c54996e999b3f3b816332511c7cd12a0dd23a92d32088812fabed3b1"
+    }
+  ]
+}

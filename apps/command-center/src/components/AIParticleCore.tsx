@@ -15,17 +15,115 @@ interface Particle {
   size: number;
 }
 
+interface CoreMotion {
+  energy: number;
+  rotation: number;
+  scale: number;
+  speed: number;
+  surface: number;
+  tilt: number;
+}
+
+interface CoreLayout {
+  centerX: number;
+  centerY: number;
+  height: number;
+  particleColor: string;
+  radius: number;
+  ratio: number;
+  veilColor: string;
+  width: number;
+}
+
 interface AIParticleCoreProps {
   snapshot: MissionSnapshot;
   localRepository: LocalRepositoryContext | null;
   streamState: StreamState;
 }
 
-const particleCount = 720;
+const particleCount = 180;
 const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+function motionForMode(mode: AiMode, timeSeconds: number): CoreMotion {
+  const calmBreath = Math.sin(timeSeconds * 1.65);
+  const thinkingBreath = Math.sin(timeSeconds * 3.2);
+  if (mode === 'thinking') {
+    return {
+      energy: 0.55,
+      rotation: 0.58,
+      scale: 1.06 + thinkingBreath * 0.085,
+      speed: 3.4,
+      surface: 0.018,
+      tilt: 0.12,
+    };
+  }
+  if (mode === 'listening') {
+    return {
+      energy: 0.66,
+      rotation: 0.72,
+      scale: 1.03 + Math.sin(timeSeconds * 2.8) * 0.035,
+      speed: 3.8,
+      surface: 0.022,
+      tilt: 0.14,
+    };
+  }
+  if (mode === 'transcribing') {
+    return {
+      energy: 0.78,
+      rotation: 0.68,
+      scale: 1.025,
+      speed: 7.2,
+      surface: 0.02,
+      tilt: 0.11,
+    };
+  }
+  if (mode === 'speaking') {
+    return {
+      energy: 0.76,
+      rotation: 0.92,
+      scale: 1.025 + Math.sin(timeSeconds * 4.8) * 0.024,
+      speed: 6.4,
+      surface: 0.026,
+      tilt: 0.16,
+    };
+  }
+  return {
+    energy: 0.36,
+    rotation: 0.46,
+    scale: 1 + calmBreath * 0.03,
+    speed: 1.75,
+    surface: 0.012,
+    tilt: 0.09,
+  };
+}
+
+function readCoreLayout(canvas: HTMLCanvasElement): CoreLayout {
+  const box = canvas.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.floor(box.width * ratio));
+  const height = Math.max(1, Math.floor(box.height * ratio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  const styles = getComputedStyle(canvas);
+  const field = Math.min(width, height);
+  return {
+    centerX: width / 2,
+    centerY: height / 2,
+    height,
+    particleColor: styles.getPropertyValue('--bd-text').trim() || '#F4F3EE',
+    radius: field * 0.27,
+    ratio,
+    veilColor: styles.getPropertyValue('--bd-text-secondary').trim() || '#9FA1C9',
+    width,
+  };
+}
 
 export function AIParticleCore({ snapshot, localRepository, streamState }: AIParticleCoreProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const modeRef = useRef<AiMode>('idle');
   const [mode, setMode] = useState<AiMode>('idle');
   const [prompt, setPrompt] = useState('');
   const [transcript, setTranscript] = useState('Core idle. Scan a local repo, then ask a question.');
@@ -38,10 +136,8 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
   const particles = useMemo(() => makeParticles(), []);
 
   useEffect(() => {
-    if (streamState === 'open' && mode === 'idle') {
-      setMode('listening');
-    }
-  }, [mode, streamState]);
+    modeRef.current = mode;
+  }, [mode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -49,120 +145,104 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
       return undefined;
     }
 
-    let frame = 0;
+    let drawCount = 0;
     let animation = 0;
+    let layout: CoreLayout = readCoreLayout(canvas);
+    let displayedMotion = motionForMode(modeRef.current, 0);
     const context = canvas.getContext('2d');
     if (!context) {
       return undefined;
     }
 
-    const draw = () => {
-      const box = canvas.getBoundingClientRect();
-      const ratio = window.devicePixelRatio || 1;
-      const width = Math.max(1, Math.floor(box.width * ratio));
-      const height = Math.max(1, Math.floor(box.height * ratio));
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-      }
+    const refreshLayout = () => {
+      layout = readCoreLayout(canvas);
+    };
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(refreshLayout);
+    resizeObserver?.observe(canvas);
+    window.addEventListener('resize', refreshLayout);
 
-      const styles = getComputedStyle(canvas);
-      const particleColor = styles.getPropertyValue('--bd-text').trim() || '#F4F3EE';
-      const ruleColor = styles.getPropertyValue('--bd-rule-active').trim() || '#F4F3EE';
-      const veilColor = styles.getPropertyValue('--bd-text-secondary').trim() || '#9FA1C9';
-      const field = Math.min(width, height);
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const radius = field * 0.29;
-      const breath = 1 + Math.sin(frame * 0.018) * 0.045;
-      const pulse = mode === 'thinking' ? breath : mode === 'transcribing' ? 1.1 : mode === 'speaking' ? 1.05 : mode === 'listening' ? 1.02 : 1;
-      const speed = mode === 'transcribing' ? 0.024 : mode === 'speaking' ? 0.014 : mode === 'listening' ? 0.009 : mode === 'thinking' ? 0.005 : 0.005;
-      const energy = mode === 'transcribing' ? 1 : mode === 'speaking' ? 0.7 : mode === 'listening' ? 0.52 : mode === 'thinking' ? 0.32 : 0.32;
+    const draw = (timestamp = 0) => {
+      if (drawCount % 240 === 0) {
+        refreshLayout();
+      }
+      if (!layout.width || !layout.height) {
+        animation = requestAnimationFrame(draw);
+        return;
+      }
+      const {
+        centerX,
+        centerY,
+        height,
+        particleColor,
+        radius,
+        ratio,
+        veilColor,
+        width,
+      } = layout;
+      const timeSeconds = timestamp / 1000;
+      const activeMode = modeRef.current;
+      const targetMotion = motionForMode(activeMode, timeSeconds);
+      displayedMotion = interpolateMotion(displayedMotion, targetMotion, 0.22);
+      const motion = displayedMotion;
 
       context.clearRect(0, 0, width, height);
       context.save();
       context.lineCap = 'round';
       context.globalCompositeOperation = 'lighter';
 
-      const projected = particles.map((particle, index) => {
-        const phase = frame * speed + particle.drift;
-        const surface = 1 + Math.sin(phase * 2.4 + particle.lane) * 0.035 * energy;
-        const wobble = Math.sin(phase * 1.7) * 0.05;
-        const rotationY = frame * speed * 0.72;
-        const rotationX = Math.sin(frame * speed * 0.23) * 0.32;
-        const rawX = particle.x * surface;
-        const rawY = particle.y * surface;
-        const rawZ = particle.z * surface;
-        const x = rawX * Math.cos(rotationY) - rawZ * Math.sin(rotationY);
-        const z = rawX * Math.sin(rotationY) + rawZ * Math.cos(rotationY);
-        const y = rawY * Math.cos(rotationX) - z * Math.sin(rotationX);
-        const finalZ = rawY * Math.sin(rotationX) + z * Math.cos(rotationX);
-        const perspective = 1.45 / (1.85 - finalZ);
-        return {
-          index,
-          x: centerX + x * radius * perspective * pulse,
-          y: centerY + y * radius * perspective * pulse,
-          z: finalZ,
-          lane: particle.lane,
-          size: Math.max(0.65 * ratio, (particle.size + perspective * 0.9 + wobble) * ratio),
-          alpha: Math.max(0.08, Math.min(0.86, 0.28 + finalZ * 0.34 + energy * 0.18)),
-        };
-      });
-
       const halo = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 1.7);
-      halo.addColorStop(0, withAlpha(particleColor, 0.24 + energy * 0.1));
-      halo.addColorStop(0.22, withAlpha(particleColor, 0.08));
+      halo.addColorStop(0, withAlpha(particleColor, 0.16 + motion.energy * 0.08));
+      halo.addColorStop(0.24, withAlpha(particleColor, 0.055));
       halo.addColorStop(1, withAlpha(particleColor, 0));
       context.fillStyle = halo;
       context.beginPath();
-      context.arc(centerX, centerY, radius * 1.55, 0, Math.PI * 2);
+      context.arc(centerX, centerY, radius * 1.42, 0, Math.PI * 2);
       context.fill();
 
-      drawHologramRings(context, centerX, centerY, radius, ratio, frame, speed, energy, particleColor, veilColor);
-      drawFilaments(context, projected, centerX, centerY, ratio, energy, ruleColor, particleColor);
-      if (mode === 'listening') {
-        drawListeningSweep(context, centerX, centerY, radius, ratio, frame, particleColor, veilColor);
+      drawParticleSphere(context, particles, layout, motion, timeSeconds);
+      drawTacticalLattice(context, centerX, centerY, radius, ratio, timeSeconds, motion, particleColor, veilColor);
+      if (activeMode === 'listening') {
+        drawListeningSweep(context, centerX, centerY, radius, ratio, timeSeconds, particleColor, veilColor);
       }
-      if (mode === 'transcribing' || mode === 'speaking') {
-        drawDataStreams(context, centerX, centerY, radius, ratio, frame, speed, energy, particleColor);
+      if (activeMode === 'transcribing') {
+        drawTranscribingSignal(context, centerX, centerY, radius, ratio, timeSeconds, particleColor, veilColor);
+      }
+      if (activeMode === 'speaking') {
+        drawSpeakingWave(context, centerX, centerY, radius, ratio, timeSeconds, particleColor, veilColor);
       }
 
       const nucleus = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 0.24);
       nucleus.addColorStop(0, withAlpha(particleColor, 0.92));
-      nucleus.addColorStop(0.36, withAlpha(particleColor, 0.24 + energy * 0.18));
+      nucleus.addColorStop(0.36, withAlpha(particleColor, 0.22 + motion.energy * 0.16));
       nucleus.addColorStop(1, withAlpha(particleColor, 0));
       context.fillStyle = nucleus;
       context.beginPath();
-      context.arc(centerX, centerY, radius * (0.2 + energy * 0.06), 0, Math.PI * 2);
+      context.arc(centerX, centerY, radius * (0.17 + motion.energy * 0.06), 0, Math.PI * 2);
       context.fill();
 
-      projected
-        .sort((a, b) => a.z - b.z)
-        .forEach((particle) => {
-          const tone = particle.lane % 5 === 0 ? veilColor : particleColor;
-          context.fillStyle = withAlpha(tone, particle.alpha);
-          context.beginPath();
-          context.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
-          context.fill();
-        });
-
       context.globalCompositeOperation = 'source-over';
-      context.strokeStyle = withAlpha(particleColor, 0.22 + energy * 0.28);
+      context.strokeStyle = withAlpha(particleColor, 0.2 + motion.energy * 0.24);
       context.lineWidth = ratio;
       context.setLineDash([3 * ratio, 9 * ratio]);
       context.beginPath();
-      context.arc(centerX, centerY, radius * pulse * 1.17, frame * speed, Math.PI * 2 + frame * speed);
+      context.arc(centerX, centerY, radius * 1.17, timeSeconds * motion.rotation, Math.PI * 2 + timeSeconds * motion.rotation);
       context.stroke();
       context.setLineDash([]);
 
       context.restore();
-      frame += 1;
+      drawCount += 1;
       animation = requestAnimationFrame(draw);
     };
 
     animation = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(animation);
-  }, [mode, particles]);
+    return () => {
+      cancelAnimationFrame(animation);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', refreshLayout);
+    };
+  }, [particles]);
 
   function handleCoreClick() {
     const nextMode: AiMode = mode === 'idle'
@@ -171,7 +251,9 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
         ? 'transcribing'
         : mode === 'transcribing'
           ? 'thinking'
-          : 'idle';
+          : mode === 'thinking'
+            ? 'speaking'
+            : 'idle';
     setMode(nextMode);
     if (nextMode === 'listening') {
       setTranscript(sanitizeDisplayText(`Listening for input. Context: ${selectedRepository}.`, { maxLength: 220 }));
@@ -181,6 +263,12 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
     }
     if (nextMode === 'thinking') {
       setTranscript(hasContext ? 'Thinking over the local code map.' : 'Scan a local repo so the core has code to reason about.');
+    }
+    if (nextMode === 'speaking') {
+      setTranscript(sanitizeDisplayText(`Speaking from local context: ${selectedRepository}.`, { maxLength: 220 }));
+    }
+    if (nextMode === 'idle') {
+      setTranscript(hasContext ? 'Core idle. Local context is loaded.' : 'Core idle. Scan a local repo, then ask a question.');
     }
   }
 
@@ -203,7 +291,7 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
   }
 
   return (
-    <div className="ai-core">
+    <div className="ai-core" data-stream-state={streamState}>
       <button
         type="button"
         className={`ai-core-button ai-core-button--${mode}`}
@@ -232,98 +320,160 @@ export function AIParticleCore({ snapshot, localRepository, streamState }: AIPar
   );
 }
 
-function drawHologramRings(
+function drawParticleSphere(
+  context: CanvasRenderingContext2D,
+  particles: Particle[],
+  layout: CoreLayout,
+  motion: CoreMotion,
+  timeSeconds: number,
+): void {
+  const rotationY = timeSeconds * motion.rotation;
+  const rotationX = Math.sin(timeSeconds * motion.rotation * 0.7) * motion.tilt;
+  const cosY = Math.cos(rotationY);
+  const sinY = Math.sin(rotationY);
+  const cosX = Math.cos(rotationX);
+  const sinX = Math.sin(rotationX);
+
+  for (const particle of particles) {
+    const phase = timeSeconds * motion.speed + particle.drift;
+    const surface = motion.scale + Math.sin(phase * 1.35 + particle.lane) * motion.surface;
+    const rawX = particle.x * surface;
+    const rawY = particle.y * surface;
+    const rawZ = particle.z * surface;
+    const x = rawX * cosY - rawZ * sinY;
+    const z = rawX * sinY + rawZ * cosY;
+    const y = rawY * cosX - z * sinX;
+    const finalZ = rawY * sinX + z * cosX;
+    const perspective = 1.36 / (1.9 - finalZ);
+    const alpha = Math.max(0.09, Math.min(0.78, 0.2 + finalZ * 0.28 + motion.energy * 0.12));
+    const dotX = layout.centerX + x * layout.radius * perspective;
+    const dotY = layout.centerY + y * layout.radius * perspective;
+    const dotSize = Math.max(0.6 * layout.ratio, (particle.size + perspective * 0.72) * layout.ratio);
+    context.fillStyle = withAlpha(particle.lane % 8 === 0 ? layout.veilColor : layout.particleColor, alpha);
+    context.beginPath();
+    context.arc(dotX, dotY, dotSize, 0, Math.PI * 2);
+    context.fill();
+  }
+}
+
+function drawTacticalLattice(
   context: CanvasRenderingContext2D,
   centerX: number,
   centerY: number,
   radius: number,
   ratio: number,
-  frame: number,
-  speed: number,
-  energy: number,
+  timeSeconds: number,
+  motion: CoreMotion,
   particleColor: string,
   veilColor: string,
 ): void {
-  for (let arc = 0; arc < 7; arc += 1) {
-    const sweep = frame * speed * (arc % 2 === 0 ? 1 : -1) + arc * 0.72;
-    context.strokeStyle = withAlpha(arc % 2 === 0 ? particleColor : veilColor, 0.12 + energy * 0.16);
-    context.lineWidth = (arc === 2 ? 1.8 : 1) * ratio;
+  const pulse = 0.5 + Math.sin(timeSeconds * (2.8 + motion.energy * 3.4)) * 0.5;
+  context.lineWidth = Math.max(0.6, ratio * 0.72);
+
+  for (let lane = 0; lane < 8; lane += 1) {
+    const angle = timeSeconds * (0.34 + motion.rotation * 0.38) + lane * Math.PI * 0.25;
+    const longRadius = radius * (0.74 + (lane % 3) * 0.07 + motion.energy * 0.05);
+    const shortRadius = longRadius * (0.34 + (lane % 2) * 0.05);
+    context.strokeStyle = withAlpha(lane % 2 === 0 ? particleColor : veilColor, 0.11 + pulse * 0.1 + motion.energy * 0.08);
     context.beginPath();
     context.ellipse(
       centerX,
       centerY,
-      radius * (0.56 + arc * 0.105),
-      radius * (0.13 + arc * 0.038),
-      sweep,
-      0,
-      Math.PI * 2,
+      longRadius,
+      shortRadius,
+      angle,
+      angle + Math.PI * 0.08,
+      angle + Math.PI * (0.68 + motion.energy * 0.2),
     );
     context.stroke();
   }
 }
 
-function drawFilaments(
-  context: CanvasRenderingContext2D,
-  projected: Array<{ index: number; x: number; y: number; z: number; lane: number; size: number; alpha: number }>,
-  centerX: number,
-  centerY: number,
-  ratio: number,
-  energy: number,
-  ruleColor: string,
-  particleColor: string,
-): void {
-  context.lineWidth = ratio;
-  for (let index = 0; index < projected.length; index += 11) {
-    const current = projected[index];
-    if (!current) {
-      continue;
-    }
-    const next = projected[(index + 34 + current.lane * 5) % projected.length];
-    if (!next || current.z < -0.45 || next.z < -0.55) {
-      continue;
-    }
-    const alpha = Math.min(0.28, 0.05 + (current.z + 1) * 0.08 + energy * 0.08);
-    context.strokeStyle = withAlpha(current.lane % 3 === 0 ? particleColor : ruleColor, alpha);
-    context.beginPath();
-    context.moveTo(current.x, current.y);
-    context.quadraticCurveTo(
-      centerX + (current.x - centerX) * 0.2,
-      centerY + (next.y - centerY) * 0.2,
-      next.x,
-      next.y,
-    );
-    context.stroke();
-  }
-}
-
-function drawDataStreams(
+function drawTranscribingSignal(
   context: CanvasRenderingContext2D,
   centerX: number,
   centerY: number,
   radius: number,
   ratio: number,
-  frame: number,
-  speed: number,
-  energy: number,
+  timeSeconds: number,
   particleColor: string,
+  veilColor: string,
 ): void {
-  context.strokeStyle = withAlpha(particleColor, 0.1 + energy * 0.28);
-  context.lineWidth = ratio * (1 + energy * 0.7);
-  for (let stream = 0; stream < 4; stream += 1) {
-    const phase = frame * speed * (1.4 + stream * 0.16) + stream * Math.PI * 0.5;
-    const start = phase;
-    const end = phase + Math.PI * (0.38 + energy * 0.22);
-    const ring = radius * (0.94 + stream * 0.08);
+  context.lineWidth = Math.max(0.85, ratio);
+
+  for (let tick = 0; tick < 25; tick += 1) {
+    const t = tick / 24;
+    const x = centerX - radius * 0.68 + t * radius * 1.36;
+    const pulse = Math.abs(Math.sin(timeSeconds * 8.4 + tick * 0.72));
+    const tickHeight = radius * (0.035 + pulse * 0.15);
+    context.strokeStyle = withAlpha(tick % 4 === 0 ? particleColor : veilColor, 0.13 + pulse * 0.22);
     context.beginPath();
-    context.ellipse(
-      centerX,
-      centerY,
-      ring,
-      ring * (0.24 + stream * 0.05),
-      phase * 0.6,
-      start,
-      end,
-    );
+    context.moveTo(x, centerY - tickHeight);
+    context.lineTo(x, centerY + tickHeight);
+    context.stroke();
+  }
+
+  for (let lane = 0; lane < 3; lane += 1) {
+    const y = centerY + (lane - 1) * radius * 0.18;
+    context.strokeStyle = withAlpha(veilColor, 0.16);
+    context.beginPath();
+    context.moveTo(centerX - radius * 0.78, y);
+    context.lineTo(centerX + radius * 0.78, y);
+    context.stroke();
+
+    for (let segment = 0; segment < 7; segment += 1) {
+      const progress = (timeSeconds * 2.9 + lane * 0.13 + segment * 0.19) % 1;
+      const fade = 1 - Math.abs(progress - 0.5) * 1.8;
+      const x = centerX - radius * 0.76 + progress * radius * 1.52;
+      const length = radius * (0.07 + ((segment + lane) % 3) * 0.035);
+      context.strokeStyle = withAlpha(particleColor, Math.max(0.08, 0.15 + fade * 0.28));
+      context.beginPath();
+      context.moveTo(x, y);
+      context.lineTo(Math.min(centerX + radius * 0.78, x + length), y);
+      context.stroke();
+    }
+  }
+
+  const scan = (timeSeconds * 3.35) % 1;
+  const scanX = centerX - radius * 0.82 + scan * radius * 1.64;
+  const beam = context.createLinearGradient(scanX, centerY - radius * 0.38, scanX, centerY + radius * 0.38);
+  beam.addColorStop(0, withAlpha(particleColor, 0));
+  beam.addColorStop(0.5, withAlpha(particleColor, 0.38));
+  beam.addColorStop(1, withAlpha(particleColor, 0));
+  context.strokeStyle = beam;
+  context.lineWidth = ratio * 1.4;
+  context.beginPath();
+  context.moveTo(scanX, centerY - radius * 0.38);
+  context.lineTo(scanX, centerY + radius * 0.38);
+  context.stroke();
+}
+
+function drawSpeakingWave(
+  context: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  radius: number,
+  ratio: number,
+  timeSeconds: number,
+  particleColor: string,
+  veilColor: string,
+): void {
+  context.lineWidth = ratio;
+  for (let band = -2; band <= 2; band += 1) {
+    const y = centerY + band * radius * 0.14;
+    const amplitude = radius * (0.018 + Math.abs(band) * 0.006);
+    context.strokeStyle = withAlpha(band === 0 ? particleColor : veilColor, band === 0 ? 0.5 : 0.26);
+    context.beginPath();
+    for (let step = 0; step <= 48; step += 1) {
+      const t = step / 48;
+      const x = centerX - radius * 0.82 + t * radius * 1.64;
+      const wave = Math.sin(t * Math.PI * 7 + timeSeconds * 9.2 + band) * amplitude;
+      if (step === 0) {
+        context.moveTo(x, y + wave);
+      } else {
+        context.lineTo(x, y + wave);
+      }
+    }
     context.stroke();
   }
 }
@@ -334,11 +484,11 @@ function drawListeningSweep(
   centerY: number,
   radius: number,
   ratio: number,
-  frame: number,
+  timeSeconds: number,
   particleColor: string,
   veilColor: string,
 ): void {
-  const sweep = frame * 0.018;
+  const sweep = timeSeconds * 4.8;
   context.lineWidth = ratio;
   context.strokeStyle = withAlpha(particleColor, 0.34);
   for (let ring = 0; ring < 3; ring += 1) {
@@ -371,6 +521,21 @@ function drawListeningSweep(
     );
     context.fill();
   }
+}
+
+function interpolateMotion(current: CoreMotion, target: CoreMotion, amount: number): CoreMotion {
+  return {
+    energy: lerp(current.energy, target.energy, amount),
+    rotation: lerp(current.rotation, target.rotation, amount),
+    scale: lerp(current.scale, target.scale, amount),
+    speed: lerp(current.speed, target.speed, amount),
+    surface: lerp(current.surface, target.surface, amount),
+    tilt: lerp(current.tilt, target.tilt, amount),
+  };
+}
+
+function lerp(current: number, target: number, amount: number): number {
+  return current + (target - current) * amount;
 }
 
 function makeParticles(): Particle[] {

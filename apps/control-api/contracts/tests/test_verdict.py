@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -52,7 +52,7 @@ from contracts.verdict import (
     iter_nested_field_names,
 )
 
-NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
 
 def gate(name: GateName, status: GateStatus) -> GateResult:
@@ -68,7 +68,7 @@ def gate(name: GateName, status: GateStatus) -> GateResult:
         status=status,
         evidence_source=source,
         tool="ctest 3.28.3",
-        detail="",
+        detail="not run in this test" if status is GateStatus.NOT_RUN else "tool errored" if status is GateStatus.ERROR else "",
     )
 
 
@@ -197,6 +197,38 @@ def test_a_replayed_artifact_may_still_be_recorded():
         detail="Replayed corpus; no live campaign for this run.",
     )
     assert recorded.evidence_source is EvidenceSource.REPLAYED_ARTIFACT
+
+
+@pytest.mark.parametrize("status", [GateStatus.NOT_RUN, GateStatus.ERROR])
+def test_not_run_and_error_gates_must_explain_the_reason(status: GateStatus):
+    with pytest.raises(ValidationError, match="must include a detail reason"):
+        GateResult(
+            name=GateName.RENEWED_FUZZING,
+            status=status,
+            evidence_source=EvidenceSource.REPLAYED_ARTIFACT,
+            detail="",
+        )
+
+
+def test_no_score_shaped_field_is_reachable_from_the_verdict_record():
+    names = set(iter_nested_field_names(VerificationRecord))
+    offenders = {
+        name
+        for name in names
+        if any(
+            token in name.lower()
+            for token in (
+                "confidence",
+                "score",
+                "probability",
+                "likelihood",
+                "certainty",
+                "rating",
+                "rank",
+            )
+        )
+    }
+    assert not offenders, f"score-shaped fields on the verdict path: {offenders}"
 
 
 def test_a_finding_must_declare_how_it_was_discovered():

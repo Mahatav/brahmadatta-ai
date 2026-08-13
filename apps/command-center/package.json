@@ -9,9 +9,11 @@
   "scripts": {
     "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev",
     "generate:api": "openapi-typescript ../../packages/schemas/openapi.json -o src/lib/api/schema.d.ts",
+    "check:ai-core": "node scripts/check-ai-core-motion.mjs",
     "check:api": "node scripts/check-generated-api-types.mjs",
+    "check:local-intake": "node scripts/check-local-repository-intake.mjs",
     "check:security": "node scripts/check-render-safety.mjs",
-    "check": "npm run check:security && npm run check:api && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
+    "check": "npm run check:security && npm run check:ai-core && npm run check:local-intake && npm run check:api && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
     "build": "npm run check && ASTRO_TELEMETRY_DISABLED=1 astro build",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
     "smoke:local": "node scripts/smoke-local-command-center.mjs"

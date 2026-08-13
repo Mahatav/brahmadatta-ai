@@ -8,6 +8,18 @@ from adapters.cpp.fuzzing import parse_libfuzzer_metrics, run_libfuzzer_campaign
 from packages.sandbox.container import ContainerJailPolicy
 
 
+def test_fuzzing_configure_enables_sanitizers() -> None:
+    """D5 gate evidence needs an ASan/UBSan stack, not only libFuzzer coverage."""
+    import inspect
+
+    from adapters.cpp import fuzzing
+
+    source = inspect.getsource(fuzzing.run_libfuzzer_campaign)
+
+    assert "-DPKTCFG_FUZZ=ON" in source
+    assert "-DPKTCFG_SANITIZE=ON" in source
+
+
 def test_parse_libfuzzer_metrics_from_crashing_run() -> None:
     output = """
 INFO: Running with entropic power schedule (0xFF, 100).
@@ -25,7 +37,7 @@ stat::number_of_executed_units: 1088
     assert metrics.crashes_found == 1
     assert metrics.unique_crashes == 1
     assert metrics.corpus_size == 7
-    assert metrics.artifact_paths == ("/workspace/fuzz-artifacts/crash-a90fd31ab2",)
+    assert metrics.artifact_paths == ("fuzz-artifacts/crash-a90fd31ab2",)
     assert metrics.sanitizers == ("address",)
 
 
@@ -41,6 +53,22 @@ def test_parse_libfuzzer_metrics_uses_artifact_directory_listing() -> None:
     assert metrics.coverage == 9
     assert metrics.crashes_found == 2
     assert metrics.unique_crashes == 2
+
+
+def test_parse_libfuzzer_metrics_deduplicates_absolute_and_relative_artifacts() -> None:
+    output = (
+        "SUMMARY: AddressSanitizer: heap-buffer-overflow decode.c:31 in emit_tab\n"
+        "Test unit written to /workspace/fuzz-artifacts/crash-a90fd31ab2\n"
+    )
+    metrics = parse_libfuzzer_metrics(
+        output,
+        corpus_size=3,
+        artifact_paths=("fuzz-artifacts/crash-a90fd31ab2",),
+    )
+
+    assert metrics.crashes_found == 1
+    assert metrics.unique_crashes == 1
+    assert metrics.artifact_paths == ("fuzz-artifacts/crash-a90fd31ab2",)
 
 
 def test_libfuzzer_campaign_requires_a_digest_pinned_image(pktcfg_source: Path) -> None:

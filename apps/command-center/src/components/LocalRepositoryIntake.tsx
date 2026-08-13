@@ -46,6 +46,12 @@ const stackMarkers: Record<string, string> = {
   'go.mod': 'Go',
 };
 
+const directoryInputAttributes: Record<string, string> = {
+  directory: '',
+  mozdirectory: '',
+  webkitdirectory: '',
+};
+
 export function LocalRepositoryIntake() {
   const localRepository = useStore($localRepository);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -57,8 +63,7 @@ export function LocalRepositoryIntake() {
   const canPick = authorized && authorizedBy.trim().length > 0;
 
   useEffect(() => {
-    folderInputRef.current?.setAttribute('webkitdirectory', '');
-    folderInputRef.current?.setAttribute('directory', '');
+    enableDirectoryInput(folderInputRef.current);
 
     fetch('/__local/repository-default')
       .then((response) => response.ok ? response.json() : null)
@@ -99,14 +104,23 @@ export function LocalRepositoryIntake() {
   }
 
   async function chooseRepositoryFromFiles(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
     if (!canPick) {
       setStatus('enter name and confirm authority');
+      input.value = '';
       return;
     }
 
-    const files = event.currentTarget.files;
+    const files = input.files;
     if (!files || files.length === 0) {
       setStatus('folder selection cancelled');
+      return;
+    }
+
+    const selectedFiles = Array.from(files);
+    if (!selectedFiles.some((file) => file.webkitRelativePath)) {
+      setStatus('browser returned files only; use the folder button or dev path scan');
+      input.value = '';
       return;
     }
 
@@ -118,7 +132,7 @@ export function LocalRepositoryIntake() {
       primaryStack: detectStack(scan.detectedFiles),
       ...scan,
     });
-    event.currentTarget.value = '';
+    input.value = '';
   }
 
   async function registerRepository(scan: LocalPathScanResponse) {
@@ -179,8 +193,16 @@ export function LocalRepositoryIntake() {
           [ DEV PATH SCAN ]
         </button>
         <label className="local-folder-input">
-          <span>[ BROWSER FOLDER FALLBACK ]</span>
-          <input ref={folderInputRef} type="file" multiple data-folder-picker="directory" onChange={chooseRepositoryFromFiles} />
+          <span>[ CHOOSE BROWSER FOLDER ]</span>
+          <input
+            {...directoryInputAttributes}
+            ref={folderInputRef}
+            type="file"
+            multiple
+            data-folder-picker="directory"
+            disabled={!canPick}
+            onChange={chooseRepositoryFromFiles}
+          />
         </label>
       </div>
 
@@ -200,11 +222,27 @@ function sanitizeStatus(value: unknown): string {
   return sanitizeDisplayText(value, { fallback: 'local path scan failed', maxLength: 220 });
 }
 
+function enableDirectoryInput(input: HTMLInputElement | null): void {
+  if (!input) {
+    return;
+  }
+
+  input.setAttribute('webkitdirectory', '');
+  input.setAttribute('directory', '');
+  input.setAttribute('mozdirectory', '');
+  input.webkitdirectory = true;
+  input.multiple = true;
+}
+
 function applyScanFile(result: ScanResult, path: string, file: File): void {
+  applyScanFileMetadata(result, path, file.size, file.lastModified);
+}
+
+function applyScanFileMetadata(result: ScanResult, path: string, size: number, lastModified: number): void {
   const basename = path.split('/').at(-1) ?? path;
   result.fileCount += 1;
-  result.totalBytes += file.size;
-  result.manifestLines.push(`${path}:${file.size}:${file.lastModified}`);
+  result.totalBytes += size;
+  result.manifestLines.push(`${path}:${size}:${lastModified}`);
   if (basename in stackMarkers || path === 'src/main.rs' || path.endsWith('.c') || path.endsWith('.cpp')) {
     result.detectedFiles.push(path);
   }

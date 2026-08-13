@@ -1,0 +1,189 @@
+{
+  "build_variant": "ASAN_UBSAN",
+  "duration_seconds": 4.081473833997734,
+  "events": [
+    {
+      "evidence_refs": [
+        "artifact://reproducer/crash-literal-tab.bin"
+      ],
+      "id": "be95306a-876e-4e84-bc9f-a56b3eb5936e",
+      "message": "STRESS_TEST_SKIPPED: fuzzing did not run; stored reproducer replay confirmed 5/5.",
+      "metrics": {
+        "fuzz_executions": 0.0,
+        "replay_attempts": 5.0,
+        "replay_successes": 5.0
+      },
+      "mission_id": "d5-reproducer-gate-2026-08-12",
+      "payload": {
+        "kind": "fuzzing",
+        "report": {
+          "corpus_size": 0,
+          "crashes_found": 0,
+          "engine": "libFuzzer",
+          "executions": 0,
+          "finding_ids": [],
+          "harness": "pktcfg_fuzz_one_input",
+          "mission_id": "d5-reproducer-gate-2026-08-12",
+          "mode": "NOT_RUN",
+          "recorded_at": "2026-08-13T03:46:12.861961+00:00",
+          "replay_source": null,
+          "runtime_seconds": 0.0,
+          "sanitizers": [
+            "address",
+            "undefined"
+          ],
+          "unique_crashes": 0
+        }
+      },
+      "sequence": 1,
+      "severity": "INFO",
+      "stage": "STRESS_TEST",
+      "state": "STRESS_TEST",
+      "status": "SUCCEEDED",
+      "timestamp": "2026-08-13T03:46:12.861961+00:00",
+      "type": "STAGE_COMPLETED"
+    },
+    {
+      "evidence_refs": [
+        "artifact://reproducer/crash-literal-tab.bin"
+      ],
+      "id": "9e708e81-0d12-42a3-a8bc-9ebe9f48021f",
+      "message": "heap buffer overflow in emit_tab (<unknown>)",
+      "metrics": {
+        "replay_successes": 5.0
+      },
+      "mission_id": "d5-reproducer-gate-2026-08-12",
+      "payload": {
+        "finding": {
+          "category": "HEAP_BUFFER_OVERFLOW",
+          "detected_at": "2026-08-13T03:46:12.861961+00:00",
+          "discovery_method": "REPLAYED_REPRODUCER",
+          "fingerprint": "replayed:ADDRESS_SANITIZER:heap-buffer-overflow:emit_tab:c8ef0cbb513a2a52",
+          "id": "e18d7df3-615c-49cc-b30f-c39a8f44a5cb",
+          "location": {
+            "file_path": "<unknown>",
+            "function": "emit_tab",
+            "line": null
+          },
+          "mission_id": "d5-reproducer-gate-2026-08-12",
+          "replay_source": "artifact://reproducer/crash-literal-tab.bin",
+          "reproducible": true,
+          "severity": "CRITICAL",
+          "title": "heap buffer overflow in emit_tab (<unknown>)",
+          "tool": "ADDRESS_SANITIZER"
+        },
+        "kind": "finding"
+      },
+      "sequence": 2,
+      "severity": "CRITICAL",
+      "stage": "STRESS_TEST",
+      "state": "STRESS_TEST",
+      "status": "SUCCEEDED",
+      "timestamp": "2026-08-13T03:46:12.861961+00:00",
+      "type": "FINDING_RECORDED"
+    },
+    {
+      "evidence_refs": [
+        "artifact://reproducer/crash-literal-tab.bin"
+      ],
+      "id": "4d9a7d6c-bfde-411e-8487-6f1b3ed4d733",
+      "message": "Stored reproducer replayed 5/5 with sanitizer confirmation.",
+      "metrics": {
+        "replay_attempts": 5.0,
+        "replay_successes": 5.0
+      },
+      "mission_id": "d5-reproducer-gate-2026-08-12",
+      "payload": {
+        "kind": "reproducer",
+        "reproducer": {
+          "artifact": {
+            "kind": "crash-input",
+            "sha256": "7a61fe76785718f0b94e4d60033b1f4037fa79eb7fd41039895773b91bc9eb5b",
+            "size_bytes": 22,
+            "uri": "artifact://reproducer/crash-literal-tab.bin"
+          },
+          "created_at": "2026-08-13T03:46:12.861961+00:00",
+          "finding_id": "e18d7df3-615c-49cc-b30f-c39a8f44a5cb",
+          "id": "b78b1ed0-20d2-4961-9127-c721ef4c99a5",
+          "minimized": true,
+          "replay_attempts": 5,
+          "replay_successes": 5,
+          "test_command": "./pktcfg_replay crash-literal-tab.bin x5"
+        }
+      },
+      "sequence": 3,
+      "severity": "CRITICAL",
+      "stage": "STRESS_TEST",
+      "state": "STRESS_TEST",
+      "status": "SUCCEEDED",
+      "timestamp": "2026-08-13T03:46:12.861961+00:00",
+      "type": "REPRODUCER_RECORDED"
+    }
+  ],
+  "finding": {
+    "category": "HEAP_BUFFER_OVERFLOW",
+    "detected_at": "2026-08-13T03:46:12.861961+00:00",
+    "discovery_method": "REPLAYED_REPRODUCER",
+    "fingerprint": "replayed:ADDRESS_SANITIZER:heap-buffer-overflow:emit_tab:c8ef0cbb513a2a52",
+    "id": "e18d7df3-615c-49cc-b30f-c39a8f44a5cb",
+    "location": {
+      "file_path": "<unknown>",
+      "function": "emit_tab",
+      "line": null
+    },
+    "mission_id": "d5-reproducer-gate-2026-08-12",
+    "replay_source": "artifact://reproducer/crash-literal-tab.bin",
+    "reproducible": true,
+    "severity": "CRITICAL",
+    "title": "heap buffer overflow in emit_tab (<unknown>)",
+    "tool": "ADDRESS_SANITIZER"
+  },
+  "fuzzing": {
+    "corpus_size": 0,
+    "crashes_found": 0,
+    "engine": "libFuzzer",
+    "executions": 0,
+    "finding_ids": [],
+    "harness": "pktcfg_fuzz_one_input",
+    "mission_id": "d5-reproducer-gate-2026-08-12",
+    "mode": "NOT_RUN",
+    "recorded_at": "2026-08-13T03:46:12.861961+00:00",
+    "replay_source": null,
+    "runtime_seconds": 0.0,
+    "sanitizers": [
+      "address",
+      "undefined"
+    ],
+    "unique_crashes": 0
+  },
+  "gate": {
+    "clean_replay_passed": true,
+    "discovery_method": "REPLAYED_REPRODUCER",
+    "fuzzing_mode": "NOT_RUN",
+    "minimized_reproducer": true,
+    "name": "D5_SANITIZER_REPRODUCER_5_OF_5",
+    "passed": true,
+    "replay_attempts": 5,
+    "replay_successes": 5,
+    "sanitizer_confirmed": true
+  },
+  "mission_id": "d5-reproducer-gate-2026-08-12",
+  "recorded_at": "2026-08-13T03:46:12.861961+00:00",
+  "reproducer": {
+    "artifact": {
+      "kind": "crash-input",
+      "sha256": "7a61fe76785718f0b94e4d60033b1f4037fa79eb7fd41039895773b91bc9eb5b",
+      "size_bytes": 22,
+      "uri": "artifact://reproducer/crash-literal-tab.bin"
+    },
+    "created_at": "2026-08-13T03:46:12.861961+00:00",
+    "finding_id": "e18d7df3-615c-49cc-b30f-c39a8f44a5cb",
+    "id": "b78b1ed0-20d2-4961-9127-c721ef4c99a5",
+    "minimized": true,
+    "replay_attempts": 5,
+    "replay_successes": 5,
+    "test_command": "./pktcfg_replay crash-literal-tab.bin x5"
+  },
+  "schema": "brahmadatta.d4_d5_gate.v1",
+  "source_dir": "/Users/manu/Documents/GitHub/brahmadatta-ai-security-review/demo/repositories/pktcfg"
+}

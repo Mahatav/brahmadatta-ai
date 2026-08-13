@@ -359,16 +359,17 @@ button:disabled {
   content: "";
   position: absolute;
   z-index: -1;
-  inset: 5%;
-  border: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-warning) 48%, transparent);
-  transform: rotate(45deg);
+  inset: 13%;
+  border: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-white) 28%, transparent);
+  border-radius: 50%;
+  transform: scaleY(0.72);
   pointer-events: none;
 }
 
 .core-panel::after {
-  inset: 15%;
-  border-color: color-mix(in srgb, var(--bd-c-white) 32%, transparent);
-  transform: rotate(0deg);
+  inset: 3%;
+  border-color: color-mix(in srgb, var(--bd-c-warning) 24%, transparent);
+  transform: scaleY(0.72) rotate(-14deg);
 }
 
 .core-panel--running {
@@ -403,12 +404,12 @@ button:disabled {
   padding: 0;
   border: 0;
   background:
-    radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--bd-c-warning) 34%, transparent) 0 6%, transparent 26%),
-    radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--bd-c-white) 18%, transparent) 0 14%, transparent 43%),
-    conic-gradient(from 90deg, transparent 0 7%, color-mix(in srgb, var(--bd-c-warning) 22%, transparent) 7% 8%, transparent 8% 23%);
+    radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--bd-c-white) 18%, transparent) 0 8%, transparent 34%),
+    radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--bd-c-warning) 16%, transparent) 0 22%, transparent 56%);
   color: var(--bd-text);
   overflow: hidden;
   isolation: isolate;
+  transition: filter 120ms ease;
 }
 
 .ai-core-button:enabled:hover,
@@ -420,27 +421,30 @@ button:disabled {
 .ai-core-button::after {
   content: "";
   position: absolute;
-  inset: 9%;
-  border: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-warning) 58%, transparent);
+  inset: 12%;
+  border: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-warning) 40%, transparent);
   border-radius: 50%;
-  opacity: 0.42;
+  opacity: 0.28;
   pointer-events: none;
 }
 
 .ai-core-button::after {
-  inset: 17%;
-  border-style: dashed;
-  opacity: 0.38;
-  transform: rotate(24deg) scaleY(0.46);
+  inset: 24%;
+  border-color: color-mix(in srgb, var(--bd-c-white) 30%, transparent);
+  opacity: 0.18;
+  transform: scaleY(0.72);
 }
 
 .ai-core-button--listening::before {
-  opacity: 0.58;
+  opacity: 0.42;
 }
 
-.ai-core-button--transcribing::before,
+.ai-core-button--transcribing::before {
+  opacity: 0.54;
+}
+
 .ai-core-button--speaking::before {
-  opacity: 0.76;
+  opacity: 0.5;
 }
 
 .ai-core-canvas {
@@ -1019,6 +1023,179 @@ h1 {
   gap: var(--bd-space-3);
   align-content: stretch;
   overflow: hidden;
+}
+
+.verdict-compare {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--bd-space-2);
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.verdict-compare > header {
+  display: flex;
+  min-inline-size: 0;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--bd-space-3);
+}
+
+.verdict-compare > header strong {
+  color: var(--bd-text);
+  font-size: var(--bd-type-mono-xs);
+  font-weight: normal;
+  line-height: var(--bd-type-mono-xs-lh);
+  min-inline-size: 0;
+  overflow: hidden;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verdict-compare__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--bd-space-2);
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.candidate-card {
+  display: grid;
+  grid-template-rows: auto minmax(88px, 0.92fr) auto auto;
+  gap: var(--bd-space-2);
+  min-block-size: 0;
+  padding: var(--bd-space-2);
+  border: 1px solid color-mix(in srgb, var(--bd-text-secondary), transparent 58%);
+  background: color-mix(in srgb, var(--bd-bg), transparent 12%);
+  overflow: hidden;
+}
+
+.candidate-card--verified {
+  border-color: color-mix(in srgb, var(--bd-state-verified), transparent 32%);
+}
+
+.candidate-card--rejected {
+  border-color: color-mix(in srgb, var(--bd-state-critical), transparent 28%);
+}
+
+.candidate-card > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--bd-space-2);
+  min-inline-size: 0;
+}
+
+.candidate-card > header span,
+.candidate-card > header small,
+.candidate-card footer,
+.gate-matrix span {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  line-height: var(--bd-type-mono-2xs-lh);
+}
+
+.candidate-card > header strong {
+  font-size: var(--bd-type-mono-xs);
+  font-weight: normal;
+  line-height: var(--bd-type-mono-xs-lh);
+  text-align: end;
+}
+
+.candidate-card > header small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-card__provenance-missing,
+.candidate-card__blocked,
+.candidate-card--rejected > header strong,
+.gate-matrix__row--fail strong,
+.gate-matrix__row--error strong {
+  color: var(--bd-state-critical);
+}
+
+.candidate-card--verified > header strong,
+.gate-matrix__row--pass strong {
+  color: var(--bd-state-verified);
+}
+
+.candidate-card__blocked {
+  display: grid;
+  min-block-size: 100%;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--bd-state-critical), transparent 42%);
+  font-size: var(--bd-type-mono-xs);
+  line-height: var(--bd-type-mono-xs-lh);
+  text-align: center;
+}
+
+.candidate-diff {
+  min-block-size: 0;
+  margin: 0;
+  padding: var(--bd-space-2);
+  border: 1px solid color-mix(in srgb, var(--bd-text-secondary), transparent 68%);
+  color: var(--bd-text);
+  font-size: 11px;
+  line-height: 1.18;
+  white-space: pre-wrap;
+  overflow: hidden;
+}
+
+.gate-matrix {
+  display: grid;
+  gap: 1px;
+  min-block-size: 0;
+}
+
+.gate-matrix__row {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: var(--bd-space-2);
+  align-items: baseline;
+  min-block-size: 20px;
+}
+
+.gate-matrix dt,
+.gate-matrix strong {
+  font-size: var(--bd-type-mono-2xs);
+  font-weight: normal;
+  line-height: var(--bd-type-mono-2xs-lh);
+}
+
+.gate-matrix dd {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: var(--bd-space-2);
+  min-inline-size: 0;
+}
+
+.gate-matrix__row--not_run strong {
+  color: var(--bd-text-secondary);
+}
+
+.gate-matrix span {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-card footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--bd-space-2);
+  min-inline-size: 0;
+}
+
+.candidate-card footer span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mission-panels section,
