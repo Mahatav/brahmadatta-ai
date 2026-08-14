@@ -79,7 +79,11 @@ def make_verification(
             else EvidenceSource.TOOL_EXECUTION
         )
         return GateResult(
-            name=name, status=status, evidence_source=source, tool="ctest 3.28.3"
+            name=name,
+            status=status,
+            evidence_source=source,
+            tool="" if status is GateStatus.NOT_RUN else "ctest 3.28.3",
+            detail="not run in this state-machine fixture" if status is GateStatus.NOT_RUN else "",
         )
 
     return VerificationRecord(
