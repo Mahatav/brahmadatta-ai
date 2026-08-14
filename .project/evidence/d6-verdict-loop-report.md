@@ -8,7 +8,7 @@ Recorded at: `2026-08-13T04:07:24.185927+00:00`
 - Name: `D6_TWO_VERDICTS_FROM_ONE_ACTION_TWICE`
 - Consecutive runs: `2`
 - Passed: `True`
-- Model generation attempts: `0 of 10 - blocked - codellama:7b-instruct is not present in local Ollama store`
+- Model generation attempts: `10 of 10 - pass - 10 of 10 live CodeLlama attempts returned schema-valid patch candidates (.project/evidence/d6-model-generation-attempts.json)`
 
 ## Run 1
 

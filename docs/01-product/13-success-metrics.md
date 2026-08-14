@@ -10,20 +10,22 @@
 
 ## Purpose
 
-Define and operationalize success metrics for the Brahmadatta AI competition MVP on rented GPUs.
+Define and operationalize success metrics for the Brahmadatta AI competition MVP. Rows below
+are targets until the benchmark case set in `.project/evidence/d8-benchmark-case-set.json`
+has a measured run attached.
 
-| Metric | MVP target |
-|---|---:|
-| Confirmed-finding precision on chosen benchmarks | ≥80% |
-| Reproducer elimination for accepted patches | 100% |
-| Regression preservation for accepted patches | 100% |
-| Verified patch rate on selected solvable cases | ≥50% |
-| Median time to first confirmed finding | ≤30 min |
-| Median confirmation-to-verdict time | ≤45 min |
-| Tier 3 escalation rate | ≤30% |
-| Complete evidence reports | 100% |
-| Unauthorized target network calls | 0 |
-| Unreleased GPU idle time after run | <10 min |
+| Metric | MVP target | Publication status |
+|---|---:|---|
+| Confirmed-finding precision on chosen benchmarks | ≥80% | Target — not measured |
+| Reproducer elimination for accepted patches | 100% | Enumerated on BD-001-A; not a percentage benchmark |
+| Regression preservation for accepted patches | 100% | Enumerated on BD-001-A; not a percentage benchmark |
+| Verified patch rate on selected solvable cases | ≥50% | Target — not measured |
+| Median time to first confirmed finding | ≤30 min | Target — not measured |
+| Median confirmation-to-verdict time | ≤45 min | Target — not measured |
+| Tier 3 escalation rate | ≤30% | Not applicable to the CPU/local-model MVP cut |
+| Complete evidence reports | 100% | Target — not measured |
+| Unauthorized target network calls | 0 | Target — guarded by topology tests; full benchmark pending |
+| Unreleased GPU idle time after run | <10 min | Not applicable to the CPU/local-model MVP cut |
 
 ---
 

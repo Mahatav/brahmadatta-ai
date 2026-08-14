@@ -1,0 +1,11 @@
+Copyright (c) 2026 Mahatav Arora.
+
+All rights reserved.
+
+No license is granted to use, copy, modify, distribute, sublicense, or sell this software
+or its documentation except by explicit written permission from the copyright holder.
+
+The `demo/repositories/` directory contains deliberately vulnerable fixtures for authorized
+security testing and competition demonstration. Those fixtures are provided only as part of
+this repository's documented test and evidence workflow; they are not production software
+and are not offered as reusable libraries.

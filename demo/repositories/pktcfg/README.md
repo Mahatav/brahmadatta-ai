@@ -64,11 +64,11 @@ a libFuzzer harness (`fuzz/pktcfg_fuzz.c`) and instruments the library for cover
 needs an LLVM clang that ships libFuzzer, which Apple clang does not. Seeds for it are in
 `corpus/`.
 
-## The two candidate patches
+## The benchmark candidate patches
 
 The point of this target is not the crash. It is step 7 of the minimum viable demo, where
-a plausible-looking patch has to be **rejected** by the gates rather than accepted. Both
-candidates are checked in under `patches/`, and both are one hunk in one file.
+a plausible-looking patch has to be **rejected** by the gates rather than accepted. The
+candidate fixtures are checked in under `patches/`.
 
 **`patches/candidate-a-correct-bounds-fix.patch` — the correct fix.** Teaches
 `pkt_decoded_length()` that a literal tab expands, so the allocation matches what gets
@@ -78,6 +78,14 @@ written. Crash gone, all 8 tests still pass.
 `emit_tab()` to write one space instead of four. This is what the ASan stack trace points
 at, it is minimal, and it does eliminate the crash — by deleting the feature that was
 overflowing. Crash gone, and `test_tab_expansion` fails.
+
+**`patches/candidate-p-policy-rejected-out-of-scope.patch` — the policy refusal.** Touches
+`README.md` instead of the source allowlist. It is intentionally applyable, but the policy
+gate must reject it before compile or verification work starts.
+
+**`patches/candidate-c-compile-failure.patch` — the compile failure.** Changes one allowed
+source file and stays tiny, but introduces an unbalanced block. The policy gate should pass
+it and the compile gate should reject it without marking the mission itself failed.
 
 ### The test that catches the bad patch
 

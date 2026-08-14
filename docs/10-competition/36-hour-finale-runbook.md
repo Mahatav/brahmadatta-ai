@@ -8,6 +8,9 @@ with each mode. They live in [`../09-company/10-fallback-ladder.md`](../09-compa
 
 - Verify the frozen release, container images, tool cache, model artifacts, demo repositories, and fallback recording.
 - Work the fallback-ladder pre-flight (§7): isolation egress smoke check, fuzz build, one #82 transcript resolved by hash, SSE through the finale stack, and the #49 capture played offline. Isolation mode is set here and does not change after hour 3.
+- Launch the demo browser at `http://localhost:8080/` with a clean profile: no extensions,
+  no HTTPS-only upgrade mode, and no saved state. A certificate warning is a stop-the-line
+  configuration bug, not part of the script.
 - Confirm the command-center presentation mode.
 - Confirm that GPU teardown can be triggered from both UI and command line.
 

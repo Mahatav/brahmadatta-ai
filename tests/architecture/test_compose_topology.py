@@ -123,6 +123,18 @@ def test_finale_exposes_only_the_ingress() -> None:
     )
 
 
+def test_finale_stage_origin_is_loopback_http_only() -> None:
+    """Issue #92: the stage browser must not hit a TLS warning on localhost."""
+    doc = _load(FINALE)
+    nginx = (doc.get("services") or {}).get("nginx") or {}
+    ports = nginx.get("ports") or []
+    volumes = nginx.get("volumes") or []
+
+    assert ports == ["127.0.0.1:8080:8080"]
+    assert not any("8443" in str(port) for port in ports)
+    assert not any("certs" in str(volume) for volume in volumes)
+
+
 def test_dev_exposes_only_the_ingress_and_reviewed_exceptions() -> None:
     doc = _load(DEV)
     routable = _services_on_routable(doc)

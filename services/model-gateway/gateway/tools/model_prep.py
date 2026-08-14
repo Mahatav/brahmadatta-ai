@@ -27,9 +27,15 @@ from gateway.ollama import (
     CODELLAMA_REVISION,
     DEFAULT_CODELLAMA_MODEL,
     DEFAULT_OLLAMA_ENDPOINT,
+    OllamaCodeLlamaBackend,
     patch_candidate_from_model_text,
 )
-from gateway.schemas import RESPONSE_SCHEMA_VERSION, GenerationRequest, PatchCandidate
+from gateway.schemas import (
+    RESPONSE_SCHEMA_VERSION,
+    GenerationRequest,
+    PatchCandidate,
+    sha256_of,
+)
 from gateway.service import build_gateway
 from gateway.settings import GatewayMode, GatewaySettings
 
@@ -431,6 +437,108 @@ def _cmd_measure(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_attempts(args: argparse.Namespace) -> int:
+    service_names = _service_names(args)
+    request = _request_from_args(args)
+    threshold = args.success_threshold
+    attempts: list[dict[str, object]] = []
+    successes = 0
+
+    if args.backend == "ollama":
+        backend = OllamaCodeLlamaBackend(
+            endpoint=args.endpoint,
+            model_name=args.model,
+            model_revision=args.revision,
+            model_artifact_sha256=args.artifact_sha256,
+            timeout_sec=args.timeout_sec,
+        )
+    else:
+        backend = FakeMeasuredBackend(
+            wall_time_ms=args.fake_wall_time_ms,
+            output_tokens=args.fake_output_tokens,
+        )
+
+    for index in range(1, args.attempts + 1):
+        attempt_seed = None if request.seed is None else request.seed + index - 1
+        attempt_request = request.model_copy(update={"seed": attempt_seed})
+        started = time.perf_counter_ns()
+        try:
+            candidate, wall_time_ms, output_tokens = backend.generate(attempt_request)
+            policy_status = "SCHEMA_VALID"
+            success = True
+            error = ""
+        except GatewayError as exc:
+            candidate = None
+            wall_time_ms = int((time.perf_counter_ns() - started) / 1_000_000)
+            output_tokens = None
+            policy_status = "REJECTED_BY_SCHEMA"
+            success = False
+            error = str(exc)
+
+        if success:
+            successes += 1
+
+        attempts.append(
+            {
+                "attempt": index,
+                "seed": attempt_seed,
+                "success": success,
+                "policy_status": policy_status,
+                "compile_status": "NOT_RUN",
+                "compile_detail": (
+                    "This command records live model schema/policy viability only; "
+                    "the deterministic D6 gate matrix records compile/regression verdicts."
+                ),
+                "wall_time_ms": wall_time_ms,
+                "output_tokens": output_tokens,
+                "candidate_sha256": sha256_of(candidate.model_dump(mode="json"))
+                if candidate is not None
+                else "",
+                "touched_files": list(candidate.touched_files)
+                if candidate is not None
+                else [],
+                "error": error,
+            }
+        )
+
+    passed = successes >= threshold
+    payload = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "kind": "model-generation-attempts",
+        "recorded_at": _now(),
+        "backend": args.backend,
+        "serving": _local_endpoint_record(args.endpoint, service_names),
+        "model": {
+            "name": args.model if args.backend == "ollama" else backend.model_name,
+            "revision": args.revision if args.backend == "ollama" else backend.model_revision,
+            "artifact_sha256": args.artifact_sha256
+            if args.backend == "ollama"
+            else backend.model_artifact_sha256,
+        },
+        "prompt": {
+            "prompt_version": request.prompt_version,
+            "prompt_sha256": request.prompt_sha256,
+            "response_schema_version": RESPONSE_SCHEMA_VERSION,
+            "max_output_tokens": request.max_output_tokens,
+            "temperature": request.temperature,
+            "seed": request.seed,
+        },
+        "gate": {
+            "required_attempts": args.attempts,
+            "success_threshold": threshold,
+            "schema_valid_successes": successes,
+            "passed": passed,
+            "status": (
+                f"{successes} of {args.attempts} attempts returned schema-valid patch candidates"
+            ),
+        },
+        "attempts": attempts,
+        "hardware": _hardware_snapshot(),
+    }
+    _write_json(payload, args.output)
+    return EXIT_OK if passed else EXIT_BLOCKED
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     service_names = _service_names(args)
     payload: dict[str, object] = {
@@ -573,6 +681,25 @@ def build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--fake-first-token-ms", type=int, default=250)
     measure.add_argument("--fake-wall-time-ms", type=int, default=4200)
     measure.add_argument("--fake-output-tokens", type=int, default=128)
+    attempts = sub.add_parser("attempts", help="record D6 live model patch-generation attempts")
+    attempts.add_argument("--backend", choices=["fake", "ollama"], required=True)
+    attempts.add_argument("--attempts", type=int, default=10)
+    attempts.add_argument("--success-threshold", type=int, default=3)
+    attempts.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    attempts.add_argument("--service-name", action="append", default=[])
+    attempts.add_argument("--output", default="-")
+    attempts.add_argument("--mission-id", default="d6-model-attempts")
+    attempts.add_argument("--prompt-file", default="")
+    attempts.add_argument("--prompt-version", default="patch-prompt/3")
+    attempts.add_argument("--max-output-tokens", type=int, default=1024)
+    attempts.add_argument("--temperature", type=float, default=0.0)
+    attempts.add_argument("--seed", type=int)
+    attempts.add_argument("--model", default=DEFAULT_CODELLAMA_MODEL)
+    attempts.add_argument("--revision", default=CODELLAMA_REVISION)
+    attempts.add_argument("--artifact-sha256", default="")
+    attempts.add_argument("--timeout-sec", type=float, default=300.0)
+    attempts.add_argument("--fake-wall-time-ms", type=int, default=4200)
+    attempts.add_argument("--fake-output-tokens", type=int, default=128)
     plan = sub.add_parser("plan", help="print the real operator command shape")
     plan.add_argument("--evidence-dir", default="evidence/model-prep")
     return parser
@@ -586,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             "check-serving": _cmd_check_serving,
             "doctor": _cmd_doctor,
             "measure": _cmd_measure,
+            "attempts": _cmd_attempts,
             "plan": _cmd_plan,
         }[args.command](args)
     except ExternalInferenceBlockedError as exc:

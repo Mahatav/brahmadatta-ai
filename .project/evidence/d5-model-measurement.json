@@ -1,0 +1,48 @@
+{
+  "backend": "ollama-codellama-stream",
+  "hardware": {
+    "cpu_count": 10,
+    "machine": "arm64",
+    "memory_bytes": 17179869184,
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "kind": "model-measurement",
+  "measurement": {
+    "cold_start_ms": null,
+    "first_token_ms": 8585,
+    "mode": "local Ollama CodeLlama streaming endpoint",
+    "observed_output_chars": 460,
+    "ollama_eval_count": 127,
+    "ollama_eval_duration_ns": 7496135629,
+    "output_stream_chunks": 125,
+    "parse_error": "Ollama CodeLlama response contained malformed JSON.",
+    "parsed_patch_candidate": false,
+    "sample_count": 1,
+    "throughput_stream_chunks_per_sec": 7.755,
+    "wall_time_ms": 16119
+  },
+  "model": {
+    "artifact_sha256": "3a43f93b78ec50f7c4e4dc8bd1cb3fff5a900e7d574c51a6f7495e48486e0dac",
+    "name": "codellama:7b-instruct",
+    "revision": "ollama-library/codellama"
+  },
+  "prompt": {
+    "max_output_tokens": 192,
+    "prompt_sha256": "5c91f3c81457941b2cc5acbbf1e3bc47716eeece955d241c9d54f1764fd039a2",
+    "prompt_version": "patch-prompt/3",
+    "response_schema_version": "patch-candidate/1",
+    "seed": 45,
+    "temperature": 0.0
+  },
+  "recorded_at": "2026-08-14T16:57:36.265577+00:00",
+  "schema_version": "model-prep/1",
+  "serving": {
+    "endpoint": "http://127.0.0.1:11434/api",
+    "local_only": true,
+    "policy_reason": "loopback or private address (127.0.0.0/8)",
+    "policy_rule": "allowed-network",
+    "service_names": []
+  }
+}

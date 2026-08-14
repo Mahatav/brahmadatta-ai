@@ -1,0 +1,12 @@
+diff --git a/src/decode.c b/src/decode.c
+index 0180959..cb6de13 100644
+--- a/src/decode.c
++++ b/src/decode.c
+@@ -74,6 +74,7 @@ size_t pkt_decoded_length(const uint8_t *src, size_t len, int escaped)
+ 
+         /* Every remaining byte is copied through as-is. */
+         need += 1;
++        if (c == '\t') {
+         i += 1;
+     }
+ 
