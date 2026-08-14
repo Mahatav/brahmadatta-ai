@@ -42,7 +42,7 @@ DEV_ROUTABLE_EXCEPTIONS = {"command-center-deps"}
 
 # Services that must never be routable in any profile. These are the ones that hold
 # repository content, assemble prompts, or hold credentials.
-MUST_NEVER_BE_ROUTABLE = {"control-api", "worker", "db", "redis"}
+MUST_NEVER_BE_ROUTABLE = {"control-api", "worker", "db", "redis", "model-host"}
 
 SNAPSHOT_BODY_LIMIT_MIB = 512
 SNAPSHOT_TMPFS_MIN_MIB = 640
@@ -64,7 +64,7 @@ def _routable_networks(doc: dict) -> set[str]:
     return {
         name
         for name, cfg in (doc.get("networks") or {}).items()
-        if not (cfg or {}).get("internal") is True
+        if (cfg or {}).get("internal") is not True
     }
 
 
@@ -176,6 +176,18 @@ def test_snapshot_buffer_tmpfs_is_identical_across_profiles() -> None:
         for service_name in ("nginx", "control-api")
     }
     assert len(set(sizes.values())) == 1, f"snapshot tmpfs sizing drifted: {sizes}"
+
+
+@pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
+def test_model_host_is_internal_only_and_memory_capped(path: Path) -> None:
+    doc = _load(path)
+    model_host = (doc.get("services") or {}).get("model-host")
+    assert model_host is not None, f"{path.name} has no model-host service"
+    assert model_host.get("profiles") == ["model"]
+    assert model_host.get("mem_limit"), f"{path.name} model-host has no hard mem_limit"
+    assert model_host.get("networks") == ["backend"]
+    assert "external" not in model_host.get("networks", [])
+    assert "ollama/ollama@sha256:" in model_host.get("image", "")
 
 
 def test_the_finale_profile_has_no_source_mounts_into_control_api() -> None:

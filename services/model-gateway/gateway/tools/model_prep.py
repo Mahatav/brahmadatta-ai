@@ -19,10 +19,16 @@ from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
 
+from gateway.client import get_json, iter_response_lines
 from gateway.endpoint_policy import assert_local_inference_endpoint, classify
 from gateway.errors import ExternalInferenceBlockedError, GatewayError
+from gateway.ollama import (
+    CODELLAMA_REVISION,
+    DEFAULT_CODELLAMA_MODEL,
+    DEFAULT_OLLAMA_ENDPOINT,
+    patch_candidate_from_model_text,
+)
 from gateway.schemas import RESPONSE_SCHEMA_VERSION, GenerationRequest, PatchCandidate
 from gateway.service import build_gateway
 from gateway.settings import GatewayMode, GatewaySettings
@@ -225,6 +231,14 @@ def _delta_text(event: dict[str, Any]) -> str:
     return text if isinstance(text, str) else ""
 
 
+def _ollama_delta_text(event: dict[str, Any]) -> str:
+    message = event.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), str):
+        return message["content"]
+    response = event.get("response")
+    return response if isinstance(response, str) else ""
+
+
 def _stream_openai_compatible(args: argparse.Namespace) -> dict[str, object]:
     service_names = _service_names(args)
     request = _request_from_args(args)
@@ -240,30 +254,22 @@ def _stream_openai_compatible(args: argparse.Namespace) -> dict[str, object]:
     first_token_ms: int | None = None
     chunks = 0
     observed_chars = 0
-    http_request = Request(  # noqa: S310 - endpoint was accepted by gateway policy above.
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(http_request, timeout=args.timeout_sec) as response:  # noqa: S310
-        for raw_line in response:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if data == "[DONE]":
-                break
-            try:
-                text = _delta_text(json.loads(data))
-            except json.JSONDecodeError:
-                continue
-            if not text:
-                continue
-            if first_token_ms is None:
-                first_token_ms = int((time.perf_counter_ns() - started) / 1_000_000)
-            chunks += 1
-            observed_chars += len(text)
+    for line in iter_response_lines(url, payload, args.timeout_sec):
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if data == "[DONE]":
+            break
+        try:
+            text = _delta_text(json.loads(data))
+        except json.JSONDecodeError:
+            continue
+        if not text:
+            continue
+        if first_token_ms is None:
+            first_token_ms = int((time.perf_counter_ns() - started) / 1_000_000)
+        chunks += 1
+        observed_chars += len(text)
     wall_time_ms = int((time.perf_counter_ns() - started) / 1_000_000)
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -300,6 +306,101 @@ def _stream_openai_compatible(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _stream_ollama(args: argparse.Namespace) -> dict[str, object]:
+    service_names = _service_names(args)
+    request = _request_from_args(args)
+    url = urljoin(args.endpoint.rstrip("/") + "/", "chat")
+    payload = {
+        "model": args.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Return only JSON with keys diff, rationale, touched_files, "
+                    "confidence. diff must be a unified diff."
+                ),
+            },
+            {"role": "user", "content": request.prompt},
+        ],
+        "stream": True,
+        "options": {
+            "temperature": request.temperature,
+            "num_predict": request.max_output_tokens,
+        },
+    }
+    if request.seed is not None:
+        payload["options"]["seed"] = request.seed
+
+    started = time.perf_counter_ns()
+    first_token_ms: int | None = None
+    chunks = 0
+    observed_chars = 0
+    content_parts: list[str] = []
+    final_event: dict[str, Any] = {}
+    for line in iter_response_lines(url, payload, args.timeout_sec):
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        final_event = event if isinstance(event, dict) else final_event
+        text = _ollama_delta_text(final_event)
+        if not text:
+            continue
+        if first_token_ms is None:
+            first_token_ms = int((time.perf_counter_ns() - started) / 1_000_000)
+        chunks += 1
+        observed_chars += len(text)
+        content_parts.append(text)
+    wall_time_ms = int((time.perf_counter_ns() - started) / 1_000_000)
+    parsed_candidate = False
+    parse_error = ""
+    if content_parts:
+        try:
+            patch_candidate_from_model_text("".join(content_parts))
+            parsed_candidate = True
+        except GatewayError as exc:
+            parse_error = str(exc)
+    return {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "kind": "model-measurement",
+        "recorded_at": _now(),
+        "backend": "ollama-codellama-stream",
+        "serving": _local_endpoint_record(args.endpoint, service_names),
+        "model": {
+            "name": args.model,
+            "revision": args.revision,
+            "artifact_sha256": args.artifact_sha256,
+        },
+        "prompt": {
+            "prompt_version": request.prompt_version,
+            "prompt_sha256": request.prompt_sha256,
+            "response_schema_version": RESPONSE_SCHEMA_VERSION,
+            "max_output_tokens": request.max_output_tokens,
+            "temperature": request.temperature,
+            "seed": request.seed,
+        },
+        "measurement": {
+            "cold_start_ms": None,
+            "first_token_ms": first_token_ms,
+            "wall_time_ms": wall_time_ms,
+            "output_stream_chunks": chunks,
+            "observed_output_chars": observed_chars,
+            "throughput_stream_chunks_per_sec": round(chunks / (wall_time_ms / 1000), 3)
+            if wall_time_ms
+            else None,
+            "ollama_eval_count": final_event.get("eval_count"),
+            "ollama_eval_duration_ns": final_event.get("eval_duration"),
+            "parsed_patch_candidate": parsed_candidate,
+            "parse_error": parse_error,
+            "sample_count": 1,
+            "mode": "local Ollama CodeLlama streaming endpoint",
+        },
+        "hardware": _hardware_snapshot(),
+    }
+
+
 def _cmd_hash_artifact(args: argparse.Namespace) -> int:
     _write_json(_artifact_payload(args), args.output)
     return EXIT_OK
@@ -319,7 +420,72 @@ def _cmd_check_serving(args: argparse.Namespace) -> int:
 
 
 def _cmd_measure(args: argparse.Namespace) -> int:
-    payload = _fake_measure(args) if args.backend == "fake" else _stream_openai_compatible(args)
+    payload = (
+        _fake_measure(args)
+        if args.backend == "fake"
+        else _stream_ollama(args)
+        if args.backend == "ollama"
+        else _stream_openai_compatible(args)
+    )
+    _write_json(payload, args.output)
+    return EXIT_OK
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    service_names = _service_names(args)
+    payload: dict[str, object] = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "kind": "ollama-codellama-doctor",
+        "recorded_at": _now(),
+        "backend": "ollama",
+        "model": {
+            "name": args.model,
+            "revision": args.revision,
+            "artifact_sha256": args.artifact_sha256,
+        },
+        "serving": _local_endpoint_record(args.endpoint, service_names),
+        "checks": {
+            "endpoint_reachable": False,
+            "model_present": False,
+            "schema_probe_passed": False,
+        },
+        "status": "unreachable",
+        "message": "",
+        "degraded_state": {
+            "active": True,
+            "tier": "deterministic",
+            "reason": "local CodeLlama is not proven reachable",
+        },
+        "hardware": _hardware_snapshot(),
+    }
+    try:
+        tags = get_json(urljoin(args.endpoint.rstrip("/") + "/", "tags"), args.timeout_sec)
+    except (GatewayError, OSError, URLError) as exc:
+        payload["message"] = str(exc)
+        _write_json(payload, args.output)
+        return EXIT_BLOCKED
+
+    models = _ollama_model_names(tags)
+    present = args.model in models
+    payload["checks"] = {
+        "endpoint_reachable": True,
+        "model_present": present,
+        "schema_probe_passed": False,
+    }
+    payload["ollama_models"] = models
+    if not present:
+        payload["status"] = "model-missing"
+        payload["message"] = f"{args.model} is not present in the local Ollama store"
+        _write_json(payload, args.output)
+        return EXIT_BLOCKED
+
+    payload["status"] = "ready"
+    payload["message"] = f"{args.model} is present on the local Ollama endpoint"
+    payload["degraded_state"] = {
+        "active": False,
+        "tier": "local-codellama",
+        "reason": "",
+    }
     _write_json(payload, args.output)
     return EXIT_OK
 
@@ -333,34 +499,29 @@ def _cmd_plan(args: argparse.Namespace) -> int:
                 "",
                 "No command below fetches a model unless the operator runs it explicitly.",
                 "",
-                "1. Fetch the chosen model artifact into a local cache:",
-                "   huggingface-cli download <repo/model> <file.gguf> "
-                "--revision <pinned-revision> --local-dir .model-cache/<model>",
+                "1. Fetch the chosen CodeLlama model into Ollama's local store:",
+                f"   ollama pull {DEFAULT_CODELLAMA_MODEL}",
                 "",
-                "2. If the source is not already quantized, quantize locally:",
-                "   ./llama.cpp/llama-quantize <source.gguf> <target-q4_k_m.gguf> q4_K_M",
-                "",
-                "3. Record the pinned artifact hash:",
-                f"   python -m gateway.tools.model_prep hash-artifact --artifact "
-                f".model-cache/<model>/<target-q4_k_m.gguf> --model-name <model> "
-                f"--revision <pinned-revision> --quantization q4_K_M --output "
-                f"{root}/model-artifact.json",
-                "",
-                "4. Serve locally only, then prove the endpoint boundary:",
-                "   ./llama.cpp/llama-server -m .model-cache/<model>/<target-q4_k_m.gguf> "
-                "--host 127.0.0.1 --port 8080",
+                "2. Serve locally only, then prove the endpoint boundary:",
+                "   ollama serve  # default API: http://127.0.0.1:11434/api",
+                "   python -m gateway.tools.model_prep doctor "
+                f"--endpoint {DEFAULT_OLLAMA_ENDPOINT} --output {root}/model-doctor.json",
                 "   python -m gateway.tools.model_prep check-serving --endpoint "
-                f"http://127.0.0.1:8080/v1 --output {root}/model-serving.json",
+                f"{DEFAULT_OLLAMA_ENDPOINT} --output {root}/model-serving.json",
                 "",
-                "5. Measure first-token latency and throughput through the local endpoint:",
-                "   python -m gateway.tools.model_prep measure --backend openai-compatible "
-                "--endpoint http://127.0.0.1:8080/v1 --model <model> "
-                "--revision <pinned-revision> --artifact-sha256 <sha256> "
+                "3. Measure first-token latency and schema-fit through local Ollama:",
+                "   python -m gateway.tools.model_prep measure --backend ollama "
+                f"--endpoint {DEFAULT_OLLAMA_ENDPOINT} --model {DEFAULT_CODELLAMA_MODEL} "
+                f"--revision {CODELLAMA_REVISION} "
                 f"--prompt-file prompts/patch-generation.txt --prompt-version patch-prompt/3 "
                 f"--output {root}/model-measurement.json",
                 "",
+                "Optional GGUF artifact evidence for a manually managed model file:",
+                f"   python -m gateway.tools.model_prep hash-artifact --artifact <model.gguf> "
+                f"--model-name {DEFAULT_CODELLAMA_MODEL} --revision {CODELLAMA_REVISION} "
+                f"--quantization <ollama-local> --output {root}/model-artifact.json",
+                "",
                 "Expected evidence files:",
-                f"   {root}/model-artifact.json",
                 f"   {root}/model-serving.json",
                 f"   {root}/model-measurement.json",
             ]
@@ -385,9 +546,17 @@ def build_parser() -> argparse.ArgumentParser:
     serving.add_argument("--endpoint", required=True)
     serving.add_argument("--service-name", action="append", default=[])
     serving.add_argument("--output", default="-")
+    doctor = sub.add_parser("doctor", help="prove Ollama CodeLlama is local, reachable, and present")
+    doctor.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    doctor.add_argument("--service-name", action="append", default=[])
+    doctor.add_argument("--model", default=DEFAULT_CODELLAMA_MODEL)
+    doctor.add_argument("--revision", default=CODELLAMA_REVISION)
+    doctor.add_argument("--artifact-sha256", default="")
+    doctor.add_argument("--timeout-sec", type=float, default=5.0)
+    doctor.add_argument("--output", default="-")
     measure = sub.add_parser("measure", help="measure local backend latency evidence")
-    measure.add_argument("--backend", choices=["fake", "openai-compatible"], required=True)
-    measure.add_argument("--endpoint", default="http://127.0.0.1:8080/v1")
+    measure.add_argument("--backend", choices=["fake", "openai-compatible", "ollama"], required=True)
+    measure.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
     measure.add_argument("--service-name", action="append", default=[])
     measure.add_argument("--output", default="-")
     measure.add_argument("--mission-id", default="model-prep")
@@ -396,8 +565,8 @@ def build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--max-output-tokens", type=int, default=1024)
     measure.add_argument("--temperature", type=float, default=0.0)
     measure.add_argument("--seed", type=int)
-    measure.add_argument("--model", default="local-code-model")
-    measure.add_argument("--revision", default="")
+    measure.add_argument("--model", default=DEFAULT_CODELLAMA_MODEL)
+    measure.add_argument("--revision", default=CODELLAMA_REVISION)
     measure.add_argument("--artifact-sha256", default="")
     measure.add_argument("--timeout-sec", type=float, default=300.0)
     measure.add_argument("--fake-cold-start-ms", type=int, default=0)
@@ -415,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         return {
             "hash-artifact": _cmd_hash_artifact,
             "check-serving": _cmd_check_serving,
+            "doctor": _cmd_doctor,
             "measure": _cmd_measure,
             "plan": _cmd_plan,
         }[args.command](args)
@@ -424,6 +594,21 @@ def main(argv: list[str] | None = None) -> int:
     except (GatewayError, OSError, URLError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_BAD_INPUT
+
+
+def _ollama_model_names(payload: dict[str, Any]) -> list[str]:
+    raw_models = payload.get("models", [])
+    names: list[str] = []
+    if not isinstance(raw_models, list):
+        return names
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "model"):
+            value = item.get(key)
+            if isinstance(value, str) and value not in names:
+                names.append(value)
+    return sorted(names)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,0 +1,309 @@
+{
+  "gate": {
+    "consecutive_runs": 2,
+    "model_generation_attempts": {
+      "completed": 0,
+      "required": 10,
+      "status": "blocked - codellama:7b-instruct is not present in local Ollama store"
+    },
+    "name": "D6_TWO_VERDICTS_FROM_ONE_ACTION_TWICE",
+    "passed": true
+  },
+  "operator_action": "one deterministic D6 verdict-loop action replayed twice",
+  "recorded_at": "2026-08-13T04:07:24.185927+00:00",
+  "runs": [
+    {
+      "elapsed_ms": 0.339,
+      "mission_id": "ff510e8a-d826-4dbd-978b-11c71c8fec70",
+      "passed": true,
+      "run_number": 1,
+      "summary": {
+        "candidates": [
+          {
+            "patch_id": "d52c98ab-f6a6-46cb-a502-844cfa3f55d4",
+            "provenance": "MODEL_GENERATED",
+            "summary": "policy-passing patch preserved regression suite",
+            "verdict": "VERIFIED",
+            "verification_id": "4cc1258d-55d1-45da-9d5a-2f2a43ca7036"
+          },
+          {
+            "patch_id": "d5ffab14-f99c-4d9a-ad8c-fc1c7e366ed4",
+            "provenance": "OPERATOR_SUPPLIED",
+            "summary": "crash-only patch eliminated reproducer but failed regression",
+            "verdict": "REJECTED",
+            "verification_id": "9bb9460a-1297-43cd-97c8-33191e865a03"
+          }
+        ],
+        "human_review_count": 0,
+        "mission_verdict": "VERIFIED",
+        "rejected_count": 1,
+        "verified_count": 1
+      },
+      "verifications": [
+        {
+          "finished_at": "2026-08-13T04:07:25.209927Z",
+          "gates": {
+            "compile": {
+              "detail": "fixture compiles",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "COMPILE",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "regression_preserved": {
+              "detail": "regression preserved",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REGRESSION_PRESERVED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "renewed_fuzzing": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "RENEWED_FUZZING",
+              "status": "NOT_RUN",
+              "tool": ""
+            },
+            "reproducer_eliminated": {
+              "detail": "reproducer eliminated",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REPRODUCER_ELIMINATED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "static_delta": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "STATIC_DELTA",
+              "status": "NOT_RUN",
+              "tool": ""
+            }
+          },
+          "id": "4cc1258d-55d1-45da-9d5a-2f2a43ca7036",
+          "mission_id": "ff510e8a-d826-4dbd-978b-11c71c8fec70",
+          "patch_id": "d52c98ab-f6a6-46cb-a502-844cfa3f55d4",
+          "resource_usage": {
+            "cpu_seconds": 0.01,
+            "gpu_seconds": 0.0,
+            "peak_memory_mb": 1.0,
+            "sandbox_count": 1,
+            "wall_seconds": 0.024
+          },
+          "started_at": "2026-08-13T04:07:25.185927Z",
+          "verdict": "VERIFIED",
+          "worktree_sha256": null
+        },
+        {
+          "finished_at": "2026-08-13T04:07:25.216927Z",
+          "gates": {
+            "compile": {
+              "detail": "fixture compiles",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "COMPILE",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "regression_preserved": {
+              "detail": "tab expansion regression failed",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REGRESSION_PRESERVED",
+              "status": "FAIL",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "renewed_fuzzing": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "RENEWED_FUZZING",
+              "status": "NOT_RUN",
+              "tool": ""
+            },
+            "reproducer_eliminated": {
+              "detail": "reproducer eliminated",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REPRODUCER_ELIMINATED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "static_delta": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "STATIC_DELTA",
+              "status": "NOT_RUN",
+              "tool": ""
+            }
+          },
+          "id": "9bb9460a-1297-43cd-97c8-33191e865a03",
+          "mission_id": "ff510e8a-d826-4dbd-978b-11c71c8fec70",
+          "patch_id": "d5ffab14-f99c-4d9a-ad8c-fc1c7e366ed4",
+          "resource_usage": {
+            "cpu_seconds": 0.01,
+            "gpu_seconds": 0.0,
+            "peak_memory_mb": 1.0,
+            "sandbox_count": 1,
+            "wall_seconds": 0.031
+          },
+          "started_at": "2026-08-13T04:07:25.185927Z",
+          "verdict": "REJECTED",
+          "worktree_sha256": null
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 0.224,
+      "mission_id": "a25be200-7448-4462-b9e3-b78ac916021f",
+      "passed": true,
+      "run_number": 2,
+      "summary": {
+        "candidates": [
+          {
+            "patch_id": "2e6121f8-db43-4097-9463-30bf0cfc147a",
+            "provenance": "MODEL_GENERATED",
+            "summary": "policy-passing patch preserved regression suite",
+            "verdict": "VERIFIED",
+            "verification_id": "95f73983-de3d-4c88-91e5-b36a6077d607"
+          },
+          {
+            "patch_id": "dead1b67-9ba1-41f3-a90e-0403e4902fd7",
+            "provenance": "OPERATOR_SUPPLIED",
+            "summary": "crash-only patch eliminated reproducer but failed regression",
+            "verdict": "REJECTED",
+            "verification_id": "9bd66d7d-90ba-437b-ac01-80644fe48089"
+          }
+        ],
+        "human_review_count": 0,
+        "mission_verdict": "VERIFIED",
+        "rejected_count": 1,
+        "verified_count": 1
+      },
+      "verifications": [
+        {
+          "finished_at": "2026-08-13T04:07:26.209927Z",
+          "gates": {
+            "compile": {
+              "detail": "fixture compiles",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "COMPILE",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "regression_preserved": {
+              "detail": "regression preserved",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REGRESSION_PRESERVED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "renewed_fuzzing": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "RENEWED_FUZZING",
+              "status": "NOT_RUN",
+              "tool": ""
+            },
+            "reproducer_eliminated": {
+              "detail": "reproducer eliminated",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REPRODUCER_ELIMINATED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "static_delta": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "STATIC_DELTA",
+              "status": "NOT_RUN",
+              "tool": ""
+            }
+          },
+          "id": "95f73983-de3d-4c88-91e5-b36a6077d607",
+          "mission_id": "a25be200-7448-4462-b9e3-b78ac916021f",
+          "patch_id": "2e6121f8-db43-4097-9463-30bf0cfc147a",
+          "resource_usage": {
+            "cpu_seconds": 0.01,
+            "gpu_seconds": 0.0,
+            "peak_memory_mb": 1.0,
+            "sandbox_count": 1,
+            "wall_seconds": 0.024
+          },
+          "started_at": "2026-08-13T04:07:26.185927Z",
+          "verdict": "VERIFIED",
+          "worktree_sha256": null
+        },
+        {
+          "finished_at": "2026-08-13T04:07:26.216927Z",
+          "gates": {
+            "compile": {
+              "detail": "fixture compiles",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "COMPILE",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "regression_preserved": {
+              "detail": "tab expansion regression failed",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REGRESSION_PRESERVED",
+              "status": "FAIL",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "renewed_fuzzing": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "RENEWED_FUZZING",
+              "status": "NOT_RUN",
+              "tool": ""
+            },
+            "reproducer_eliminated": {
+              "detail": "reproducer eliminated",
+              "evidence_ref": null,
+              "evidence_source": "TOOL_EXECUTION",
+              "name": "REPRODUCER_ELIMINATED",
+              "status": "PASS",
+              "tool": "deterministic D6 gate matrix fixture"
+            },
+            "static_delta": {
+              "detail": "cut from seven-day build; disclosed",
+              "evidence_ref": null,
+              "evidence_source": "REPLAYED_ARTIFACT",
+              "name": "STATIC_DELTA",
+              "status": "NOT_RUN",
+              "tool": ""
+            }
+          },
+          "id": "9bd66d7d-90ba-437b-ac01-80644fe48089",
+          "mission_id": "a25be200-7448-4462-b9e3-b78ac916021f",
+          "patch_id": "dead1b67-9ba1-41f3-a90e-0403e4902fd7",
+          "resource_usage": {
+            "cpu_seconds": 0.01,
+            "gpu_seconds": 0.0,
+            "peak_memory_mb": 1.0,
+            "sandbox_count": 1,
+            "wall_seconds": 0.031
+          },
+          "started_at": "2026-08-13T04:07:26.185927Z",
+          "verdict": "REJECTED",
+          "worktree_sha256": null
+        }
+      ]
+    }
+  ],
+  "schema": "brahmadatta.d6_verdict_loop_gate.v1"
+}

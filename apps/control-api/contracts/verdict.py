@@ -23,7 +23,7 @@ no path into this function.
 
 from __future__ import annotations
 
-from typing import Iterator, Sequence
+from collections.abc import Iterator, Sequence
 
 from ninja import Schema
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -71,7 +71,11 @@ class GateResult(Schema):
     )
 
     @model_validator(mode="after")
-    def _a_pass_requires_a_tool_that_ran(self) -> "GateResult":
+    def _a_pass_requires_a_tool_that_ran(self) -> GateResult:
+        if self.status in (GateStatus.NOT_RUN, GateStatus.ERROR) and not self.detail.strip():
+            raise ValueError(
+                f"gate {self.name} is {self.status} and must include a detail reason."
+            )
         if self.status is GateStatus.NOT_RUN:
             if self.evidence_source is EvidenceSource.TOOL_EXECUTION:
                 raise ValueError(
@@ -94,7 +98,7 @@ class GateResult(Schema):
         return self
 
     @classmethod
-    def not_run(cls, name: GateName, reason: str) -> "GateResult":
+    def not_run(cls, name: GateName, reason: str) -> GateResult:
         """The only sanctioned way to build a NOT_RUN result.
 
         `evidence_source` is stated here rather than defaulted, and it is the weaker

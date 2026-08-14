@@ -77,7 +77,6 @@ class ModelGateway:
         self.settings = settings
         self.source = source
         self.clock = clock
-        self._endpoint_checked = False
 
     # -- the one path -------------------------------------------------------------------
 
@@ -87,7 +86,7 @@ class ModelGateway:
 
         started = self.clock()
         if self.settings.mode is GatewayMode.LIVE:
-            self._check_endpoint_once()
+            self._check_endpoint()
 
         result = self.source.produce(request)
 
@@ -143,21 +142,21 @@ class ModelGateway:
 
     # -- endpoint check -----------------------------------------------------------------
 
-    def _check_endpoint_once(self) -> None:
-        """Resolve the endpoint and check every answer, once per gateway instance.
+    def _check_endpoint(self) -> None:
+        """Resolve the endpoint and check every answer before each live call.
 
         Syntactic validation happened at settings construction. This is the DNS half — the
-        case where a name inside the boundary answers with an address outside it — and it
-        costs a lookup, so it runs before the first request rather than before each one.
+        case where a name inside the boundary answers with an address outside it. D5's
+        gateway review requires this assertion on every call because DNS answers can
+        change between requests.
         """
-        if self._endpoint_checked or not self.settings.resolve_endpoint:
+        if not self.settings.resolve_endpoint:
             return
         assert_resolves_inside_boundary(
             "MODEL_ENDPOINT",
             self.settings.endpoint,
             service_names=self.settings.service_names,
         )
-        self._endpoint_checked = True
 
 
 def build_gateway(

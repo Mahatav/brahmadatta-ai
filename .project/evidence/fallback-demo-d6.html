@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Brahmadatta D5/D6 Fallback Evidence Replay</title>
+<style>
+body { margin: 0; background: #161f99; color: #fff; font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; }
+main { min-height: 100vh; display: grid; grid-template-columns: 360px 1fr; gap: 24px; padding: 32px; box-sizing: border-box; }
+h1 { margin: 0 0 16px; font: 700 46px Georgia, serif; }
+h2 { margin: 0 0 10px; font-size: 15px; letter-spacing: .12em; text-transform: uppercase; color: #bfc7ff; }
+section { border-top: 2px solid rgba(255,255,255,.72); padding-top: 18px; }
+ol { margin: 0; padding-left: 22px; line-height: 1.7; color: #dde2ff; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th,td { border: 1px solid rgba(255,255,255,.35); padding: 10px; vertical-align: top; }
+small { display: block; margin-top: 6px; color: #b8c0ee; }
+.badge { display: inline-block; margin-top: 12px; border: 1px solid #fff; padding: 8px 10px; }
+</style>
+<main>
+  <aside>
+    <h1>Brahmadatta Fallback</h1>
+    <section>
+      <h2>Captions</h2>
+      <ol><li>D5 live libFuzzer campaign produced a sanitizer-confirmed crash.</li><li>Fuzzing ran 0.3716549170203507 seconds and found 1 crash.</li><li>The minimized reproducer replayed 5 of 5 times from a clean build.</li><li>D6 verdict loop produced both verdicts twice consecutively: 2 runs recorded.</li><li>Static delta and renewed fuzzing are disclosed as NOT_RUN where cut by plan.</li></ol>
+      <span class="badge">offline playable evidence replay</span>
+    </section>
+  </aside>
+  <section>
+    <h2>D6 Gate Matrices</h2>
+    <table>
+      <thead><tr><th>Verdict</th><th>Compile</th><th>Reproducer</th><th>Regression</th><th>Static</th><th>Fuzzing</th></tr></thead>
+      <tbody><tr><td>VERIFIED</td><td>PASS<small>fixture compiles</small></td><td>PASS<small>reproducer eliminated</small></td><td>PASS<small>regression preserved</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td></tr><tr><td>REJECTED</td><td>PASS<small>fixture compiles</small></td><td>PASS<small>reproducer eliminated</small></td><td>FAIL<small>tab expansion regression failed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td></tr><tr><td>VERIFIED</td><td>PASS<small>fixture compiles</small></td><td>PASS<small>reproducer eliminated</small></td><td>PASS<small>regression preserved</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td></tr><tr><td>REJECTED</td><td>PASS<small>fixture compiles</small></td><td>PASS<small>reproducer eliminated</small></td><td>FAIL<small>tab expansion regression failed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td><td>NOT_RUN<small>cut from seven-day build; disclosed</small></td></tr></tbody>
+    </table>
+  </section>
+</main>
+</html>

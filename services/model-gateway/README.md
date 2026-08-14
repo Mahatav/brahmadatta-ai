@@ -12,6 +12,7 @@ gateway/
   settings.py          configuration, validated at construction
   schemas.py           GenerationRequest / PatchCandidate         one schema, both paths
   provenance.py        where a response came from, in words       the only place wording lives
+  context.py           bounded, redacted model context            #35
   transcripts.py       the SHA-256 transcript store               #82
   backends.py          live / replay / operator-supplied sources  the three ladder rungs
   service.py           ModelGateway — one code path
@@ -87,11 +88,12 @@ schema mismatch, ambiguity), `5` bad arguments — the fallback ladder's rung-3 
 three distinguishable answers rather than one failure. It prints the exact sentence the run
 will display, which is the point of running it at pre-flight rather than at hour 30.
 
-## Issue #73 — local model prep evidence
+## D5 — Ollama CodeLlama local model prep evidence
 
-`gateway.tools.model_prep` is the D4 harness for the small local model. It does **not**
-download a model by default. The operator chooses and fetches the artifact explicitly, then
-the tool records the evidence the issue asks for:
+`gateway.tools.model_prep` is the local model evidence harness. It does **not** download a
+model by default. For D5, the selected operator path is Ollama CodeLlama
+(`codellama:7b-instruct`) running on loopback. The operator pulls the model explicitly,
+then the tool records the evidence the issue asks for:
 
 - pinned artifact hash, size, model revision and quantization
 - proof that the serving endpoint is local-only under the gateway endpoint policy
@@ -106,7 +108,7 @@ python -m gateway.tools.model_prep measure --backend fake \
   --output evidence/model-prep/fake-measurement.json
 ```
 
-The real operator run shape is printed by:
+The real Ollama operator run shape is printed by:
 
 ```
 python -m gateway.tools.model_prep plan --evidence-dir evidence/model-prep
@@ -115,47 +117,53 @@ python -m gateway.tools.model_prep plan --evidence-dir evidence/model-prep
 That plan expands to this sequence:
 
 ```
-# Fetch, explicitly. This is the multi-GB step; the harness never starts it on its own.
-huggingface-cli download <repo/model> <file.gguf> \
-  --revision <pinned-revision> \
-  --local-dir .model-cache/<model>
+# Fetch explicitly. This is the multi-GB step; the harness never starts it on its own.
+ollama pull codellama:7b-instruct
 
-# Quantize locally when the downloaded artifact is not already quantized.
-./llama.cpp/llama-quantize <source.gguf> <target-q4_k_m.gguf> q4_K_M
+# Serve on loopback only, then prove the boundary before measuring. Ollama's default
+# local API base is http://127.0.0.1:11434/api.
+ollama serve
 
-# Record the exact artifact that will be served.
-python -m gateway.tools.model_prep hash-artifact \
-  --artifact .model-cache/<model>/<target-q4_k_m.gguf> \
-  --model-name <model> \
-  --revision <pinned-revision> \
-  --quantization q4_K_M \
-  --output evidence/model-prep/model-artifact.json
-
-# Serve on loopback only, then prove the boundary before measuring.
-./llama.cpp/llama-server \
-  -m .model-cache/<model>/<target-q4_k_m.gguf> \
-  --host 127.0.0.1 \
-  --port 8080
+python -m gateway.tools.model_prep doctor \
+  --endpoint http://127.0.0.1:11434/api \
+  --output evidence/model-prep/model-doctor.json
 
 python -m gateway.tools.model_prep check-serving \
-  --endpoint http://127.0.0.1:8080/v1 \
+  --endpoint http://127.0.0.1:11434/api \
   --output evidence/model-prep/model-serving.json
 
 # Measure through the same local-only endpoint shape the gateway permits.
 python -m gateway.tools.model_prep measure \
-  --backend openai-compatible \
-  --endpoint http://127.0.0.1:8080/v1 \
-  --model <model> \
-  --revision <pinned-revision> \
-  --artifact-sha256 <sha256> \
+  --backend ollama \
+  --endpoint http://127.0.0.1:11434/api \
+  --model codellama:7b-instruct \
+  --revision ollama-library/codellama \
   --prompt-file prompts/patch-generation.txt \
   --prompt-version patch-prompt/3 \
   --output evidence/model-prep/model-measurement.json
 ```
 
 If the final command cannot produce `first_token_ms` and a non-empty output stream from the
-actual machine on D4, record that on #73 immediately. That is the point of the issue: a slow
-or unavailable local CPU model is a D4 fact, not a D6 surprise.
+actual machine on D5, record that immediately. That is the point of the issue: a slow or
+unavailable local CPU model is a D5 fact, not a D6 surprise.
+
+`doctor` writes an evidence record in both directions. A ready record means the local
+Ollama API is reachable and `codellama:7b-instruct` is present. A blocked record says the
+deterministic tier is active and why; it does not pretend CodeLlama ran.
+
+Compose also has an opt-in `model-host` profile in both dev and finale stacks. It runs the
+pinned Ollama image on the internal `backend` network with `mem_limit` set, and no external
+route. Use it when the model store has already been prepared; the app-facing loopback path
+above remains the quickest local developer check.
+
+## Context boundary
+
+`gateway.context.build_context(finding, policy)` is the only producer of
+`ContextPackage`, and `request_patch(context, policy, gateway)` is the only consumer. The
+gateway does not accept a repository root, directory handle, file object, or caller-written
+prompt for patch generation. It receives a bounded finding package and policy, redacts
+absolute paths plus `KEY|TOKEN|SECRET|PASSWORD`-shaped lines, records `prompt_sha256` and
+`context_bytes`, and only then calls the local gateway.
 
 ## The endpoint policy
 
@@ -243,15 +251,16 @@ until `CONTROL_BASELINE` is lowered in the same commit. See "What this does not 
 Listed because a component that quietly does not do something is worse than one that says
 so.
 
-- **No model has been served.** There is no live backend. `UnavailableLiveBackend` raises a
-  typed error naming issues #35/#36. Every test uses a scripted stand-in, and no latency,
-  throughput or patch-quality number in this package was measured against a real model.
+- **No local CodeLlama runtime is implied by the code.** The Ollama backend exists, and
+  `doctor` records whether `codellama:7b-instruct` is actually reachable on the machine.
+  A failed doctor record means the deterministic tier is active; no latency, throughput
+  or patch-quality number may be reported as measured against CodeLlama until `doctor`
+  and `measure --backend ollama` pass on that host.
 - **`contracts/model_policy.py` is unchanged.** The ASGI process must not import `gateway`
   (C5, `tests/architecture/test_import_direction.py`), and that file belongs to the
   control-API seat. The bypass-table script measures it; issue #93 fixes it.
-- **No redaction.** "Redact before you prompt" is a rule for this seat and it is not
-  implemented here. `GenerationRequest.prompt` is assembled and redacted upstream, where
-  the repository snapshot is. This package validates and forwards it.
+- **No raw repository loading.** `context.py` redacts and packages a bounded finding, but
+  the model gateway never receives a repository root and never walks source trees.
 - **No escalation, no GPU lifecycle, no context policy.** D-015 cut the rented GPU;
   tier-escalation mechanics are not in this build.
 - **The UI and the evidence builder are not covered by the chokepoint test.** It is a claim

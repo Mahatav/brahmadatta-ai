@@ -204,6 +204,34 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Local model host — OPT-IN (`--profile model`).
+  #
+  # D5/D6 use Ollama CodeLlama through the model gateway. This host stays on the
+  # internal backend network, so model pulls happen explicitly on a prepared volume
+  # before the judged run. The hard memory ceiling is the #36 guard: an OOM kills
+  # the model host, not Postgres or the operator workstation.
+  # ---------------------------------------------------------------------------
+  model-host:
+    profiles: ["model"]
+    image: ollama/ollama@sha256:f478761c18fea69b1624e095bce0f8aab06825d09ccabcd0f88828db0df185ce
+    container_name: brahmadatta-model-host
+    <<: *hardening
+    mem_limit: ${MODEL_HOST_MEM_LIMIT:-8g}
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
   # PostgreSQL.
   #
   # ROOTLESS NOTE: this image cannot be run with a `user:` override against a fresh named
@@ -353,3 +381,4 @@ volumes:
   redisdata:
   nginx-logs:
   command-center-node-modules:
+  ollama-models:

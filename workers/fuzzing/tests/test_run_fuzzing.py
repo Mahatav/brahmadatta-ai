@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -107,7 +107,7 @@ def test_emit_fuzzing_events_for_crash_campaign() -> None:
         unique_crashes=1,
         corpus_size=8,
         sanitizers=("address", "undefined"),
-        recorded_at=datetime.now(timezone.utc),
+        recorded_at=datetime.now(UTC),
         coverage=99,
         artifact_refs=("fuzz-artifacts/crash-abc",),
         toolchain=_toolchain(),
@@ -136,7 +136,7 @@ def test_emit_fuzzing_events_for_not_run_failure() -> None:
         unique_crashes=0,
         corpus_size=0,
         sanitizers=(),
-        recorded_at=datetime.now(timezone.utc),
+        recorded_at=datetime.now(UTC),
         failure=FuzzFailure(
             step="BUILD",
             command=("cmake", "--build", "build"),

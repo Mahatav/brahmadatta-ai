@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { AIParticleCore } from './AIParticleCore';
+import { VerdictComparePanel } from './VerdictComparePanel';
 import { getMissionDetail } from '../lib/api/client';
 import { connectMissionEvents } from '../lib/events/connection';
 import {
@@ -83,14 +84,7 @@ export function MissionCommandCenter() {
         </div>
 
         <div className="mission-panels">
-          <section className="context-panel context-panel--primary" aria-labelledby="what-this-does">
-            <h2 id="what-this-does">[ SITUATION ]</h2>
-            <p>
-              {localRepository
-                ? 'Code context is loaded. Ask the core what to inspect, what to run, or where risk is concentrated.'
-                : 'Load a local repository first. Until code is mapped, the core is waiting for context.'}
-            </p>
-          </section>
+          <VerdictComparePanel snapshot={snapshot} />
 
           <section aria-labelledby="repo-context">
             <h2 id="repo-context">[ REPO INTEL ]</h2>
@@ -131,11 +125,18 @@ export function MissionCommandCenter() {
       <div className={`resource-strip resource-strip--${release.state}`}>
         <strong>{release.label}</strong>
         <span>
-          stream {streamState} / mission {missionId ?? 'none'} / repo {localRepository?.name ?? 'none'} / event {snapshot.latestSequence ?? 'none'}
+          stream {streamState} / mission {missionId ?? 'none'} / repo {localRepository?.name ?? 'none'} / event {snapshot.latestSequence ?? 'none'} / gpu {gpuUsageText(snapshot)}
         </span>
       </div>
     </section>
   );
+}
+
+function gpuUsageText(snapshot: MissionSnapshot): string {
+  if (!snapshot.resourceUsage || snapshot.resourceUsage.gpu_seconds === 0) {
+    return 'not applicable - no leased GPU (see D-015)';
+  }
+  return `${snapshot.resourceUsage.gpu_seconds}s`;
 }
 
 function formatLocalRepository(repository: LocalRepositoryContext | null): string {

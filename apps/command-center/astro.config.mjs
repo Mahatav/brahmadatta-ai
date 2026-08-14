@@ -28,6 +28,8 @@ const stackMarkers = {
 };
 
 const repositoryRoot = path.resolve(process.cwd(), '../..');
+const ollamaEndpoint = process.env.OLLAMA_ENDPOINT || 'http://127.0.0.1:11434/api';
+const codellamaModel = process.env.CODELLAMA_MODEL || 'codellama:7b-instruct';
 
 export default defineConfig({
   integrations: [react()],
@@ -43,6 +45,11 @@ function localRepositoryPlugin() {
     configureServer(server) {
       server.middlewares.use('/__local/repository-default', (_request, response) => {
         sendJson(response, 200, { path: repositoryRoot });
+      });
+
+      server.middlewares.use('/__local/model-gateway-status', async (_request, response) => {
+        const status = await readOllamaStatus();
+        sendJson(response, 200, status);
       });
 
       server.middlewares.use('/__local/repository-scan', async (request, response) => {
@@ -81,6 +88,62 @@ function localRepositoryPlugin() {
       });
     },
   };
+}
+
+async function readOllamaStatus() {
+  const started = performance.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1200);
+  try {
+    const result = await fetch(`${ollamaEndpoint.replace(/\/$/, '')}/tags`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const latencyMs = Math.max(0, Math.round(performance.now() - started));
+    if (!result.ok) {
+      return {
+        backend: 'ollama',
+        status: 'unreachable',
+        endpoint: ollamaEndpoint,
+        model: codellamaModel,
+        modelPresent: false,
+        latencyMs,
+        message: `Ollama returned HTTP ${result.status}.`,
+      };
+    }
+    const body = await result.json();
+    const models = Array.isArray(body.models)
+      ? body.models
+        .map((model) => (typeof model?.name === 'string' ? model.name : ''))
+        .filter(Boolean)
+      : [];
+    const modelPresent = models.includes(codellamaModel);
+    return {
+      backend: 'ollama',
+      status: modelPresent ? 'ready' : 'missing-model',
+      endpoint: ollamaEndpoint,
+      model: codellamaModel,
+      modelPresent,
+      models,
+      latencyMs,
+      message: modelPresent
+        ? 'Ollama is serving CodeLlama locally.'
+        : `Ollama is reachable, but ${codellamaModel} is not pulled locally.`,
+    };
+  } catch (error) {
+    return {
+      backend: 'ollama',
+      status: 'unreachable',
+      endpoint: ollamaEndpoint,
+      model: codellamaModel,
+      modelPresent: false,
+      models: [],
+      latencyMs: Math.max(0, Math.round(performance.now() - started)),
+      message: error instanceof Error ? error.message : 'Ollama is not reachable.',
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function sendJson(response, statusCode, body) {
