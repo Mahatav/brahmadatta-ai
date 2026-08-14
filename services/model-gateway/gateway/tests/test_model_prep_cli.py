@@ -192,6 +192,44 @@ def test_fake_measure_goes_through_gateway_and_emits_evidence(tmp_path: Path) ->
     assert payload["prompt"]["response_schema_version"] == "patch-candidate/1"
 
 
+def test_attempts_records_threshold_and_candidate_hashes(tmp_path: Path) -> None:
+    output = tmp_path / "attempts.json"
+
+    assert (
+        model_prep.main(
+            [
+                "attempts",
+                "--backend",
+                "fake",
+                "--attempts",
+                "3",
+                "--success-threshold",
+                "2",
+                "--endpoint",
+                "http://127.0.0.1:8080/v1",
+                "--seed",
+                "90",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+
+    payload = _load(output)
+    assert payload["kind"] == "model-generation-attempts"
+    assert payload["gate"] == {
+        "required_attempts": 3,
+        "success_threshold": 2,
+        "schema_valid_successes": 3,
+        "passed": True,
+        "status": "3 of 3 attempts returned schema-valid patch candidates",
+    }
+    assert [attempt["seed"] for attempt in payload["attempts"]] == [90, 91, 92]
+    assert all(attempt["candidate_sha256"] for attempt in payload["attempts"])
+    assert all(attempt["compile_status"] == "NOT_RUN" for attempt in payload["attempts"])
+
+
 def test_ollama_measure_records_codellama_stream_evidence(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

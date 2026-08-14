@@ -1,0 +1,46 @@
+Return exactly one JSON object and nothing else.
+
+Required JSON keys:
+- "diff": a unified diff string with newlines escaped as \n
+- "rationale": one short sentence
+- "touched_files": an array of repository paths
+- "confidence": a number from 0 to 1
+
+Target repository: demo/repositories/pktcfg
+Language: C
+Bug: AddressSanitizer finds a heap-buffer-overflow when a literal tab is decoded.
+Root cause: pkt_decoded_length() underestimates literal tabs. pkt_decode_into() expands a
+literal tab to PKT_TAB_WIDTH spaces, but pkt_decoded_length() counts it as one byte.
+
+Patch requirement:
+- Change only src/decode.c.
+- Add the smallest bounds-safe fix.
+- Do not edit tests.
+- Do not include Markdown fences.
+
+Relevant function:
+
+size_t pkt_decoded_length(const uint8_t *src, size_t len, int escaped)
+{
+    size_t need = 0;
+    size_t i = 0;
+
+    while (i < len) {
+        uint8_t c = src[i];
+        if (escaped && c == '\\') {
+            if (i + 1 >= len) {
+                need += 1;
+                i += 1;
+                continue;
+            }
+            need += 1;
+            i += 2;
+            continue;
+        }
+
+        need += 1;
+        i += 1;
+    }
+
+    return need;
+}

@@ -16,7 +16,7 @@
   ],
   "claim": "offline playable evidence replay",
   "kind": "fallback-demonstration",
-  "recorded_at": "2026-08-13T04:24:03.497307+00:00",
+  "recorded_at": "2026-08-14T17:10:02.167037+00:00",
   "schema_version": "fallback-demo/1",
   "scope": {
     "d5_steps_1_to_4": true,
@@ -35,7 +35,7 @@
     },
     {
       "path": ".project/evidence/d6-verdict-loop-gate.json",
-      "sha256": "a867f4a9c54996e999b3f3b816332511c7cd12a0dd23a92d32088812fabed3b1"
+      "sha256": "f7f625d71f8fc3f93d1a69bf6624e5fcfa2fb7fb434d82e96800c9a7a4f63651"
     }
   ]
 }

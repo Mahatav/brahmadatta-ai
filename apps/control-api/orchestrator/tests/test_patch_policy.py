@@ -18,6 +18,8 @@ from orchestrator.patch_policy import evaluate_patch_policy
 from orchestrator.tests.conftest import (
     CANDIDATE_A,
     CANDIDATE_B,
+    CANDIDATE_C,
+    CANDIDATE_P,
     NOW,
     TRACE,
     gate_matrix,
@@ -64,6 +66,27 @@ def test_path_allowlist_violation_is_named_before_verification(mission, finding)
     assert candidate.policy_status == PatchPolicyStatus.REJECTED_PATH_NOT_ALLOWED.value
     assert "path not allowed: CMakeLists.txt" in candidate.policy_detail
     assert _policy_events(mission)[0].payload["detail"] == candidate.policy_detail
+
+
+def test_benchmark_policy_rejection_fixture_is_rejected_before_verification(
+    mission, finding
+):
+    walk_to(mission, MissionState.PATCH)
+
+    candidate = _record(mission, finding, CANDIDATE_P.read_text())
+
+    assert candidate.policy_status == PatchPolicyStatus.REJECTED_PATH_NOT_ALLOWED.value
+    assert "path not allowed: README.md" in candidate.policy_detail
+
+
+def test_benchmark_compile_failure_fixture_is_policy_accepted(mission, finding):
+    walk_to(mission, MissionState.PATCH)
+
+    candidate = _record(mission, finding, CANDIDATE_C.read_text())
+
+    assert candidate.policy_status == PatchPolicyStatus.ACCEPTED.value
+    assert candidate.files_changed == 1
+    assert "paths=src/decode.c" in candidate.policy_detail
 
 
 def test_too_many_files_violation_is_named(mission, finding):

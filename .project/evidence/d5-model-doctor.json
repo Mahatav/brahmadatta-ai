@@ -1,14 +1,14 @@
 {
   "backend": "ollama",
   "checks": {
-    "endpoint_reachable": false,
-    "model_present": false,
+    "endpoint_reachable": true,
+    "model_present": true,
     "schema_probe_passed": false
   },
   "degraded_state": {
-    "active": true,
-    "reason": "local CodeLlama is not proven reachable",
-    "tier": "deterministic"
+    "active": false,
+    "reason": "",
+    "tier": "local-codellama"
   },
   "hardware": {
     "cpu_count": 10,
@@ -19,13 +19,21 @@
     "python": "3.12.13"
   },
   "kind": "ollama-codellama-doctor",
-  "message": "<urlopen error [Errno 61] Connection refused>",
+  "message": "codellama:7b-instruct is present on the local Ollama endpoint",
   "model": {
-    "artifact_sha256": "",
+    "artifact_sha256": "3a43f93b78ec50f7c4e4dc8bd1cb3fff5a900e7d574c51a6f7495e48486e0dac",
     "name": "codellama:7b-instruct",
     "revision": "ollama-library/codellama"
   },
-  "recorded_at": "2026-08-13T04:24:54.428088+00:00",
+  "ollama_models": [
+    "codellama:7b-instruct",
+    "llama3.1:8b",
+    "llama3.2:3b",
+    "llama3.2:latest",
+    "llama3:8b",
+    "llama3:latest"
+  ],
+  "recorded_at": "2026-08-14T16:57:51.212320+00:00",
   "schema_version": "model-prep/1",
   "serving": {
     "endpoint": "http://127.0.0.1:11434/api",
@@ -34,5 +42,5 @@
     "policy_rule": "allowed-network",
     "service_names": []
   },
-  "status": "unreachable"
+  "status": "ready"
 }

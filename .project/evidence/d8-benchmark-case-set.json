@@ -1,0 +1,143 @@
+{
+  "kind": "benchmark-case-set",
+  "version": 1,
+  "generated_at": "2026-08-14T00:00:00Z",
+  "issue": 61,
+  "target": {
+    "id": "pktcfg",
+    "path": "demo/repositories/pktcfg",
+    "authorization": "purpose-built local fixture owned by the Brahmadatta AI team"
+  },
+  "publication_rule": {
+    "status": "targets_not_measured",
+    "rationale": "The controlled set has one positive defect and one clean negative control. Percentages over this denominator are not judge-facing benchmark claims until a larger measured run exists."
+  },
+  "cases": [
+    {
+      "id": "BD-001",
+      "group": "defect",
+      "description": "Seeded heap-buffer-overflow in literal-tab decoding.",
+      "expected_result": "sanitizer-confirmed finding",
+      "required_artifacts": [
+        ".project/evidence/d5-live-fuzzing.json",
+        ".project/evidence/d5-reproducer-gate.json"
+      ]
+    },
+    {
+      "id": "BD-001-A",
+      "group": "candidate",
+      "patch": "demo/repositories/pktcfg/patches/candidate-a-correct-bounds-fix.patch",
+      "policy": "PASS",
+      "expected_gate_matrix": {
+        "compile": "PASS",
+        "reproducer_eliminated": "PASS",
+        "regression_preserved": "PASS 8/8",
+        "static_delta": "NOT_RUN",
+        "renewed_fuzzing": "NOT_RUN"
+      },
+      "expected_verdict": "VERIFIED"
+    },
+    {
+      "id": "BD-001-B",
+      "group": "candidate",
+      "patch": "demo/repositories/pktcfg/patches/candidate-b-rejected-crash-only-fix.patch",
+      "policy": "PASS",
+      "expected_gate_matrix": {
+        "compile": "PASS",
+        "reproducer_eliminated": "PASS",
+        "regression_preserved": "FAIL 7/8",
+        "static_delta": "NOT_RUN",
+        "renewed_fuzzing": "NOT_RUN"
+      },
+      "expected_verdict": "REJECTED"
+    },
+    {
+      "id": "BD-001-P",
+      "group": "candidate",
+      "patch": "demo/repositories/pktcfg/patches/candidate-p-policy-rejected-out-of-scope.patch",
+      "policy": "FAIL",
+      "expected_gate_matrix": {},
+      "expected_verdict": "REJECTED_BY_POLICY"
+    },
+    {
+      "id": "BD-001-C",
+      "group": "candidate",
+      "patch": "demo/repositories/pktcfg/patches/candidate-c-compile-failure.patch",
+      "policy": "PASS",
+      "expected_gate_matrix": {
+        "compile": "FAIL",
+        "reproducer_eliminated": "NOT_RUN",
+        "regression_preserved": "NOT_RUN",
+        "static_delta": "NOT_RUN",
+        "renewed_fuzzing": "NOT_RUN"
+      },
+      "expected_verdict": "REJECTED_COMPILE"
+    },
+    {
+      "id": "BD-001-M",
+      "group": "model-attempts",
+      "artifact": ".project/evidence/d6-model-generation-attempts.json",
+      "expected_result": "at least 3 of 10 schema-valid and policy-acceptable local CodeLlama candidates"
+    },
+    {
+      "id": "BD-002",
+      "group": "control",
+      "setup": "pktcfg with candidate A applied",
+      "expected_result": "measured zero sanitizer-confirmed findings; no percentage published"
+    },
+    {
+      "id": "BD-003",
+      "group": "control",
+      "setup": "pktcfg baseline with a 10 second fuzz budget",
+      "expected_result": "budget exhausted; no finding claimed as zero"
+    },
+    {
+      "id": "BD-004",
+      "group": "control",
+      "setup": "unauthorized repository reference",
+      "expected_result": "mission refused before snapshot, sandbox, build, or analysis"
+    }
+  ],
+  "metric_publication_status": [
+    {
+      "metric": "Confirmed-finding precision on chosen benchmarks",
+      "status": "target - not measured"
+    },
+    {
+      "metric": "Reproducer elimination for accepted patches",
+      "status": "enumerated on BD-001-A, not a percentage benchmark"
+    },
+    {
+      "metric": "Regression preservation for accepted patches",
+      "status": "enumerated on BD-001-A, not a percentage benchmark"
+    },
+    {
+      "metric": "Verified patch rate on selected solvable cases",
+      "status": "target - not measured"
+    },
+    {
+      "metric": "Median time to first confirmed finding",
+      "status": "target - not measured"
+    },
+    {
+      "metric": "Median confirmation-to-verdict time",
+      "status": "target - not measured"
+    },
+    {
+      "metric": "Tier 3 escalation rate",
+      "status": "not applicable to the CPU/local-model MVP cut"
+    },
+    {
+      "metric": "Complete evidence reports",
+      "status": "target - not measured"
+    },
+    {
+      "metric": "Unauthorized target network calls",
+      "status": "target - guarded by topology tests; full benchmark pending"
+    },
+    {
+      "metric": "Unreleased GPU idle time after run",
+      "status": "not applicable to the CPU/local-model MVP cut"
+    }
+  ]
+}

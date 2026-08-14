@@ -39,6 +39,8 @@ DEMO_ROOT = (
 )
 CANDIDATE_A = DEMO_ROOT / "candidate-a-correct-bounds-fix.patch"
 CANDIDATE_B = DEMO_ROOT / "candidate-b-rejected-crash-only-fix.patch"
+CANDIDATE_P = DEMO_ROOT / "candidate-p-policy-rejected-out-of-scope.patch"
+CANDIDATE_C = DEMO_ROOT / "candidate-c-compile-failure.patch"
 
 
 @pytest.fixture

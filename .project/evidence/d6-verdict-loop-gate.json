@@ -2,9 +2,10 @@
   "gate": {
     "consecutive_runs": 2,
     "model_generation_attempts": {
-      "completed": 0,
+      "artifact": ".project/evidence/d6-model-generation-attempts.json",
+      "completed": 10,
       "required": 10,
-      "status": "blocked - codellama:7b-instruct is not present in local Ollama store"
+      "status": "pass - 10 of 10 live CodeLlama attempts returned schema-valid patch candidates"
     },
     "name": "D6_TWO_VERDICTS_FROM_ONE_ACTION_TWICE",
     "passed": true

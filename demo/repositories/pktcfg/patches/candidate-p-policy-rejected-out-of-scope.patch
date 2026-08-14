@@ -1,0 +1,10 @@
+diff --git a/README.md b/README.md
+index 65f4ed8..f3b4f25 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-# pktcfg — controlled demo target
++# pktcfg patched outside the allowed source path
+ 
+ Deliberately vulnerable C fixture for Brahmadatta AI.
+ 

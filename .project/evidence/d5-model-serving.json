@@ -1,0 +1,12 @@
+{
+  "kind": "model-serving-boundary",
+  "recorded_at": "2026-08-14T16:57:04.022579+00:00",
+  "schema_version": "model-prep/1",
+  "serving": {
+    "endpoint": "http://127.0.0.1:11434/api",
+    "local_only": true,
+    "policy_reason": "loopback or private address (127.0.0.0/8)",
+    "policy_rule": "allowed-network",
+    "service_names": []
+  }
+}

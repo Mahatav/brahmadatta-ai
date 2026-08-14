@@ -121,11 +121,15 @@ def _model_attempts(gate: dict[str, Any]) -> str:
     attempts = gate.get("model_generation_attempts")
     if not isinstance(attempts, dict):
         return "not recorded"
-    return (
+    text = (
         f"{attempts.get('completed', 'unknown')} of "
         f"{attempts.get('required', 'unknown')} - "
         f"{attempts.get('status', 'unknown')}"
     )
+    artifact = attempts.get("artifact")
+    if isinstance(artifact, str) and artifact:
+        text += f" ({artifact})"
+    return text
 
 
 def _escape_table(value: str) -> str:

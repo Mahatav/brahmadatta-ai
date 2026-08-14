@@ -18,10 +18,11 @@ def test_render_and_check_d6_verdict_report(tmp_path: Path) -> None:
                     "passed": True,
                     "consecutive_runs": 2,
                     "model_generation_attempts": {
-                        "completed": 0,
-                        "required": 10,
-                        "status": "blocked - model unavailable",
-                    },
+                    "completed": 0,
+                    "required": 10,
+                    "status": "blocked - model unavailable",
+                    "artifact": ".project/evidence/d6-model-generation-attempts.json",
+                },
                 },
                 "runs": [
                     _run(1),
@@ -45,6 +46,7 @@ def test_render_and_check_d6_verdict_report(tmp_path: Path) -> None:
     assert text.count("VERIFIED") >= 2
     assert text.count("REJECTED") >= 2
     assert "blocked - model unavailable" in text
+    assert ".project/evidence/d6-model-generation-attempts.json" in text
 
 
 def _run(number: int) -> dict:

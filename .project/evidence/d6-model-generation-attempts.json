@@ -1,0 +1,193 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4600,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 30890
+    },
+    {
+      "attempt": 2,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4601,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 27890
+    },
+    {
+      "attempt": 3,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4602,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 28106
+    },
+    {
+      "attempt": 4,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4603,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 29434
+    },
+    {
+      "attempt": 5,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4604,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 28605
+    },
+    {
+      "attempt": 6,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4605,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 28157
+    },
+    {
+      "attempt": 7,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4606,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 28477
+    },
+    {
+      "attempt": 8,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4607,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 28886
+    },
+    {
+      "attempt": 9,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4608,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 29672
+    },
+    {
+      "attempt": 10,
+      "candidate_sha256": "a33b0fd02701488609caca830b819d264ac775cf5a8f6b5782b38f5c8ba78b46",
+      "compile_detail": "This command records live model schema/policy viability only; the deterministic D6 gate matrix records compile/regression verdicts.",
+      "compile_status": "NOT_RUN",
+      "error": "",
+      "output_tokens": 427,
+      "policy_status": "SCHEMA_VALID",
+      "seed": 4609,
+      "success": true,
+      "touched_files": [
+        "src/decode.c"
+      ],
+      "wall_time_ms": 30012
+    }
+  ],
+  "backend": "ollama",
+  "gate": {
+    "passed": true,
+    "required_attempts": 10,
+    "schema_valid_successes": 10,
+    "status": "10 of 10 attempts returned schema-valid patch candidates",
+    "success_threshold": 3
+  },
+  "hardware": {
+    "cpu_count": 10,
+    "machine": "arm64",
+    "memory_bytes": 17179869184,
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "kind": "model-generation-attempts",
+  "model": {
+    "artifact_sha256": "3a43f93b78ec50f7c4e4dc8bd1cb3fff5a900e7d574c51a6f7495e48486e0dac",
+    "name": "codellama:7b-instruct",
+    "revision": "ollama-library/codellama"
+  },
+  "prompt": {
+    "max_output_tokens": 768,
+    "prompt_sha256": "c1efba2aba457020fd88f8af60ef6f237d8079be8f65d7c971669e4c3a4e9357",
+    "prompt_version": "patch-prompt/3",
+    "response_schema_version": "patch-candidate/1",
+    "seed": 4600,
+    "temperature": 0.0
+  },
+  "recorded_at": "2026-08-14T17:09:35.387399+00:00",
+  "schema_version": "model-prep/1",
+  "serving": {
+    "endpoint": "http://127.0.0.1:11434/api",
+    "local_only": true,
+    "policy_reason": "loopback or private address (127.0.0.0/8)",
+    "policy_rule": "allowed-network",
+    "service_names": []
+  }
+}

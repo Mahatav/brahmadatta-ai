@@ -17,8 +17,8 @@
 #   3. no Astro dev server; nginx serves the built static output
 #   4. redis requires a password
 #   5. UVICORN_FORWARDED_ALLOW_IPS is the edge subnet, not "*"
-#   6. no port is published except through nginx, and nginx binds all interfaces
-#      (the finale demo is watched from another machine)
+#   6. no port is published except through nginx, and nginx serves the stage origin on
+#      http://localhost:8080 so the operator never sees a self-signed certificate warning
 #   7. no Astro dependency-installer service — the finale has no npm step at all, so this
 #      stack satisfies C4 with no exception whatsoever
 #
@@ -51,12 +51,9 @@ services:
       - /var/run
     cap_drop: ["ALL"]
     ports:
-      # Published on all interfaces: the finale is watched from a second machine.
-      # 8080/8443 because the container is uid 101. Put a host-level 80->8080 and
-      # 443->8443 forward in front if judges must type a bare hostname; see
-      # docs/06-operations/71-ingress-and-proxy-contract.md.
-      - "8080:8080"
-      - "8443:8443"
+      # Published on loopback: the stage browser runs on the same machine. Keep the
+      # finale origin plain HTTP so there is no browser TLS warning on stage.
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/includes:/etc/nginx/includes:ro
@@ -64,7 +61,6 @@ services:
       # admin-deny.conf returns 404 for /admin and /django-admin.
       - ./nginx/profile/admin-deny.conf:/etc/nginx/profile/admin.conf:ro
       - ./nginx/conf.d.finale:/etc/nginx/conf.d:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
       # The Astro build output. Produced by `npm run build` in apps/command-center before
       # this stack starts; finale-up.sh refuses to start without it.
       - ../../apps/command-center/dist:/usr/share/nginx/html:ro
