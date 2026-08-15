@@ -8,6 +8,7 @@
     "node": ">=22 <23"
   },
   "scripts": {
+    "finale:audit": "node infrastructure/scripts/finale-closure-audit.mjs",
     "lint": "eslint . --no-error-on-unmatched-pattern",
     "lint:fix": "eslint . --fix --no-error-on-unmatched-pattern",
     "typecheck": "node infrastructure/scripts/astro-check.mjs"
