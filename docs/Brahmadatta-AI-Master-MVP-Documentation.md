@@ -563,7 +563,7 @@ Define and operationalize feature list for the Brahmadatta AI competition MVP on
 Authorization, snapshot, sandboxed build/test, static analysis, C/C++ fuzzing, sanitizer triage, reproducer minimization, Git bisect, tier routing, two self-hosted model tiers, patch policy, clean verification, evidence export, CLI/dashboard, quotas, cancellation, and GPU teardown.
 
 ## P1
-Python adapter, guided seed generation, patch ranking, coverage visualization, signed evidence, offline deployment bundle.
+Python adapter, guided seed generation, patch ranking, coverage visualization, hash-manifested, tamper-evident evidence bundles, offline deployment bundle.
 
 ## P2
 More languages, distributed fuzzing, repository pull-request integration, formal verification, and on-premises deployment manager.
@@ -649,18 +649,21 @@ Define and operationalize product roadmap for the Brahmadatta AI competition MVP
 
 Define and operationalize success metrics for the Brahmadatta AI competition MVP on rented GPUs.
 
-| Metric | MVP target |
-|---|---:|
-| Confirmed-finding precision on chosen benchmarks | ≥80% |
-| Reproducer elimination for accepted patches | 100% |
-| Regression preservation for accepted patches | 100% |
-| Verified patch rate on selected solvable cases | ≥50% |
-| Median time to first confirmed finding | ≤30 min |
-| Median confirmation-to-verdict time | ≤45 min |
-| Tier 3 escalation rate | ≤30% |
-| Complete evidence reports | 100% |
-| Unauthorized target network calls | 0 |
-| Unreleased GPU idle time after run | <10 min |
+Rows below are targets until the benchmark case set in `.project/evidence/d8-benchmark-case-set.json`
+has a measured run attached.
+
+| Metric | MVP target | Publication status |
+|---|---:|---|
+| Confirmed-finding precision on chosen benchmarks | ≥80% | Target - not measured |
+| Reproducer elimination for accepted patches | 100% | Enumerated on BD-001-A; not a percentage benchmark |
+| Regression preservation for accepted patches | 100% | Enumerated on BD-001-A; not a percentage benchmark |
+| Verified patch rate on selected solvable cases | ≥50% | Target - not measured |
+| Median time to first confirmed finding | ≤30 min | Target - not measured |
+| Median confirmation-to-verdict time | ≤45 min | Target - not measured |
+| Tier 3 escalation rate | ≤30% | Not applicable to the CPU/local-model MVP cut |
+| Complete evidence reports | 100% | Target - not measured |
+| Unauthorized target network calls | 0 | Target - guarded by topology tests; full benchmark pending |
+| Unreleased GPU idle time after run | <10 min | Not applicable to the CPU/local-model MVP cut |
 
 ---
 
@@ -2074,18 +2077,23 @@ Fail closed on policy violations, preserve partial evidence, distinguish configu
 
 Define and operationalize performance requirements for the Brahmadatta AI competition MVP on rented GPUs.
 
-| Stage | Target | Hard cap |
-|---|---:|---:|
-| Snapshot/validation | 2m | 5m |
-| Baseline build/test | 8m | 15m |
-| Static triage | 3m | 10m |
-| Initial fuzzing | 20m | 45m |
-| Reproducer minimization | 5m | 15m |
-| Git bisect | 10m | 25m |
-| Small-model candidate | 2m | 5m |
-| Kimi K3 candidate | 10m | 20m |
-| Final verification | 15m | 30m |
-| Evidence export | 30s | 2m |
+These rows are planning targets, not measured results. They may not be quoted as benchmark
+performance until a measured run against `.project/evidence/d8-benchmark-case-set.json`
+records hardware, versions, corpus, repetitions, and outputs. Runtime deadlines in code come
+from `MissionPolicy` and the recorded mission bundle, never from this table.
+
+| Stage | Planning target | Planning hard cap | Publication status |
+|---|---:|---:|---|
+| Snapshot/validation | 2m | 5m | Target - not measured |
+| Baseline build/test | 8m | 15m | Target - not measured |
+| Static triage | 3m | 10m | Target - not measured |
+| Initial fuzzing | 20m | 45m | Target - not measured |
+| Reproducer minimization | 5m | 15m | Target - not measured |
+| Git bisect | 10m | 25m | Target - not measured |
+| Small-model candidate | 2m | 5m | Target - not measured |
+| Kimi K3 candidate | 10m | 20m | Target - not measured |
+| Final verification | 15m | 30m | Target - not measured |
+| Evidence export | 30s | 2m | Target - not measured |
 
 MVP concurrency: one heavy request and two CPU/sandbox jobs. Record wall time, CPU/GPU seconds, peak memory, storage, context/output tokens, and GPU lease duration.
 

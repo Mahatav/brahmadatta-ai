@@ -1160,7 +1160,7 @@ unlikely as specified." The architectural response is the one thing that makes a
 still demonstrable: **the evidence bundle is exportable from every state, including `FAILED`
 and `HUMAN_REVIEW`** (§5.3, §6.2). If D5 or D6 slips, what exists on 2026-08-13 is still a
 system that authorizes a target, snapshots it, builds it, records real counts, and exports a
-signed-by-hash evidence bundle disclosing exactly which gates ran — which is a defensible thing
+hash-manifested, tamper-evident evidence bundle disclosing exactly which gates ran — which is a defensible thing
 to show. Designing so the partial system produces a *complete honest artifact* rather than a
 broken demo is the highest-value hedge available, and it costs nothing extra.
 

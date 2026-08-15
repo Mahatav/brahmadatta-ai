@@ -86,9 +86,31 @@ class DockerSandboxReaper:
         )
 
 
+class ModelHostReaper:
+    """Stop a mission-scoped model-host lease if PATCH started one."""
+
+    resource_kind = "model-host"
+
+    def teardown_mission(self, mission_id: UUID) -> Sequence[TeardownOutcome]:
+        from orchestrator import model_host
+
+        cfg = model_host.config_from_settings()
+        released, detail = model_host.stop_model_host_lease(mission_id, cfg=cfg)
+        if detail == "no model-host lease recorded for this mission":
+            return ()
+        return (
+            TeardownOutcome(
+                resource_kind=self.resource_kind,
+                resource_id=cfg.resource_id,
+                released=released,
+                detail=detail,
+            ),
+        )
+
+
 def default_reapers() -> tuple[MissionComputeReaper, ...]:
     runtime = getattr(settings, "SANDBOX_POLICY", {}).get("runtime", "docker")
-    return (DockerSandboxReaper(runtime=runtime),)
+    return (DockerSandboxReaper(runtime=runtime), ModelHostReaper())
 
 
 def teardown_started_compute(

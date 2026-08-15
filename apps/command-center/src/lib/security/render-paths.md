@@ -10,7 +10,7 @@ Rule: repository-derived, tool-derived, and model-derived strings enter the UI t
 | --- | --- | --- |
 | Local Repository | local path scan errors, repository name, detected stack markers, browser-selected relative paths | `LocalRepositoryIntake` sanitizes status copy and stores sanitized repository context; the manifest digest is computed from raw local metadata before display sanitization. |
 | Command Bar | mission repository ref, mission state, latest timestamp, local repository name | `store.ts` sanitizes mission repository refs and local repository context; `MissionCommandCenter` renders text only. |
-| Repo Intel | local repository display name, stack, manifest fingerprint | `store.ts` and `LocalRepositoryIntake` sanitize strings; hashes are displayed as bounded prefixes. |
+| Analysis Rail | local repository display name, stack/signal files, snapshot hash, baseline CTest counts, regression gate text | `store.ts` and `LocalRepositoryIntake` sanitize strings; hashes are displayed as bounded prefix/suffix labels with the full value only in text attributes. Long file inventories render through a bounded signal-file window. |
 | Automation Progress | stage labels, progress percentages | enum-owned values only; no raw target text. |
 | Live Work | finding title, severity/category, file path/function/line, baseline counts, latest mission message | `store.ts` sanitizes event messages and finding summaries before they reach component state. |
 | Local AI Core | selected repository name and operator prompt echo | `AIParticleCore` sanitizes repo labels, prompts, and transcript text before display. |

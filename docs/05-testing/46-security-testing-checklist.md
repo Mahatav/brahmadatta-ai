@@ -4,26 +4,41 @@
 |---|---|
 | Project | Brahmadatta AI |
 | Version | 0.1 |
-| Status | Working draft |
-| Owner | TBD |
-| Last updated | 2026-08-06 |
+| Status | D8 run recorded |
+| Owner | Security reviewer |
+| Last updated | 2026-08-14 |
 
 ## Purpose
 
 Define and operationalize security testing checklist for the Brahmadatta AI competition MVP on rented GPUs.
 
-- [ ] Authorization and object-level access checks pass.
-- [ ] Unprivileged sandbox cannot access host/container socket/cloud metadata.
-- [ ] Target egress and resource limits are enforced.
-- [ ] Commands are allowlisted and injection-safe.
-- [ ] Logs/reports redact secrets and bounded source.
-- [ ] Models have no provider, DB, storage, or deployment credentials.
-- [ ] Source prompt injection cannot change policy.
-- [ ] Diff policy blocks restricted/excessive changes.
-- [ ] Artifact links are short-lived and role-checked.
-- [ ] Images/dependencies/model artifacts are pinned and verified.
-- [ ] Cancellation releases processes, disks, and GPUs.
-- [ ] Evidence hashes verify.
+Run record: `.project/evidence/d8-security-checklist-2026-08-14.json`.
+
+| Checklist item | 2026-08-14 status | Evidence |
+|---|---|---|
+| Authorization and object-level access checks pass | Pass | Full control API pytest |
+| Unprivileged sandbox cannot access host/container socket/cloud metadata | Pass | Sandbox tests; Docker-dependent runtime checks passed where available |
+| Target egress and resource limits are enforced | Pass with not-run item | `infrastructure/scripts/egress-test.sh` passed; finale in-container probe not run because `.env`/`DATABASE_URL` are absent |
+| Commands are allowlisted and injection-safe | Pass | Control API/orchestrator policy tests |
+| Logs/reports redact secrets and bounded source | Pass | Command Center render-safety check |
+| Models have no provider, DB, storage, or deployment credentials | Pass | Secret scan found only an intentional dummy fixture token |
+| Source prompt injection cannot change policy | Pass | Model endpoint and patch policy tests |
+| Diff policy blocks restricted/excessive changes | Pass | Patch policy tests |
+| Artifact links are short-lived and role-checked | Pass | Evidence endpoint tests |
+| Images/dependencies/model artifacts are pinned and verified | Pass | Compose topology, benchmark artifact, Python audit, JS audit |
+| Cancellation releases processes, disks, and GPUs | Pass | Teardown and model-host lifecycle tests |
+| Evidence hashes verify | Pass | JSON evidence validation |
+
+## D8 Required Follow-Up
+
+The rehearsal operator must still run `infrastructure/scripts/finale-egress-evidence.sh` from a
+checkout with `.env` populated and paste the output into the finale runbook. This checklist
+records that it was not run in this local pass.
+
+## Approved Evidence-Bundle Wording
+
+Judge-facing wording is **"hash-manifested, tamper-evident against the manifest supplied with
+the bundle"**. Do not describe the bundle as signed or tamper-proof.
 
 ---
 

@@ -13,7 +13,11 @@ import {
   type LocalRepositoryContext,
   type MissionStage,
   type MissionSnapshot,
+  type StreamState,
 } from '../lib/events/store';
+
+const signalFileWindowSize = 50;
+const visibleSignalFileRows = 12;
 
 export function MissionCommandCenter() {
   const snapshot = useStore($missionSnapshot);
@@ -43,6 +47,7 @@ export function MissionCommandCenter() {
   const release = useMemo(() => releaseChip(snapshot), [snapshot]);
   const commandState = commandStateCopy(snapshot, localRepository, streamState);
   const progressRows = missionProgressRows(snapshot);
+  const analysis = analysisRailState(snapshot, streamState, localRepository);
 
   return (
     <section className="mission-shell" aria-labelledby="mission-shell-title">
@@ -86,16 +91,7 @@ export function MissionCommandCenter() {
         <div className="mission-panels">
           <VerdictComparePanel snapshot={snapshot} />
 
-          <section aria-labelledby="repo-context">
-            <h2 id="repo-context">[ REPO INTEL ]</h2>
-            <dl className="status-matrix">
-              <div><dt>Path</dt><dd>{formatLocalRepository(localRepository)}</dd></div>
-              <div><dt>Stack</dt><dd>{localRepository?.primaryStack ?? 'scan a repo'}</dd></div>
-              <div><dt>Files</dt><dd>{localRepository ? formatCount(localRepository.fileCount) : 'scan a repo'}</dd></div>
-              <div><dt>Size</dt><dd>{localRepository ? formatBytes(localRepository.totalBytes) : 'scan a repo'}</dd></div>
-              <div><dt>Fingerprint</dt><dd>{shortHash(snapshot.snapshotSha256)}</dd></div>
-            </dl>
-          </section>
+          <AnalysisRail snapshot={snapshot} localRepository={localRepository} analysis={analysis} />
 
           <section aria-labelledby="automation-progress">
             <h2 id="automation-progress">{release.label}</h2>
@@ -122,11 +118,64 @@ export function MissionCommandCenter() {
         </div>
       </div>
 
-      <div className={`resource-strip resource-strip--${release.state}`}>
+      <div className={`resource-strip resource-strip--${release.state} resource-strip--${analysis.state}`}>
         <strong>{release.label}</strong>
         <span>
           stream {streamState} / mission {missionId ?? 'none'} / repo {localRepository?.name ?? 'none'} / event {snapshot.latestSequence ?? 'none'} / gpu {gpuUsageText(snapshot)}
         </span>
+      </div>
+    </section>
+  );
+}
+
+function AnalysisRail({
+  snapshot,
+  localRepository,
+  analysis,
+}: {
+  snapshot: MissionSnapshot;
+  localRepository: LocalRepositoryContext | null;
+  analysis: AnalysisRail;
+}) {
+  const signalFiles = virtualizedSignalFiles(localRepository?.detectedFiles ?? [], visibleSignalFileRows);
+
+  return (
+    <section className={`analysis-rail analysis-rail--${analysis.state}`} aria-labelledby="analysis-rail-title">
+      <header>
+        <h2 id="analysis-rail-title">[ ANALYSIS RAIL ]</h2>
+        <strong>{analysis.label}</strong>
+      </header>
+
+      <dl className="status-matrix analysis-rail__metrics">
+        <div><dt>Repository</dt><dd>{snapshot.repositoryRef ?? formatLocalRepository(localRepository)}</dd></div>
+        <div><dt>Snapshot</dt><dd><HashReadout value={snapshot.snapshotSha256} /></dd></div>
+        <div><dt>Baseline</dt><dd>{baselineStateText(snapshot)}</dd></div>
+        <div><dt>CTest</dt><dd>{ctestCountText(snapshot)}</dd></div>
+        <div><dt>Regression</dt><dd>{regressionStateText(snapshot)}</dd></div>
+        <div><dt>Size</dt><dd>{localRepository ? formatBytes(localRepository.totalBytes) : 'scan a repo'}</dd></div>
+        <div><dt>Signal files</dt><dd>{localRepository ? `${signalFiles.total} mapped signals / ${formatCount(localRepository.fileCount)} files` : 'scan a repo'}</dd></div>
+      </dl>
+
+      <div className="analysis-rail__state">
+        <strong>{analysis.detail}</strong>
+        <span>{analysis.source}</span>
+      </div>
+
+      <div className="virtual-signal-list" data-virtualized-list="signal-files">
+        <div className="virtual-signal-list__head">
+          <span>Repository signal window</span>
+          <strong>{signalFiles.total > signalFiles.visible.length ? `[ ${signalFiles.hidden} MORE ]` : '[ FULL WINDOW ]'}</strong>
+        </div>
+        <ol
+          className="virtual-signal-list__rows"
+          aria-label={`Virtualized repository signal files, ${signalFiles.visible.length} of ${signalFiles.total} rendered`}
+        >
+          {signalFiles.visible.length > 0 ? signalFiles.visible.map((file) => (
+            <li key={file}>{file}</li>
+          )) : (
+            <li>no signal files mapped yet</li>
+          )}
+        </ol>
       </div>
     </section>
   );
@@ -157,6 +206,9 @@ function postureClass(snapshot: MissionSnapshot): string {
   if (snapshot.state === 'CANCELLED' || snapshot.posture === 'CANCELLED') {
     return 'cancelled';
   }
+  if (snapshot.degradedReason) {
+    return 'degraded';
+  }
   if (snapshot.state === 'FAILED' || snapshot.posture === 'FAILED') {
     return 'failed';
   }
@@ -183,7 +235,16 @@ function formatUtc(timestamp: string | null): string | null {
 }
 
 function shortHash(value: string | null): string {
-  return value ? value.slice(0, 12) : 'not created';
+  return value ? `${value.slice(0, 12)}...${value.slice(-6)}` : 'not created';
+}
+
+function HashReadout(props: { value: string | null }) {
+  const { value } = props;
+  if (!value) {
+    return <span>not created</span>;
+  }
+  const label = `snapshot sha256 ${value}`;
+  return <span title={value} aria-label={label}>{shortHash(value)}</span>;
 }
 
 function formatCount(value: number): string {
@@ -215,6 +276,147 @@ function releaseChip(snapshot: MissionSnapshot): { state: 'pending' | 'released'
     .join(' / ');
 
   return { state: 'released', label: `[ + ALL RESOURCES RELEASED / ${detail} ]` };
+}
+
+interface AnalysisRail {
+  state: 'idle' | 'ready' | 'running' | 'degraded' | 'failed' | 'passed';
+  label: string;
+  detail: string;
+  source: string;
+}
+
+function analysisRailState(
+  snapshot: MissionSnapshot,
+  streamState: StreamState,
+  repository: LocalRepositoryContext | null,
+): AnalysisRail {
+  const failedDetail = failedAnalysisReason(snapshot);
+  if (failedDetail) {
+    return {
+      state: 'failed',
+      label: '[ FAILED ]',
+      detail: failedDetail,
+      source: snapshot.latestSequence ? `event stream #${snapshot.latestSequence}` : 'event stream',
+    };
+  }
+
+  const degradedDetail = degradedAnalysisReason(snapshot, streamState);
+  if (degradedDetail) {
+    return {
+      state: 'degraded',
+      label: '[ DEGRADED ]',
+      detail: degradedDetail,
+      source: snapshot.latestSequence ? `event stream #${snapshot.latestSequence}` : `stream ${streamState}`,
+    };
+  }
+
+  if (snapshot.baseline?.passed) {
+    return {
+      state: 'passed',
+      label: '[ BASELINE GREEN ]',
+      detail: 'configure, build and ctest baseline passed',
+      source: snapshot.latestSequence ? `event stream #${snapshot.latestSequence}` : 'event stream',
+    };
+  }
+
+  if (snapshot.state || snapshot.stage) {
+    return {
+      state: 'running',
+      label: '[ RUNNING ]',
+      detail: snapshot.latestMessage || `${snapshot.stage ?? snapshot.state} in progress`,
+      source: snapshot.latestSequence ? `event stream #${snapshot.latestSequence}` : 'event stream',
+    };
+  }
+
+  if (repository) {
+    return {
+      state: 'ready',
+      label: '[ REPO READY ]',
+      detail: `${formatCount(repository.fileCount)} local files mapped; mission not started`,
+      source: 'browser-local scan',
+    };
+  }
+
+  return {
+    state: 'idle',
+    label: '[ IDLE ]',
+    detail: 'no repository or mission stream bound',
+    source: 'local UI only',
+  };
+}
+
+function failedAnalysisReason(snapshot: MissionSnapshot): string | null {
+  if (snapshot.failedReason) {
+    return snapshot.failedReason;
+  }
+  if (snapshot.state === 'FAILED') {
+    return snapshot.latestMessage || 'mission failed';
+  }
+  if (snapshot.state === 'REJECTED') {
+    return snapshot.latestMessage || 'mission rejected';
+  }
+  if (snapshot.baseline && !snapshot.baseline.passed) {
+    if (!snapshot.baseline.configure_ok) {
+      return 'baseline configure failed';
+    }
+    if (!snapshot.baseline.build_ok) {
+      return 'baseline build failed';
+    }
+    if (snapshot.baseline.tests_failed > 0) {
+      return `${snapshot.baseline.tests_failed} ctest failures in baseline`;
+    }
+    return 'baseline did not pass';
+  }
+  return null;
+}
+
+function degradedAnalysisReason(snapshot: MissionSnapshot, streamState: StreamState): string | null {
+  if (streamState === 'stale') {
+    return 'mission event stream is stale';
+  }
+  if (streamState === 'error') {
+    return 'mission event stream is degraded';
+  }
+  return snapshot.degradedReason;
+}
+
+function baselineStateText(snapshot: MissionSnapshot): string {
+  if (!snapshot.baseline) {
+    return 'waiting for BASELINE_RECORDED';
+  }
+  if (snapshot.baseline.passed) {
+    return 'passed from event stream';
+  }
+  return 'failed from event stream';
+}
+
+function ctestCountText(snapshot: MissionSnapshot): string {
+  const baseline = snapshot.baseline;
+  if (!baseline) {
+    return 'no ctest counts yet';
+  }
+  return `${formatCount(baseline.tests_passed)} passed / ${formatCount(baseline.tests_failed)} failed / ${formatCount(baseline.tests_total)} total`;
+}
+
+function regressionStateText(snapshot: MissionSnapshot): string {
+  const regressionGate = snapshot.verifications.at(-1)?.gates.regression_preserved;
+  if (!regressionGate) {
+    return snapshot.baseline ? 'baseline denominator ready' : 'waiting for ctest baseline';
+  }
+  return `${regressionGate.status} - ${regressionGate.tool || 'no tool recorded'}`;
+}
+
+function virtualizedSignalFiles(files: string[], visibleRows = signalFileWindowSize): {
+  visible: string[];
+  hidden: number;
+  total: number;
+} {
+  const windowSize = Math.min(Math.max(1, visibleRows), signalFileWindowSize);
+  return {
+    visible: files.slice(0, windowSize),
+    hidden: Math.max(0, files.length - windowSize),
+    total: files.length,
+  };
 }
 
 function commandStateCopy(

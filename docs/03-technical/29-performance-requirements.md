@@ -12,18 +12,23 @@
 
 Define and operationalize performance requirements for the Brahmadatta AI competition MVP on rented GPUs.
 
-| Stage | Target | Hard cap |
-|---|---:|---:|
-| Snapshot/validation | 2m | 5m |
-| Baseline build/test | 8m | 15m |
-| Static triage | 3m | 10m |
-| Initial fuzzing | 20m | 45m |
-| Reproducer minimization | 5m | 15m |
-| Git bisect | 10m | 25m |
-| Small-model candidate | 2m | 5m |
-| Kimi K3 candidate | 10m | 20m |
-| Final verification | 15m | 30m |
-| Evidence export | 30s | 2m |
+These rows are planning targets, not measured results. They may not be quoted as benchmark
+performance until a measured run against `.project/evidence/d8-benchmark-case-set.json`
+records hardware, versions, corpus, repetitions, and outputs. Runtime deadlines in code come
+from `MissionPolicy` and the recorded mission bundle, never from this table.
+
+| Stage | Planning target | Planning hard cap | Publication status |
+|---|---:|---:|---|
+| Snapshot/validation | 2m | 5m | Target - not measured |
+| Baseline build/test | 8m | 15m | Target - not measured |
+| Static triage | 3m | 10m | Target - not measured |
+| Initial fuzzing | 20m | 45m | Target - not measured |
+| Reproducer minimization | 5m | 15m | Target - not measured |
+| Git bisect | 10m | 25m | Target - not measured |
+| Small-model candidate | 2m | 5m | Target - not measured |
+| Kimi K3 candidate | 10m | 20m | Target - not measured |
+| Final verification | 15m | 30m | Target - not measured |
+| Evidence export | 30s | 2m | Target - not measured |
 
 MVP concurrency: one heavy request and two CPU/sandbox jobs. Record wall time, CPU/GPU seconds, peak memory, storage, context/output tokens, and GPU lease duration.
 

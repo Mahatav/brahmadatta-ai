@@ -13,6 +13,11 @@ async function main() {
   assert(page.includes('webkitdirectory=""'), 'browser fallback is not a real webkit directory input');
   assert(page.includes('directory=""'), 'browser fallback is not marked as a directory input');
   assert(page.includes('[ LOCAL AI CORE ]'), 'home page did not render the local AI core');
+  assert(page.includes('[ ANALYSIS RAIL ]'), 'home page did not render the issue #20 analysis rail');
+  assert(page.includes('Snapshot'), 'home page did not render snapshot status');
+  assert(page.includes('CTest'), 'home page did not render ctest count status');
+  assert(page.includes('Regression'), 'home page did not render regression status');
+  assert(page.includes('data-virtualized-list="signal-files"'), 'home page did not render the bounded signal-file list');
   assert(page.includes('[ D6 VERDICT LOOP ]'), 'home page did not render the D6 verdict compare panel');
   assert(page.includes('candidate body suppressed until provenance is present'), 'home page did not guard missing provenance');
   assert(page.includes('[ NO AUTOMATED ACTION RUNNING ]'), 'home page did not render automation progress state');

@@ -1,0 +1,36 @@
+{
+  "kind": "model-host-lifecycle",
+  "schema_version": "model-prep/1",
+  "recorded_at": "2026-08-14T18:00:00Z",
+  "issue": 36,
+  "resource": {
+    "resource_kind": "model-host",
+    "compose_profile": "model",
+    "compose_service": "model-host",
+    "hard_memory_limit": "MODEL_HOST_MEM_LIMIT, default 8g",
+    "network_boundary": "backend compose network; no host port"
+  },
+  "lifecycle": {
+    "start_trigger": "mission transition into PATCH",
+    "start_event": "RESOURCE_USAGE_SAMPLED with model_host_lease_seconds",
+    "degraded_event": "LOG with model_host_degraded=1 when runtime/config/command fails",
+    "teardown_trigger": "mission terminal/cancel teardown",
+    "teardown_event": "TEARDOWN_CONFIRMED with resource_kind=model-host and released=true on successful stop"
+  },
+  "implementation": [
+    "apps/control-api/orchestrator/model_host.py",
+    "apps/control-api/orchestrator/transitions.py",
+    "apps/control-api/orchestrator/teardown.py",
+    "apps/control-api/config/settings/base.py"
+  ],
+  "tests": [
+    "apps/control-api/orchestrator/tests/test_model_host_lifecycle.py",
+    "apps/control-api/orchestrator/tests/test_teardown.py",
+    "tests/architecture/test_compose_topology.py"
+  ],
+  "related_evidence": [
+    ".project/evidence/d5-model-serving.json",
+    ".project/evidence/d5-model-measurement.json",
+    ".project/evidence/d5-model-doctor.json"
+  ]
+}

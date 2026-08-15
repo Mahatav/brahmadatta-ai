@@ -3,11 +3,14 @@
 Issue: #61  
 Target: `demo/repositories/pktcfg`  
 Status: Defined, with missing candidate fixtures now committed.
+Issue #54 status: performance metrics relabelled; no full repeated benchmark run recorded.
 
 ## Publication Rule
 
 The current controlled set is not large enough to publish percentage benchmark claims.
 Metric rows remain targets until a measured benchmark run produces a defensible denominator.
+The 2026-08-14 audit recorded the host/tool versions in `d8-benchmark-case-set.json`; those
+conditions describe the relabelling audit, not a full performance benchmark run.
 
 ## Cases
 

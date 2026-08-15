@@ -6,6 +6,8 @@ export type MissionEventEnvelope = components['schemas']['MissionEvent'];
 export type MissionStage = components['schemas']['MissionStage'];
 export type MissionState = components['schemas']['MissionState'];
 export type MissionPosture = components['schemas']['MissionPosture'];
+export type EventStatus = components['schemas']['EventStatus'];
+export type Severity = components['schemas']['Severity'];
 export type BaselineReport = components['schemas']['BaselineReport'];
 export type FindingSummary = components['schemas']['FindingSummary'];
 export type FuzzingReport = components['schemas']['FuzzingReport'];
@@ -49,6 +51,8 @@ export interface MissionSnapshot {
   latestTimestamp: string | null;
   latestSequence: number | null;
   latestMessage: string | null;
+  latestStatus: EventStatus | null;
+  latestSeverity: Severity | null;
   traceId: string | null;
   state: MissionState | null;
   posture: MissionPosture | null;
@@ -67,6 +71,8 @@ export interface MissionSnapshot {
   verdictSummary: MissionVerdictSummary | null;
   resourceUsage: ResourceUsage | null;
   releasedResources: ReleasedResource[];
+  degradedReason: string | null;
+  failedReason: string | null;
 }
 
 export const emptyMissionSnapshot: MissionSnapshot = {
@@ -75,6 +81,8 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   latestTimestamp: null,
   latestSequence: null,
   latestMessage: null,
+  latestStatus: null,
+  latestSeverity: null,
   traceId: null,
   state: null,
   posture: null,
@@ -93,6 +101,8 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   verdictSummary: null,
   resourceUsage: null,
   releasedResources: [],
+  degradedReason: null,
+  failedReason: null,
 };
 
 export const $streamState = atom<StreamState>('idle');
@@ -134,10 +144,20 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
     latestTimestamp: event.timestamp,
     latestSequence: event.sequence,
     latestMessage: sanitizeDisplayText(event.message, { fallback: '', maxLength: 360 }),
+    latestStatus: event.status,
+    latestSeverity: event.severity,
     traceId: sanitizeDisplayText(event.trace_id, { fallback: 'unknown trace', maxLength: 120 }),
     state: event.state,
     stage: event.stage ?? snapshot.stage,
   };
+
+  if (event.status === 'FAILED') {
+    next.failedReason = sanitizeDisplayText(event.message, { fallback: 'event failed', maxLength: 240 });
+  }
+
+  if (degradedMetricKey(event.metrics) || /\b(degraded|unavailable|timeout|oom)\b/i.test(event.message)) {
+    next.degradedReason = sanitizeDisplayText(event.message, { fallback: 'degraded mode active', maxLength: 240 });
+  }
 
   if (event.payload.kind === 'state_changed') {
     next.state = event.payload.to_state;
@@ -225,9 +245,18 @@ function sanitizeLocalRepositoryContext(repository: LocalRepositoryContext): Loc
     authorizedBy: sanitizeDisplayText(repository.authorizedBy, { fallback: 'authorized operator', maxLength: 120 }),
     authorizedAt: sanitizeDisplayText(repository.authorizedAt, { fallback: 'unknown time', maxLength: 80 }),
     manifestSha256: sanitizeDisplayText(repository.manifestSha256, { fallback: 'not created', maxLength: 80 }),
-    detectedFiles: sanitizeDisplayList(repository.detectedFiles, { fallback: 'unknown file', maxLength: 240, maxItems: 64 }),
+    detectedFiles: sanitizeDisplayList(repository.detectedFiles, { fallback: 'unknown file', maxLength: 240, maxItems: 5000 }),
     primaryStack: sanitizeDisplayText(repository.primaryStack, { fallback: 'unknown stack', maxLength: 120 }),
   };
+}
+
+function degradedMetricKey(metrics: MissionEventEnvelope['metrics']): string | null {
+  if (!metrics) {
+    return null;
+  }
+  return Object.entries(metrics).find(([key, value]) => (
+    value > 0 && /degraded|timeout|oom/i.test(key)
+  ))?.[0] ?? null;
 }
 
 function sanitizeBaselineReport(report: BaselineReport): BaselineReport {

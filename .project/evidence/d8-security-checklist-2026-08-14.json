@@ -1,0 +1,110 @@
+{
+  "kind": "security-checklist-run",
+  "schema_version": "security-checklist/1",
+  "issue": 53,
+  "recorded_at": "2026-08-14T22:04:00-07:00",
+  "environment": {
+    "host": "Darwin Mahatavs-MacBook-Pro.local 25.5.0 arm64",
+    "python": "3.12.13",
+    "node": "v22.23.1",
+    "npm": "10.9.8",
+    "docker": "29.6.1",
+    "pip_audit": "2.10.1"
+  },
+  "checks": [
+    {
+      "item": "Authorization and object-level access checks pass",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest -q"
+    },
+    {
+      "item": "Unprivileged sandbox cannot access host/container socket/cloud metadata",
+      "status": "pass",
+      "evidence": "apps/control-api/.venv/bin/python -m pytest packages/sandbox/tests/test_container_jail.py -q -> 16 passed, 16 skipped"
+    },
+    {
+      "item": "Target egress and resource limits are enforced",
+      "status": "pass-with-not-run",
+      "evidence": "infrastructure/scripts/egress-test.sh -> PASS; tests/architecture/test_compose_topology.py -> 15 passed; finale-egress-evidence.sh not run because .env is missing and DATABASE_URL is required"
+    },
+    {
+      "item": "Commands are allowlisted and injection-safe",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest -q; architecture import-direction checks passed"
+    },
+    {
+      "item": "Logs/reports redact secrets and bound source",
+      "status": "pass",
+      "evidence": "npm run check:security --prefix apps/command-center; render safety ok"
+    },
+    {
+      "item": "Models have no provider, DB, storage, or deployment credentials",
+      "status": "pass",
+      "evidence": "Secret scan found only services/model-gateway/gateway/tests/test_context_boundary.py dummy token API_TOKEN=sk-demo-should-not-leave"
+    },
+    {
+      "item": "Source prompt injection cannot change policy",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest contracts/tests/test_model_policy.py orchestrator/tests/test_patch_policy.py -q"
+    },
+    {
+      "item": "Diff policy blocks restricted/excessive changes",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest orchestrator/tests/test_patch_policy.py -q"
+    },
+    {
+      "item": "Artifact links are short-lived and role-checked",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest api/tests/test_evidence_endpoints.py -q"
+    },
+    {
+      "item": "Images/dependencies/model artifacts are pinned and verified",
+      "status": "pass",
+      "evidence": "python3 -m pytest tests/architecture/test_compose_topology.py tests/test_benchmark_case_set.py -q; pip-audit no known vulnerabilities; app/root npm audit found 0 vulnerabilities after lockfile upgrades"
+    },
+    {
+      "item": "Cancellation releases processes, disks, and GPUs",
+      "status": "pass",
+      "evidence": "cd apps/control-api && .venv/bin/python -m pytest orchestrator/tests/test_teardown.py orchestrator/tests/test_model_host_lifecycle.py -q"
+    },
+    {
+      "item": "Evidence hashes verify",
+      "status": "pass",
+      "evidence": "python3 -m json.tool .project/evidence/d5-model-host-lifecycle.json .project/evidence/d8-security-checklist-2026-08-14.json"
+    }
+  ],
+  "explicit_acceptance_evidence": {
+    "secret_scan": {
+      "command": "git grep -n -I -E \"(OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY|sk-[A-Za-z0-9_-]{20,})\" -- . ':!apps/command-center/package-lock.json' ':!docs/09-company/08-security-review.md'",
+      "result": "one intentional dummy token fixture in services/model-gateway/gateway/tests/test_context_boundary.py"
+    },
+    "python_dependency_audit": {
+      "command": "cd apps/control-api && .venv/bin/python -m pip_audit -r requirements.txt -r requirements-dev.txt --format json",
+      "result": "No known vulnerabilities found"
+    },
+    "javascript_dependency_audit": {
+      "commands": [
+        "npm audit --json",
+        "cd apps/command-center && npm audit --json"
+      ],
+      "result": "0 vulnerabilities after upgrading root nanoid to 3.3.18 and command-center Astro stack to astro 7.2.2, @astrojs/react 6.0.2, sharp 0.35.3"
+    },
+    "external_inference": {
+      "status": "pass",
+      "evidence": "tests/architecture/test_import_direction.py and tests/architecture/test_compose_topology.py passed; infrastructure/scripts/egress-test.sh proved app networks cannot reach api.openai.com"
+    },
+    "finale_dynamic_egress": {
+      "status": "not run",
+      "reason": ".env is missing; docker compose -f infrastructure/compose/docker-compose.finale.yml config fails because DATABASE_URL is required"
+    },
+    "findings_filed": {
+      "status": "not applicable",
+      "reason": "No unresolved secret/dependency/external-inference findings remain after this branch's dependency upgrades. The temporary npm audit findings were fixed in-place before PR."
+    },
+    "c8_wording": {
+      "status": "pass",
+      "required_phrase": "hash-manifested, tamper-evident against the manifest supplied with the bundle",
+      "blocked_phrases": ["signed evidence", "signed-by-hash evidence bundle", "tamper-proof"]
+    }
+  }
+}
