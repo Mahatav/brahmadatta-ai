@@ -376,6 +376,10 @@ button:disabled {
   color: var(--bd-state-running);
 }
 
+.core-panel--degraded {
+  color: var(--bd-state-warning);
+}
+
 .core-panel--verified {
   color: var(--bd-state-verified);
 }
@@ -654,6 +658,135 @@ button:disabled {
 
 .stage-step--complete strong {
   color: var(--bd-state-verified);
+}
+
+.analysis-rail {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: var(--bd-space-2);
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.analysis-rail > header {
+  display: flex;
+  min-inline-size: 0;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--bd-space-3);
+}
+
+.analysis-rail > header strong,
+.analysis-rail__state strong,
+.virtual-signal-list__head strong {
+  font-size: var(--bd-type-mono-xs);
+  font-weight: normal;
+  line-height: var(--bd-type-mono-xs-lh);
+  white-space: nowrap;
+}
+
+.analysis-rail--idle > header strong {
+  color: var(--bd-state-idle);
+}
+
+.analysis-rail--ready > header strong,
+.analysis-rail--running > header strong {
+  color: var(--bd-state-running);
+}
+
+.analysis-rail--passed > header strong {
+  color: var(--bd-state-verified);
+}
+
+.analysis-rail--degraded > header strong,
+.resource-strip--degraded strong {
+  color: var(--bd-state-warning);
+}
+
+.analysis-rail--failed > header strong,
+.resource-strip--failed strong {
+  color: var(--bd-state-critical);
+}
+
+.analysis-rail__metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--bd-space-2) var(--bd-space-3);
+}
+
+.analysis-rail__metrics div {
+  grid-template-columns: 78px minmax(0, 1fr);
+  min-inline-size: 0;
+}
+
+.analysis-rail__metrics dd {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.analysis-rail__state {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--bd-space-3);
+  min-inline-size: 0;
+  border-block-start: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-white) 18%, transparent);
+  padding-block-start: var(--bd-space-2);
+}
+
+.analysis-rail__state strong,
+.analysis-rail__state span {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-rail__state span,
+.virtual-signal-list__head,
+.virtual-signal-list__rows {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  line-height: var(--bd-type-mono-2xs-lh);
+}
+
+.virtual-signal-list {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--bd-space-1);
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.virtual-signal-list__head {
+  display: flex;
+  min-inline-size: 0;
+  justify-content: space-between;
+  gap: var(--bd-space-2);
+}
+
+.virtual-signal-list__head span,
+.virtual-signal-list__head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.virtual-signal-list__rows {
+  display: grid;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 1px;
+  min-block-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style-position: inside;
+  overflow: hidden;
+}
+
+.virtual-signal-list__rows li {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-matrix {

@@ -89,6 +89,47 @@ jobs:
         run: npm run lint
 
   # ---------------------------------------------------------------------------
+  # #53 / SEC-P3. Dependency audit is security evidence, not cleanup. Run both
+  # package ecosystems in CI so the checklist cannot be ticked from a manual run
+  # that immediately goes stale.
+  dependency-audit:
+    name: dependency audit (Python + JS)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/command-center/package-lock.json
+
+      - name: Python dependency audit
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.10.1
+          pip-audit -r apps/control-api/requirements.txt -r apps/control-api/requirements-dev.txt
+
+      - name: Root JS dependency audit
+        run: |
+          set -euo pipefail
+          npm ci
+          npm audit --audit-level=moderate
+
+      - name: Command Center JS dependency audit
+        run: |
+          set -euo pipefail
+          npm ci --prefix apps/command-center
+          npm audit --prefix apps/command-center --audit-level=moderate
+
+  # ---------------------------------------------------------------------------
   pytest:
     name: pytest
     runs-on: ubuntu-24.04

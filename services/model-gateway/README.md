@@ -156,6 +156,19 @@ pinned Ollama image on the internal `backend` network with `mem_limit` set, and 
 route. Use it when the model store has already been prepared; the app-facing loopback path
 above remains the quickest local developer check.
 
+The control API now treats that host as mission-scoped compute when
+`MODEL_HOST_LIFECYCLE_ENABLED=true`. Entering `PATCH` runs:
+
+```sh
+docker compose -f "$MODEL_HOST_COMPOSE_FILE" --profile model up -d model-host
+```
+
+and records `RESOURCE_USAGE_SAMPLED` with `model_host_lease_seconds`. Terminal and cancel
+states run the same compose target through the `ModelHostReaper`, then emit
+`TEARDOWN_CONFIRMED` with `resource_kind=model-host`. If Docker, the compose file, or the
+command is unavailable, the mission does not hang: the orchestrator emits a degraded `LOG`
+event and the deterministic tier remains active.
+
 ## Context boundary
 
 `gateway.context.build_context(finding, policy)` is the only producer of

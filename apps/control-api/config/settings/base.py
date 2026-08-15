@@ -154,6 +154,20 @@ MODEL_SERVICE_NAMES = frozenset(
     if name.strip()
 )
 
+MODEL_HOST_LIFECYCLE = {
+    "enabled": env.get_bool("MODEL_HOST_LIFECYCLE_ENABLED", False),
+    "runtime": env.get_str("MODEL_HOST_RUNTIME", "docker"),
+    "compose_file": env.get_str(
+        "MODEL_HOST_COMPOSE_FILE",
+        str(BASE_DIR.parent.parent / "infrastructure" / "compose" / "docker-compose.yml"),
+    ),
+    "profile": env.get_str("MODEL_HOST_COMPOSE_PROFILE", "model"),
+    "service": env.get_str("MODEL_HOST_COMPOSE_SERVICE", "model-host"),
+    "resource_id": env.get_str("MODEL_HOST_RESOURCE_ID", "model-host"),
+    "lease_seconds": env.get_int("MODEL_HOST_LEASE_SECONDS", 1800),
+    "command_timeout_seconds": env.get_int("MODEL_HOST_COMMAND_TIMEOUT_SECONDS", 60),
+}
+
 # --- Sandbox policy defaults ---------------------------------------------------
 #
 # Consumed by the orchestrator (D2, issue #12) and by

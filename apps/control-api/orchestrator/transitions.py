@@ -212,6 +212,12 @@ def transition(
                     mission_id, trace_id=trace_id, reason=reason, now=now
                 )
             )
+        if target is MissionState.PATCH:
+            transaction.on_commit(
+                lambda: _start_model_host_after_commit(
+                    mission_id, trace_id=trace_id, now=now
+                )
+            )
 
     return TransitionResult(
         mission_id=mission.id,
@@ -236,6 +242,12 @@ def _run_teardown_after_commit(
         reason=reason or "mission entered teardown state",
         now=now,
     )
+
+
+def _start_model_host_after_commit(mission_id: UUID, *, trace_id: str, now) -> None:
+    from orchestrator import model_host
+
+    model_host.start_model_host_lease(mission_id, trace_id=trace_id, now=now)
 
 
 def _apply(

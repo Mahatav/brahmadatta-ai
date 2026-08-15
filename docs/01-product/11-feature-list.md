@@ -16,7 +16,7 @@ Define and operationalize feature list for the Brahmadatta AI competition MVP on
 Authorization, snapshot, sandboxed build/test, static analysis, C/C++ fuzzing, sanitizer triage, reproducer minimization, Git bisect, tier routing, two self-hosted model tiers, patch policy, clean verification, evidence export, CLI/dashboard, quotas, cancellation, and GPU teardown.
 
 ## P1
-Python adapter, guided seed generation, patch ranking, coverage visualization, signed evidence, offline deployment bundle.
+Python adapter, guided seed generation, patch ranking, coverage visualization, hash-manifested, tamper-evident evidence bundles, offline deployment bundle.
 
 ## P2
 More languages, distributed fuzzing, repository pull-request integration, formal verification, and on-premises deployment manager.
