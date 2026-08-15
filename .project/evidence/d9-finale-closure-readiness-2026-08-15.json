@@ -1,0 +1,100 @@
+{
+  "kind": "finale-closure-readiness",
+  "schema_version": "finale-closure-readiness/1",
+  "generated_at": "2026-08-15T05:18:38.216Z",
+  "issues": [
+    50,
+    57,
+    59,
+    60
+  ],
+  "status": "blocked",
+  "summary": "Finale closure is not claimable yet; blocked or failed checks remain.",
+  "checks": [
+    {
+      "id": "env",
+      "description": "Finale .env exists with host-local secrets",
+      "status": "blocked",
+      "detail": ".env is missing; finale-up.sh correctly refuses to boot without it.",
+      "evidence": []
+    },
+    {
+      "id": "command-center-dist",
+      "description": "Command Center production build output exists",
+      "status": "pass",
+      "detail": "apps/command-center/dist exists.",
+      "evidence": []
+    },
+    {
+      "id": "fallback-recording",
+      "description": "Fallback recording exists as a complete playable local file",
+      "status": "pass",
+      "detail": "fallback-demo-d6.html sha256=1c1b74e68067cadf2a68f7c8fa4c9e4d069dc8dedc12f0b93f238d3fc931f977; manifest playable_offline=true.",
+      "evidence": [
+        ".project/evidence/fallback-demo-d6.html",
+        ".project/evidence/fallback-demo-d6-manifest.json"
+      ]
+    },
+    {
+      "id": "docker",
+      "description": "Docker daemon is reachable for finale rehearsal",
+      "status": "blocked",
+      "detail": "docker info failed; finale stack and zero-stray checks cannot run on this host session.",
+      "evidence": []
+    },
+    {
+      "id": "node",
+      "description": "Node runtime exists for Command Center checks",
+      "status": "pass",
+      "detail": "node v22.23.1",
+      "evidence": []
+    },
+    {
+      "id": "nginx-static",
+      "description": "Finale nginx profile validates statically",
+      "status": "blocked",
+      "detail": "Skipped because nginx validation runs in Docker and Docker is unavailable.",
+      "evidence": []
+    },
+    {
+      "id": "compose-config",
+      "description": "Finale compose config validates with the host .env",
+      "status": "blocked",
+      "detail": "Skipped because .env is missing.",
+      "evidence": []
+    },
+    {
+      "id": "docker-strays",
+      "description": "Docker container list captured for stray-process review",
+      "status": "blocked",
+      "detail": "Skipped because Docker is unavailable.",
+      "evidence": []
+    }
+  ],
+  "commands": [
+    {
+      "command": "docker info",
+      "status": 1,
+      "signal": null,
+      "stdout": "Client:\n Version:    29.6.1\n Context:    desktop-linux\n Debug Mode: false\n Plugins:\n  agent: Docker AI Agent Runner (Docker Inc.)\n    Version:  v1.88.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-agent\n  ai: Docker AI Agent - Ask Gordon (Docker Inc.)\n    Version:  v1.27.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-ai\n  buildx: Docker Buildx (Docker Inc.)\n    Version:  v0.35.0-desktop.2\n    Path:     /Users/manu/.docker/cli-plugins/docker-buildx\n  compose: Docker Compose (Docker Inc.)\n    Version:  v5.2.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-compose\n  debug: Get a shell into any image or container (Docker Inc.)\n    Version:  0.0.47\n    Path:     /Users/manu/.docker/cli-plugins/docker-debug\n  desktop: Docker Desktop commands (Docker Inc.)\n    Version:  v0.4.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-desktop\n  dhi: CLI for managing Docker Hardened Images (Docker Inc.)\n    Version:  v0.0.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-dhi\n  extension: Manages Docker extensions (Docker Inc.)\n    Version:  v0.2.31\n    Path:     /Users/manu/.docker/cli-plugins/docker-extension\n  init: Creates Docker-related starter files for your project (Docker Inc.)\n    Version:  v1.4.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-init\n  mcp: Docker MCP Plugin (Docker Inc.)\n    Version:  v0.43.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-mcp\n  model: Docker Model Runner (Docker Inc.)\n    Version:  v1.2.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-model\n  offload: Docker Offload (Docker Inc.)\n    Version:  v0.6.7\n    Path:     /Users/manu/.docker/cli-plugins/docker-offload\n  pass: Docker Pass Secrets Manager Plugin (beta) (Docker Inc.)\n    Version:  v0.1.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-pass\n  sandbox: \"docker sandbox\" is deprecated, use Docker Sandboxes instead (Docker Inc.)\n    Version:  v0.13.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-sandbox\n  scout: Docker Scout (Docker Inc.)\n    Version:  v1.22.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-scout\n\nServer:",
+      "stderr": "permission denied while trying to connect to the docker API at unix:///Users/manu/.docker/run/docker.sock",
+      "timedOut": false,
+      "missing": false
+    },
+    {
+      "command": "node --version",
+      "status": 0,
+      "signal": null,
+      "stdout": "v22.23.1",
+      "stderr": "",
+      "timedOut": false,
+      "missing": false
+    }
+  ],
+  "closeability": {
+    "issue_50": "blocked until finale-up and nine-step run execute successfully",
+    "issue_57": "blocked until at least three full timed rehearsals run after issue #50 passes",
+    "issue_59": "blocked on CEO decision for physical roster and registration/travel constraints",
+    "issue_60": "blocked until issue #57 passes, release tag is cut, rollback is tested, and branch protection is tightened"
+  }
+}

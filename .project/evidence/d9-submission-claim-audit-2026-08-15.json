@@ -1,0 +1,51 @@
+{
+  "kind": "submission-claim-audit",
+  "schema_version": "submission-claim-audit/1",
+  "generated_at": "2026-08-15T00:00:00-07:00",
+  "issue": 58,
+  "status": "pass",
+  "summary": "The five-slide outline was updated so every judge-facing claim is either traceable to repository evidence or explicitly marked as cut / not measured.",
+  "source": "docs/10-competition/five-slide-submission-outline.md",
+  "acceptance": {
+    "every_claim_traceable_to_running_repository_artifact": "pass",
+    "every_number_measured_or_marked_target_not_measured": "pass",
+    "heavy_model_named_only_if_confirmed": "pass",
+    "reviewed_against_p0_cut": "pass",
+    "human_writing_pass": "pass"
+  },
+  "removed_or_reworded_claims": [
+    {
+      "claim": "FastAPI control plane",
+      "resolution": "Corrected to Django API to match the built backend."
+    },
+    {
+      "claim": "live heavy-model escalation on rented dedicated GPUs",
+      "resolution": "Reworded as a designed escalation path only; not claimed live in the CPU/local-model MVP cut."
+    },
+    {
+      "claim": "visible rented-GPU utilization and teardown confirmation",
+      "resolution": "Replaced with local model-host lifecycle and teardown confirmation."
+    }
+  ],
+  "evidence_links": [
+    ".project/evidence/d5-model-serving.json",
+    ".project/evidence/d5-model-host-lifecycle.json",
+    ".project/evidence/d6-model-generation-attempts.json",
+    ".project/evidence/d6-verdict-loop-gate.json",
+    ".project/evidence/d8-benchmark-case-set.json",
+    ".project/evidence/d8-security-checklist-2026-08-14.json",
+    ".project/evidence/fallback-demo-d6-manifest.json"
+  ],
+  "blocked_claims": [
+    {
+      "claim": "D7 full unattended finale run passed",
+      "status": "not claimed",
+      "reason": "Issue #50 remains open until the run executes on the final machine."
+    },
+    {
+      "claim": "three timed finale rehearsals completed",
+      "status": "not claimed",
+      "reason": "Issue #57 depends on #50 and requires live rehearsal timings."
+    }
+  ]
+}
