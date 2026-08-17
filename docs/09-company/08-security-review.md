@@ -4659,3 +4659,205 @@ the code.
 
 This does not reopen any prior Critical (SEC-01, closed in §12) and does not introduce a new
 Critical or High. My veto is not exercised on PR #130.
+
+---
+
+## 20. Re-verification — 2026-08-16 · PR #162 `fix/159-sandbox-race` · SEC-38 and SEC-35, independently re-attacked, not re-read
+
+Per D-056 and #159: SEC-38 (MEDIUM) and SEC-35 (MEDIUM) were binding conditions on `#28`'s
+fuzzing worker, tracked as open on `packages/sandbox/jail.py` since Round 5 (§17). #159 exists
+because that re-verification was never actually done before `workers/replay/run.py` started
+importing `packages.sandbox.Jail` for the crash-reproducer replay path (`#83`) — the closest
+thing to an adversarial-target consumer this module currently has, since `workers/fuzzing/run.py`
+itself uses `packages.sandbox.container.ContainerJail` (`#15`), not this subprocess jail, for the
+actual fuzz-target execution. #162 claims both are fixed. This round attacks that claim directly;
+it does not accept the author's own 70-run report as sufficient on its own (D-056's own standing
+rule), and it does not accept the PR's or the module docstring's framing on the strength of the
+diff reading alone.
+
+**Reviewed at `d12bb4b` (`origin/fix/159-sandbox-race`)**, an existing worktree already checked
+out at the exact PR head (`/private/tmp/.../scratchpad/wt-159`), diffed against `origin/main`.
+`git diff origin/main...HEAD --stat` confirms the changeset is exactly the three files the PR
+claims — `packages/sandbox/jail.py`, `packages/sandbox/README.md`,
+`packages/sandbox/tests/test_jail.py` — no scope creep into any other module. No code in
+`packages/sandbox/` was edited by me. Only this document was written to.
+
+Everything below ran inside `python:3.12-slim` in Docker (the sweep and the `RLIMIT_FSIZE`
+`SIGXFSZ` behavior this PR fixes are both Linux-specific and untested on the reviewer's own
+Darwin host, matching how Round 5 handled the same platform split).
+
+### 20.1 Baseline — reproduced, not taken on report
+
+```
+$ pytest packages/sandbox/tests -q -rs        # python:3.12-slim, fresh venv from requirements-dev.txt
+ss.........s...sssssssssssssssss.........s...................    [100%]
+49 passed, 19 skipped
+```
+
+Matches the PR's own reported 49/19. `ruff check packages/sandbox`: all checks passed. `mypy
+packages/sandbox/jail.py`: no issues. `pip-audit -r requirements-dev.txt`: no known
+vulnerabilities. `grep -rn "TOKEN|SECRET|PASSWORD|API_KEY|-----BEGIN"` over
+`packages/sandbox/**/*.py,*.md`: only the same placeholder test-fixture strings Round 5 already
+cleared (`test_environment_is_scrubbed_to_the_allowlist`), no real credential.
+
+### 20.2 SEC-38 — attacked well past the author's own test, holds
+
+**The author's own regression test, `test_sweep_catches_rapid_repeated_detachment`, rerun 45
+times** (two separate batches of 25 and 20, fresh Docker container per batch, real default
+`kill_grace_seconds=5.0`, not tightened): **0 failures / 45**.
+
+**My own, deliberately harder adversarial variant**, built to go beyond the author's shape rather
+than re-run it:
+
+- **Four levels of nested `os.setsid()` detachment** (driver → three concurrently-started
+  "mid" processes, each detaching independently → a tight fork loop per mid-process → each
+  leaf itself detaches *and* forks one more short-lived grandchild before settling), not the
+  author's two.
+- **~2ms fork cadence** sustained for the whole 4-second window (vs the author's ~20ms), across
+  **three independent, staggered-start detachment chains running concurrently** rather than one
+  serial chain — deliberately maximizing the number of fork events landing inside the
+  discover/freeze window on any given sweep pass.
+- Result: **60 runs (20 + 40 across two separate batches), 0 escapes**, each run producing
+  roughly **3,500–3,800** tracked leaf/grandchild pids (**~220,000 real process creations across
+  the whole session**, not counting the 45 reruns of the author's own test or the baseline suite
+  runs). Every run: `WALL_CLOCK` correctly reported on the direct child, and zero of the tracked
+  descendants still alive after the sweep, checked by polling `/proc/<pid>/stat` for a real
+  running (non-zombie) state, not by trusting the jail's own return value.
+
+**SIGSTOP-evasion, checked directly, not assumed.** The task asked whether a process can block
+`SIGSTOP`. `signal.signal(SIGSTOP, ...)` raises `EINVAL` immediately — confirmed. More
+interestingly, `signal.pthread_sigmask(SIG_BLOCK, [SIGSTOP])` does **not** raise — but an
+executed PoC (fork a child, have it block `SIGSTOP` via `pthread_sigmask`, spin, then
+`SIGSTOP` it from the parent and read back `/proc/<pid>/stat`) confirms the kernel silently
+overrides the requested block and the process lands in state `T` anyway. `_freeze`'s
+correctness does not rest on an assumption that happens to be untested; it rests on a real
+POSIX guarantee I independently reproduced.
+
+**Genuine PID-space wraparound was observed live, unprompted, during the 40-run batch** — the
+per-run probe pid climbed from 3,513 (run 1) to 98,747 (run 27), then wrapped to 2,691 (run 28)
+and climbed again, meaning real PID reuse occurred across runs in this exact session (a pid
+used by a killed leaf early in the batch was later reissued to an unrelated process by the
+kernel). The sweep still caught 100% of descendants in every one of those 40 runs, including the
+ones immediately after the observed wrap.
+
+**Residual, not closed by this fix, and not closeable by it (SEC-41, LOW/INFORMATIONAL, new).**
+`pending` and `frozen` in `_sweep_detached_descendants` are `set[int]` — bare OS pids, with no
+process-identity check (no `/proc/<pid>/stat` start-time field, no `pidfd`). Once a pid is added
+to `frozen`, the loop never re-verifies that the pid number still refers to the same process
+before a later pass's `to_freeze = {pid for pid in pending if pid not in frozen and
+_pid_running(pid)}` check. If the *same sweep's own* tracked pid set were to recycle a pid it had
+itself already frozen-and-killed *within that one sweep's ~5-second window*, a new, unrelated
+process later allocated that exact pid number would be treated as "already frozen" and sent
+`SIGKILL` directly, without ever being frozen and confirmed — reintroducing the exact
+kill-on-discovery race this fix exists to close, for that one pid. I could not trigger this live:
+it requires a single sweep's own churn (my hardest variant produced ~3,800 pids in ~5 seconds) to
+exceed the kernel's pid space before wrapping back onto a number it had itself already used,
+which is roughly 25–30x further than what I could get a single `jail.run()` call to produce in
+the time available, and is a generic hazard of any pid-integer-based process tracking on POSIX,
+not something SEC-38's design was ever going to close without the namespace isolation `#15`
+exists for — the module's own top-of-file docstring already says exactly that ("not a sandbox
+for untrusted code... #15 is the ticket"). Recording it rather than silently dropping it, the
+same way Round 5 recorded the `Jail.resolve()` TOCTOU (§17.10) as judged-low-value-to-chase
+rather than omitted. **Not a merge blocker; suggested follow-up if this module is ever pushed to
+significantly higher fork rates than tested here** — e.g. comparing `/proc/<pid>/stat` field 22
+(`starttime`) at freeze-time and again before the final kill would close it cheaply.
+
+**SEC-38 verdict: holds.** The specific race named in #159 (rapid, repeated fork-and-detach
+losing the thread once the pre-kill snapshot's root died) does not reproduce under either the
+author's test or a materially harder one, across 105 total runs of the two variants combined and
+genuine observed PID reuse.
+
+### 20.3 SEC-35 — the named gap holds; two new, narrower residual findings
+
+**The author's own regression test** (`test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz`)
+reran clean as part of §20.1's full-suite pass, and independently: `signal.getsignal(SIGXFSZ) is
+SIG_IGN` confirmed at CPython interpreter start, `limit_hit == FILE_SIZE` confirmed on a real 50
+MiB write against a 1 MiB cap.
+
+**Attacked against a target class the author didn't test: a compiled C binary, not Python, not
+`dd`.** Wrote and compiled (`gcc -O2`) a small C program that calls `signal(SIGXFSZ, SIG_IGN)`
+explicitly, then writes past `RLIMIT_FSIZE` in a loop:
+
+```
+exit_code: 1   signal_number: None   limit_hit: FILE_SIZE
+stderr: write failed: File too large (errno=27)
+```
+
+Correctly classified. A second variant, deliberately printing **nothing** recognizable to
+stderr (no "File too large"/"Errno 27"/"EFBIG"), forcing `_classify` to rely purely on the
+on-disk-size fallback rather than the stderr-marker check: also correctly classified as
+`FILE_SIZE`. Both hold — the fix generalizes past the one interpreter default it was written
+against.
+
+**SEC-39 (MEDIUM, new) — false negative: a target that deletes its own oversized output before
+exiting defeats both fallbacks at once.** A third C variant — `SIG_IGN(SIGXFSZ)`, no stderr
+output, and an explicit `unlink("toolarge.bin")` on the failing path before `return 1` (simulating
+ordinary "clean up partial output on error" behavior, not necessarily hostile intent) —
+reproducibly gets `limit_hit == NONE`. `_max_file_size(workdir)` runs strictly after the process
+has already exited, by which point the file this specific PoC wrote is already gone; the stderr
+marker never existed either. This is the exact residual the task brief predicted and it is real,
+not hypothetical — it needs no adversarial cleverness, just a target that tidies its own failed
+output, which is unremarkable behavior for a build step. Same class as the original SEC-35: an
+evidence-accuracy gap, not an isolation escape — `RLIMIT_FSIZE` still stopped the write in every
+run; only the recorded reason is wrong.
+
+**SEC-40 (MEDIUM, new) — false positive: an unrelated failure is misclassified as `FILE_SIZE`
+whenever any file `>= max_file_bytes` already sits anywhere in a shared workdir.** Constructed a
+jail run where a 2 MiB file was pre-staged in the jail root (standing in for a legitimate
+artifact left by an earlier step) against a 1 MiB `max_file_bytes` policy, then ran an ordinary
+`sys.exit(1)` that touches no file at all:
+
+```
+exit_code: 1   limit_hit: FILE_SIZE   stderr: ''   stdout: 'ordinary failure, unrelated to file size'
+```
+
+Misclassified. The check is `_max_file_size(workdir) >= self._policy.max_file_bytes` — an
+unbounded, whole-tree, any-age scan with a `>=` comparison, despite `_classify`'s own comment
+correctly noting `RLIMIT_FSIZE` stops a write at *exactly* the cap (soft == hard, no
+partial-warning stage), which is a stronger and available signal (`==`) the current check doesn't
+use. This is not purely synthetic: `workers/baseline/run.py` opens exactly **one** `Jail` for the
+whole configure+build+ctest sequence and runs multiple commands against the same shared workdir
+(confirmed by reading `workers/baseline/run.py:190` and its docstring) — a legitimately large
+artifact from an earlier, successful step can poison the classification of a later, textually
+unrelated failure in the same jail. Tempered by the real default (`max_file_bytes=512 MiB`,
+`policy.py:59`): an accidental collision from ordinary C/C++ build byproducts is uncommon, but not
+implausible for large sanitizer-instrumented binaries, embedded debug symbols, or fuzzing-corpus
+artifacts — exactly the workload class `#28`/`#83` exist for.
+
+**SEC-35 verdict: the specific gap #159 named (CPython's default `SIGXFSZ` disposition) holds,
+independently reproduced and generalized to a non-Python target.** Two new, narrower
+evidence-accuracy findings (SEC-39, SEC-40) are open — same non-blocking class D-056 already
+established for this exact kind of defect, recommend tracked follow-up issues rather than
+reopening #159 over them.
+
+### 20.4 Process note, not a security finding
+
+`SEC-38` is currently used for two unrelated findings in this document's own history: the nginx
+`client_max_body_size` DoS (§19.2, closed in `#132`) and the sandbox descendant-race this round
+re-verifies (first named in D-056, predating my access to whatever section originally recorded
+it). I have not renumbered either — `jail.py`'s own docstring, the PR, and D-056 all already use
+"SEC-38" consistently for the sandbox finding, and renumbering retroactively would break that
+trail. New findings in this round use the next free numbers (**SEC-39, SEC-40, SEC-41** — the
+highest previously-used ID in this document was SEC-38). Flagging the collision for whoever next
+does ID bookkeeping, not fixing it unilaterally.
+
+### 20.5 Verdict
+
+**CLEARED.** No Critical or High. `#159`'s re-verification requirement and D-056's binding
+condition are satisfied for the two specifically named findings:
+
+- **SEC-38** — independently re-attacked (105 total adversarial runs across two variants, one
+  deliberately harder than the author's own, plus a direct SIGSTOP-evasion check and observed
+  live PID-space wraparound) and holds. Not mathematically proven airtight — the author's own
+  framing — and this review adds one specific reason why not (SEC-41, LOW/INFORMATIONAL,
+  requires ~25-30x the fork rate achieved here within a single sweep window, not achieved live).
+- **SEC-35** — independently re-attacked against a target class (compiled C, explicit `SIG_IGN`,
+  both with and without a recognizable stderr marker) the author's own test didn't cover, and
+  holds. Two new, narrower MEDIUM findings (SEC-39 false-negative-via-self-cleanup, SEC-40
+  false-positive-via-shared-workdir-leftover) are open, same evidence-accuracy-not-escape class
+  already established as non-blocking by D-056, and do not reopen #159.
+
+`packages/sandbox` may be relied on by `#28`/`#83` for the two properties #159 named. SEC-39,
+SEC-40, and SEC-41 should get their own tracked follow-up issues — recommending that now rather
+than letting them live only in this document, the same standing instruction §19's SEC-38 (nginx)
+finding was closed under.
