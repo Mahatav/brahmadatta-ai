@@ -3714,3 +3714,195 @@ will need this same reachability and may prefer to resolve it structurally rathe
 awareness beyond this task's own reviewer.
 
 ---
+
+
+## D-069 — Wiring `MissionState.CANCELLING` into `orchestrator.queue.JOB_BACKED_STATES`, and keeping the synchronous teardown hook rather than removing it · 2026-08-17 · `backend-developer` seat
+
+Posted while closing the gap PR #173's own engineering-manager review round found and
+correctly blocked merge on (documented, not silently missed — see the PR's review thread):
+`teardown_transition_policy` (D-068) was correct and fully tested, but unreachable, because
+`orchestrator.queue.JOB_BACKED_STATES` — the only thing that decides which missions get a
+`Job` enqueued (`ensure_jobs_enqueued`) or get their terminal job dispatched
+(`dispatch_terminal_jobs`) — deliberately excluded `MissionState.CANCELLING`. A mission
+entering `CANCELLING` therefore never got a `TEARDOWN` job, `dispatch_terminal_jobs` never had
+one to route, and the pre-existing synchronous `_run_teardown_after_commit` hook (real, still
+tested by `orchestrator/tests/test_teardown.py`, unchanged by #173) never calls
+`transitions.transition()` — so the mission sat in `CANCELLING` forever. This is the literal
+mechanism behind `.project/evidence/d7-gate-50-live-run-2026-08-17.md`'s repro.
+
+**Decision 1 — add `MissionState.CANCELLING: JobKind.TEARDOWN` to `JOB_BACKED_STATES`.**
+`CANCELLING` now behaves exactly like every other row in that map: `ensure_jobs_enqueued`
+enqueues a `TEARDOWN` job on entry, `dispatch_terminal_jobs` reads its terminal result and asks
+`teardown_transition_policy` (already built, already correct, untouched by this change) where
+to go next. No change to `dispatch_terminal_jobs`, `ensure_jobs_enqueued`, or the policy itself
+was needed — both already iterate `JOB_BACKED_STATES` generically; the map was the only thing
+missing an entry.
+
+**Options considered for the wiring point** — (a) add the map entry, as above; (b) teach
+`_run_teardown_after_commit` itself to call `transitions.transition()` once
+`teardown_started_compute` resolves, bypassing the job/dispatch machinery entirely for this one
+state.
+
+**Pros and cons** — (b) is fewer moving parts for this one case, but it violates
+`orchestrator/queue.py`'s own stated invariant ("the only function in this codebase, outside
+`authorization.service`'s own callers, that invokes `orchestrator.transitions.transition()`" —
+i.e. `dispatch_terminal_jobs`), which exists precisely so there is one call site to audit for
+the D-045/SEC-16 evidence-completeness guarantees `transition()` enforces under its row lock.
+Calling `transition()` from a `transaction.on_commit` hook also runs it *outside* the
+transaction that produced the teardown result, on a codepath with no existing precedent for
+retry/failure handling if `transition()` itself raises (`_run_teardown_after_commit`'s return
+value is currently discarded). (a) reuses the exact machinery T0 already built, tested
+(`test_dispatch_terminal_jobs_actually_moves_a_zero_crash_mission_through_correlate` is the
+reference shape), and reviewed for `FUZZ`/`CORRELATE`/etc — `CANCELLING` becomes one more
+ordinary row instead of a special case.
+
+**Recommendation / ruling** — (a). Matches the task brief's own instruction and the
+engineering-manager review's first-listed option.
+
+**Decision 2 — keep the synchronous `_run_teardown_after_commit` hook exactly as-is; do not
+remove it or narrow `_requires_teardown` to stop firing on `CANCELLING`.** This means a
+`CANCELLING` mission now genuinely runs `teardown.teardown_started_compute` twice: once
+synchronously, inline, the moment the `CANCELLING` transition commits (existing #72 behaviour,
+unchanged); once more, asynchronously, when the worker claims and runs the `TEARDOWN` job this
+fix now enqueues.
+
+**Options considered** — (a) keep both (this decision); (b) remove the `CANCELLING` case from
+`_requires_teardown` (keep it firing only for genuinely terminal targets) so `CANCELLING`'s
+resource release happens exactly once, through the job path, matching every other job-backed
+stage's shape.
+
+**Pros and cons** —
+(b) is the architecturally "cleaner" end state — one authoritative path per event, matching how
+`BASELINE`/`FUZZ`/etc already work, and it removes the double-invocation entirely rather than
+relying on it being harmless. Against it: it changes tested, currently-passing behaviour owned
+by #72 — `orchestrator/tests/test_teardown.py::test_transition_to_cancel_runs_teardown_after_
+the_state_event` and `::test_terminal_states_are_teardown_boundaries` both assert, directly,
+that entering `CANCELLING` runs the synchronous hook — and this task's authority does not
+extend to silently rewriting another PR's tests to change what they assert (`Never silently
+override or rewrite another role's prior work`, this seat's own operating rules). It would also
+be a genuine behaviour regression for operator feedback: resource release currently happens
+inline with the cancel HTTP call; removing it means an operator's "cancel" no longer visibly
+tears anything down until the next orchestrator tick + a worker picks up the job (tick interval
++ claim latency, not instant) — worse UX for an action whose whole point is "stop this now",
+days before a live judged demo.
+(a) is not merely "acceptable because untested" — it was checked directly, not assumed:
+
+- `orchestrator/teardown_executor.py`'s own module docstring already documents this exact
+  design as deliberate ("Calling the same idempotent mechanism a second time ... is deliberate,
+  not a bug to dedupe away"), written by the same PR (#173) this fix completes. This decision
+  ratifies that stated intent now that the second call site actually exists and runs.
+- Both real reapers are safe under genuine **concurrent** double-invocation, not merely safe
+  when rerun sequentially. Traced directly: `DockerSandboxReaper.teardown_mission` ->
+  `packages/sandbox/container.py::reap_orphans` calls `docker rm -f <id>` and never inspects
+  the subprocess's exit code (`_run_cli` returns the `CompletedProcess` unchecked) — a second,
+  concurrent `rm -f` against an id the first call already removed is a silent no-op, not an
+  exception. `ModelHostReaper.teardown_mission` -> `orchestrator/model_host.py::
+  stop_model_host_lease` shells out to `docker compose ... stop`, which Compose itself treats as
+  idempotent (stopping an already-stopped service is not an error); the guard read
+  (`_mission_started_lease`) is a read, not a claim/lock, so two readers both proceeding to
+  `stop` is the worst case, and that case is itself safe.
+- `teardown_started_compute`'s own "nothing left" branch (`DockerSandboxReaper`/
+  `ModelHostReaper` both return `()` when there is nothing to release) means the *ordinary*
+  case — sync hook wins the race, releases everything for real — leaves the async job's later
+  run reporting a synthetic `no-started-compute`, `released=True` outcome: `result["total"] == 1
+  > 0` and `failed_count == 0`, which is exactly what `teardown_transition_policy`'s
+  `has_receipt` check requires to route `CANCELLING -> CANCELLED`. The redundant run is not
+  just harmless, it is the mechanism that produces the receipt the R3 policy needs — there is
+  no code path in which keeping the sync hook makes the async job's routing worse.
+- Verified this by test, not just by reading: the new end-to-end test
+  (`orchestrator/tests/test_cancelling_dispatch.py::
+  test_cancelling_walks_all_the_way_to_cancelled_through_the_real_worker_path_with_both_
+  teardown_paths_running`) asserts the fake reaper's `teardown_mission` is called exactly twice
+  — once synchronously at the `CANCELLING` transition, once via the real executor dispatched
+  through `queue.claim_job`/`queue.complete_job`/`queue.dispatch_terminal_jobs` — and that the
+  mission still reaches `CANCELLED` cleanly. Ran it against real Postgres in this session (see
+  PR test output); passes.
+
+**Recommendation / ruling** — (a), keep both. The redundancy is real but proven safe under
+concurrent (not just sequential) double execution against both actual reapers, it is the
+documented intent of the PR that built the async path, and removing it would both regress
+tested #72 behaviour outside this task's authority and slow down operator-visible cancel
+feedback three days before the finale deadline for no correctness gain. Flagged below for
+whoever owns `orchestrator/teardown.py`/`_run_teardown_after_commit` next: if a future reaper
+is added for a resource that is *not* idempotent/concurrency-safe under double-invocation (e.g.
+a billed cloud resource, a non-idempotent external API call), this decision must be revisited —
+the safety argument here is specific to the two reapers `default_reapers()` returns today, not
+a general license to keep stacking redundant release paths.
+
+**Cost implications** — negligible; one extra `docker rm -f`/`docker compose stop` round-trip
+per cancelled mission in the ordinary case (both already no-ops by the time the job runs), no
+new infrastructure, no schema change.
+
+**Security implications** — none beyond D-068's existing coverage. No new write path to
+`Mission.state` (still exclusively `orchestrator.transitions.transition`, still enforced
+structurally by SEC-16/`missions/lifecycle.py`); `dispatch_terminal_jobs` still the only
+job-driven call site for `transition()`; job-to-mission scoping is still by `mission_id` FK,
+never by anything in `Job.payload` — unchanged from cybersecurity's PR #173 review, which
+already cleared the SEC-15-shaped id-confusion question for this exact dispatch path.
+
+**Scalability implications** — none; single-mission-at-a-time throughout (D-062/D-065),
+unchanged.
+
+**Decision 3 — `_run_teardown_after_commit` now catches `teardown.TeardownFailedError` and
+logs it instead of letting it propagate out of `transaction.on_commit`.** Found while writing
+this fix's own end-to-end test (`orchestrator/tests/test_cancelling_dispatch.py::
+test_cancelling_routes_to_failed_when_the_teardown_job_itself_reports_a_leak`), not assumed:
+walking a mission `CANCELLING -> FAILED` through the real `dispatch_terminal_jobs` — the R3
+"no receipt" branch — crashed, because `MissionState.FAILED` is itself teardown-triggering
+(`is_terminal`), so the synchronous hook runs *again* on that second transition, and if the
+same resource is still stuck (the realistic case — a resource that failed to release once is
+likely to still be stuck moments later), `TeardownFailedError` propagates uncaught out of
+`transaction.on_commit`, out of `transitions.transition()`, and — because `dispatch_terminal_
+jobs`'s per-mission `try/except` only catches `ContractError` (a `RuntimeError` is not one) —
+out of `dispatch_terminal_jobs` itself, crashing the tick's dispatch pass for every other
+mission being processed in that same call, not just this one.
+
+This was always a latent bug in `_run_teardown_after_commit` (any transition into a terminal
+state with a synchronously-failing reaper would have hit it), but this fix is what makes it
+newly *reachable*, for the first time, via `dispatch_terminal_jobs` — before this fix nothing
+ever drove a mission from `CANCELLING` into `FAILED` at all, so this exact call sequence
+(dispatch -> transition -> on_commit -> teardown -> raise) never fired.
+
+**Options considered** — (a) catch `TeardownFailedError` in `_run_teardown_after_commit` and
+log it, same shape as `queue.py`'s existing "one mission's failure must not stop the tick"
+pattern; (b) leave it and instead broaden `dispatch_terminal_jobs`'s `except ContractError` to
+also catch `TeardownFailedError`; (c) leave it unfixed and document it as a known risk for
+whoever owns `orchestrator/transitions.py`/#72 next.
+
+**Pros and cons** — (b) only protects the one call site this fix happens to exercise
+(`dispatch_terminal_jobs`); the same crash is still reachable from any other direct caller of
+`transition()` into a terminal state (`missions/service.py`'s `cancel_mission`/`pause_mission`
+call it directly too, outside any tick loop's protection). (c) leaves a now-more-reachable crash
+in place three days before a judged live demo, for a fix that is small and low-risk. (a) fixes
+it at the one place the exception is actually produced, for every caller at once, and loses
+nothing: `teardown_started_compute`'s own docstring already guarantees the failed outcome is
+persisted as a `TEARDOWN_CONFIRMED` event *before* it raises, so logging-and-swallowing here
+does not hide the failure from the event stream or from a future policy/operator reading it —
+it only stops an already-committed state write from turning into an unhandled exception for
+whichever caller happens to be on the stack. This also matches Django's own documented
+`on_commit` contract more closely: a callback registered there runs after the transaction it
+was attached to has already committed, with nothing left to roll back, so letting it raise
+into an arbitrary caller is a correctness hazard independent of this fix.
+
+**Recommendation / ruling** — (a). Proven by test, not just argued:
+`test_a_synchronously_failing_teardown_does_not_crash_the_cancelling_transition` drives a real
+`transitions.transition(..., CANCELLING, ...)` call with a reaper that always reports
+`released=False`, and asserts both that `transition()` returns normally (no raise) and that the
+failure is still recorded as a `TEARDOWN_CONFIRMED` event with `released=False` — nothing lost,
+only the crash removed. Ran in this session against real Postgres; passes (see PR test output).
+
+**Cost/security/scalability implications of Decision 3** — same as Decisions 1–2 above: no new
+dependency, no new write path to `Mission.state`, no change to single-mission-at-a-time scope.
+Slightly *reduces* an existing availability risk (an uncaught exception mid-tick previously
+could have wedged `dispatch_terminal_jobs` for every mission in that pass).
+
+**Open question flagged for CTO, not decided here** — whether `default_deadline_seconds`
+should grow a `TEARDOWN`-specific budget (it currently falls through to the generic
+`sandbox.max_seconds` default, 5400s/90min, same as every other kind without a dedicated
+branch — `CORRELATE`/`PATCH_GENERATE`/`VERIFY`/`EXPORT` already share this gap, so it is not
+new to this change and not this task's to fix unilaterally).
+
+**Final approval authority** — CTO (technical), for the deadline-budget open question above;
+the three implementation decisions themselves (map wiring, keep-both-teardown-paths, and the
+`on_commit` exception-safety fix in Decision 3) are within backend-developer's scope per this
+task's brief and D-061 §4's original delegation to T7/T0.

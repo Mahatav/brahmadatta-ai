@@ -29,6 +29,7 @@ See the call site below.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -55,6 +56,8 @@ from contracts.state_machine import (
 from missions.lifecycle import lifecycle_write
 from missions.models import Mission
 from orchestrator import events, repository
+
+logger = logging.getLogger("orchestrator.transitions")
 
 #: The two targets that must remain reachable when the mission's own bookkeeping is
 #: unreadable. Mirrors `contracts.state_machine._ABORTS`; imported rather than retyped
@@ -250,14 +253,49 @@ def _requires_teardown(target: MissionState) -> bool:
 def _run_teardown_after_commit(
     mission_id: UUID, *, trace_id: str, reason: str, now
 ) -> None:
+    """Run synchronously, from `transaction.on_commit` — after the state write this
+    function's caller made has already committed, with no transaction left to roll
+    back and no caller left on the stack to hand an exception to (Django's own
+    `on_commit` contract: a callback that raises does not undo the commit and can
+    break any commit hooks queued after it). `teardown.TeardownFailedError` is
+    therefore caught and logged here, never left to propagate: `teardown_started_
+    compute`'s own docstring guarantees every outcome — including the failed one this
+    exception carries — is already durably persisted as a `TEARDOWN_CONFIRMED` event
+    before it raises, so catching it here loses no operator-visible information.
+
+    D-069 (`.project/decisions.md`): found while adding the async `TEARDOWN` job path
+    for `CANCELLING` (`orchestrator/queue.py`'s `JOB_BACKED_STATES`). Before that
+    change this call site was reachable only from `cancel_mission`/`pause_mission`-
+    adjacent direct callers of `transition()`; a `TeardownFailedError` raised here
+    propagated out of `transition()` itself with no caller expecting it (a `RuntimeError`,
+    not the `ContractError` every caller up the stack is written to catch). Once
+    `dispatch_terminal_jobs` started driving `CANCELLING -> FAILED` for a mission whose
+    real teardown genuinely failed, this same call fires again for the *second* time —
+    now for `MissionState.FAILED`, itself teardown-triggering — and an uncaught
+    exception there would crash `dispatch_terminal_jobs`'s per-mission loop for every
+    other mission in that tick, not just this one. That blast radius is strictly worse
+    than the single-mission stall this fix exists to close, so it is fixed here rather
+    than left as a newly-reachable, previously-latent bug.
+    """
     from orchestrator import teardown
 
-    teardown.teardown_started_compute(
-        mission_id,
-        trace_id=trace_id,
-        reason=reason or "mission entered teardown state",
-        now=now,
-    )
+    try:
+        teardown.teardown_started_compute(
+            mission_id,
+            trace_id=trace_id,
+            reason=reason or "mission entered teardown state",
+            now=now,
+        )
+    except teardown.TeardownFailedError:
+        logger.exception(
+            "Synchronous teardown failed for mission %s; already recorded as "
+            "TEARDOWN_CONFIRMED event(s) with released=False. Not re-raised: this "
+            "runs after commit, with nothing left to roll back and no caller able to "
+            "act on it. The async JobKind.TEARDOWN job (if this state is job-backed) "
+            "or the next teardown-triggering transition is what still gets the honest "
+            "receipt to a policy that can act on it.",
+            mission_id,
+        )
 
 
 def _start_model_host_after_commit(mission_id: UUID, *, trace_id: str, now) -> None:

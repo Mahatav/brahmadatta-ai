@@ -156,6 +156,31 @@ and a migrated `Job` model already exist with zero callers. Staffing of the Day-
 tracks (T0 orchestrator tick loop, T0b snapshot extraction, T1/T5/T7 executors) is the
 active next step.
 
+**Update, same day, after T0/T0b/T7 landed:** T0 (orchestrator tick loop + dispatch,
+PR #171) and T0b (safe snapshot extraction, PR #170) merged to `main`. T7 (`JobKind.TEARDOWN`
+executor + R3 transition policy, PR #173) also merged — but its own engineering-manager
+review round found, and required the PR description corrected to state honestly, that **it did
+not actually close the `CANCELLING` half of #50's repro**: `orchestrator.queue.
+JOB_BACKED_STATES` still excluded `MissionState.CANCELLING`, so no `TEARDOWN` job was ever
+enqueued and `dispatch_terminal_jobs` never had one to route — the `CANCELLING → CANCELLED`
+policy was correct and fully tested in isolation, but unreachable from any live path. A mission
+that entered `CANCELLING` on `main` still hung there forever after #173 merged, identically to
+this file's own evidence above. **Branch `fix/168-t7-cancelling-dispatch` closes that specific
+gap**: `CANCELLING` is now a row in `JOB_BACKED_STATES` (D-069), a real end-to-end test drives a
+mission through cancel → real enqueue → real worker-executed `TEARDOWN` job → real
+`dispatch_terminal_jobs` → genuine `CANCELLED` (and, separately, `FAILED` on a real teardown
+failure) against real Postgres — see D-069 and this branch's PR for full test output. A latent,
+newly-reachable exception-safety bug in `_run_teardown_after_commit` (an uncaught
+`TeardownFailedError` from a synchronous teardown failure could have crashed the whole tick's
+dispatch pass) was found and fixed alongside it, same PR, same decision record.
+
+**This does not, by itself, close #50.** T1 (`BASELINE` executor, PR #174) and T5 (`VERIFY`
+executor, PR #175) are both still open, not merged; T2/T3/T4/T6 (`FUZZ`/`CORRELATE`/
+`PATCH_GENERATE`/`EXPORT`) are not yet staffed or filed against #168 as of this update. A
+mission still cannot run the full happy path unattended until those land — this update only
+corrects the record on the one piece (`CANCELLING`) that is now genuinely wired, so this file
+does not overstate #50's status while the rest of #168 is still in flight.
+
 ## Open, owned by the CEO
 
 1. **#59 — finale roster.** Who is physically present for the run, and the runbook's

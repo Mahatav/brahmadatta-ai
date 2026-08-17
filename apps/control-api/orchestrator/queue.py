@@ -74,16 +74,27 @@ from orchestrator.executors import transition_policy_for
 logger = logging.getLogger("orchestrator.queue")
 
 #: Which JobKind runs while a mission sits in a given job-backed state. Deliberately
-#: excludes `MissionState.TRIAGE` (no `JobKind` — see `advance_through_triage`) and
-#: excludes `MissionState.CANCELLING` (teardown is already driven by
-#: `orchestrator.transitions._run_teardown_after_commit` on every terminal/cancelling
-#: transition, not by this map — `JobKind.TEARDOWN` exists for T7 to wire in
-#: symmetrically, per D-061 §4, without changing how teardown is currently triggered).
+#: excludes `MissionState.TRIAGE` (no `JobKind` — see `advance_through_triage`).
 #: `JobKind.SANITIZER_BUILD` and `JobKind.MINIMIZE` are deliberately absent too: they
 #: are sub-steps of the `STRESS_TEST` stage's own work, not stages with their own
 #: mission-state row in architecture spec §3.2's progress table — composing them is
 #: T2's call (enqueue directly, or run inline inside the `FUZZ` executor), not
 #: something this top-level map should guess at. See `orchestrator/executors.py`.
+#:
+#: `MissionState.CANCELLING` (D-069, fixing the gap PR #173's own review round found):
+#: previously excluded here on the theory that "teardown is already driven by
+#: `orchestrator.transitions._run_teardown_after_commit` on every terminal/cancelling
+#: transition, not by this map" — true, but incomplete. That hook releases resources
+#: synchronously; it never calls `transitions.transition()` afterward, so nothing ever
+#: moved a mission out of `CANCELLING` (`contracts.state_machine.TRANSITIONS[CANCELLING]
+#: == {CANCELLED, FAILED}`, both reachable only through `dispatch_terminal_jobs` +
+#: `orchestrator.teardown_executor.teardown_transition_policy`'s R3 rule). `CANCELLING`
+#: is now job-backed exactly like every other row in this table: `ensure_jobs_enqueued`
+#: enqueues a `TEARDOWN` job on entry, `dispatch_terminal_jobs` reads its terminal result
+#: and asks the policy where to go next. This is what closes `.project/evidence/
+#: d7-gate-50-live-run-2026-08-17.md`'s repro for real — see D-069 for why the
+#: synchronous hook is kept rather than removed (both now run for a `CANCELLING`
+#: mission; verified safe under real, not just sequential, double-invocation).
 JOB_BACKED_STATES: dict[MissionState, JobKind] = {
     MissionState.BASELINE: JobKind.BASELINE,
     MissionState.STRESS_TEST: JobKind.FUZZ,
@@ -91,6 +102,7 @@ JOB_BACKED_STATES: dict[MissionState, JobKind] = {
     MissionState.PATCH: JobKind.PATCH_GENERATE,
     MissionState.VERIFY: JobKind.VERIFY,
     MissionState.EXPORTING: JobKind.EXPORT,
+    MissionState.CANCELLING: JobKind.TEARDOWN,
 }
 
 #: JobState values `run_worker`/the reaper treat as "in flight" vs "done".
