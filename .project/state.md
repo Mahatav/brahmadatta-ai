@@ -4,64 +4,129 @@
 |---|---|
 | Repository | https://github.com/Mahatav/brahmadatta-ai (private) |
 | Board | https://github.com/users/Mahatav/projects/3 |
-| Deadline | **2026-08-20** · build target **2026-08-13** |
-| Current phase | 1 — discovery & product definition (CEO seat done; PM seat pending) |
-| Last updated | 2026-08-07 |
+| Deadline | **2026-08-20** · CEO target **2026-08-15** |
+| Current phase | 5 — implementation, in closeout (D5/D6 done, D7 gate not yet run live) |
+| Last updated | 2026-08-15 (reconciliation pass) |
 
-## Phase log
+## What this update is
 
-### Phase 0 — Repository founding · 2026-08-06 · **GO**
+This session's prior work stopped mid-D3. A large amount of implementation landed after
+that — much of it authored directly by Mahatav and/or another tool (commit branch prefix
+`codex/…`), outside this orchestrator's own delegation, plus continued agent work through
+D4–D6. This file had gone stale relative to the repo. Reconciled 2026-08-15 by reading
+`git log`, `gh pr list`, `gh issue list --milestone`, and by actually re-running the D9
+closure audit rather than trusting its last recorded result. Nothing here is re-litigated;
+this is a status correction only.
 
-**Completed**
-- `brahmadatta-ai` created on GitHub, private, `main` protected (PRs required, force-push and deletion blocked, admin enforcement off).
-- Full MVP documentation pack (79 documents) imported to `docs/`.
-- `CLAUDE.md`, `.gitignore`, top-level `README.md`, `.github/` PR and issue templates.
-- `.claude/COMPANY.md` — dynamic roster, hire/fire rules, review chain.
-- Four project-specific agent seats defined on the bench.
-- `.project/intake.md` pre-filled from the doc pack rather than re-interviewing the CEO.
+## Milestone status, verified against the board
 
-**Decisions** — D-001 … D-005.
+| Milestone | Open | Closed | Note |
+|---|---:|---:|---|
+| D1 — Foundations | 0 | 10 | done |
+| D2 — Spine | 0 | 11 | done |
+| D3 — Baseline | 0 | 14 | done |
+| D4 — Instrumentation | 0 | — | done (folded into D5 delivery) |
+| D5 — The finding | 0 | 6 | done |
+| D6 — The loop | 0 | 4 | done |
+| D7 — Evidence & freeze | **1** | 1 | **#50 open — see below** |
+| D8 — Hardening & rehearsal | **1** | 4 | #57 blocked on #50 |
+| D9 — Submission & freeze | **3** | 2 | #33, #59, #60 — see below |
+| RESERVE (Aug 16–20) | 0 | 0 | untouched |
+| CUT | 18 | 1 | as designed; one item pulled back and closed |
 
-**Verdict: GO.**
+## The one thing that actually gates everything else: #50
 
-### Phase 1 — Discovery & product definition · 2026-08-06 · **partial**
+**#50 — "GATE: full minimum-viable-demo run, unattended" — is open, not closed.**
 
-**Hired:** `ceo` (drafting seat). **Retired** after delivery.
+Its last recorded audit (commit `da162ff`, run by Mahatav directly, 2026-08-14) found the
+gate **blocked**: that session had no `.env` and no Docker access, so `finale-up.sh` and the
+nine-step unattended run could not be attempted, let alone pass. The fallback recording
+(`fallback-demo-d6.html`) exists and is hash-verified — the insurance policy is real even
+though the primary path hasn't been proven.
 
-**Completed**
-- `docs/09-company/01-vision-and-p0-cut.md` — forced P0/P1/P2 ranking (15/10/12), the nine-step minimum viable demo, checkable kill criteria, the four CEO-owned decisions with last-responsible-moment dates, and a critique of the pack. Decisions D-006 … D-012.
-- `docs/09-company/02-two-person-24h-cycle.md` — Kelowna/India shift protocol, written handoffs, work split at the API seam.
-- `docs/09-company/03-seven-day-plan.md` — the compressed plan replacing the 8-week timeline.
-- Board built: 63 issues, 10 day-milestones, `Brahmadatta Delivery` project with per-person columns.
+**Reconciled today, with this machine's Docker access — pushed all the way to actually
+attempting the live run, per the CEO's explicit go-ahead:**
 
-**Not done:** the `product-manager` seat has not run. Its four inherited open questions are on the board as #61, #62, #63, #64 rather than being answered in a phase-1 deliverable — the compressed schedule made a full PM pass less valuable than getting the board built.
+1. `npm run finale:audit` failed honestly on the first pass: `.env` had unfilled
+   `REPLACE_ME` placeholders and `REDIS_PASSWORD` was unset. Generated real local secrets
+   (gitignored, never committed) and re-ran clean.
+2. Brought up `docker-compose.finale.yml` for real. **Found a bug the audit couldn't see**:
+   the running `control-api` image was built 2026-08-07, a full day before the SEC-03 fix
+   (finale.py pinning `APP_ENV`) landed 2026-08-08. `docker compose up` reuses a cached
+   image by default, so the container was silently running yesterday's code — `/api/v1/system/health`
+   reported `app_env: "development"` under the *finale* compose file. Forced a clean
+   rebuild (`--no-cache`); confirmed fixed (`app_env: "finale"`).
+3. **Found a second, previously-undiscovered gap**: `manage.py check` — now actually
+   reachable, since the stale image had been masking it too — failed on
+   `brahmadatta.E005`: the finale profile requires an encrypted `DATABASE_URL`, and nothing
+   in the compose setup configured Postgres to speak TLS at all. Did not weaken the check.
+   Built a TLS-enabled Postgres image (`infrastructure/compose/images/postgres-tls.Dockerfile`,
+   cert baked in at build time — bind-mounting a key with correct ownership into a Postgres
+   container is unreliable from a macOS host), wired `docker-compose.finale.yml`'s `db`
+   service to build from it, added `?sslmode=require` to `DATABASE_URL` for this rehearsal.
+   `manage.py check` now passes clean; migrations applied for real.
+4. **With every infra and config gate now genuinely green, attempted the actual mission
+   creation call — `POST /api/v1/missions` — and hit `501 NOT_IMPLEMENTED`, tracked by
+   #12.** #12 is closed and merged. Mapped every mission-lifecycle route: `authorize`,
+   `snapshot`, `events`, and `events/replay` are genuinely wired to real service code.
+   **`create`, `list`, `get`, `preflight`, `start`, `pause`, and `cancel` — seven of eleven
+   — are still `NotImplementedYetError` stubs.** The orchestrator, candidates, verification,
+   fuzzing and teardown modules underneath them are real and were tested at the unit/service
+   level as each merged; the HTTP surface that would let an operator (or this audit) drive a
+   mission through them from a cold start was never wired for the entry point and several
+   steps after it.
 
-**Decisions** — D-013 (stack: Astro + Django + nginx), D-014 (14-day deadline), D-015 (rented GPU cut), D-016 (scaffold removed).
+**This is the actual, complete reason #50 cannot pass today.** Not environment (fixed,
+twice), not the underlying engine (built and reviewed across D2–D6) — the API layer
+connecting the two. Closing #12 without the routers actually calling into it is why this
+was invisible on the board: every module's own tests passed, so its issue closed correctly
+by its own acceptance criteria, and nothing forced an end-to-end HTTP check until this audit
+attempted one.
 
-**Verdict: CONDITIONAL GO.** Proceeding to implementation without a formal phase 2–4 pass, because the doc pack already contains architecture, stack, UX direction and a task breakdown, and the seven-day budget cannot absorb three more phase gates. Recorded as a deliberate deviation, not an oversight.
+**Wiring the seven remaining routers is real, sizeable implementation work** — this
+reconciliation pass stops here rather than start it unprompted. The finale stack (rebuilt
+image, TLS Postgres, migrated database) is left running and correctly configured for
+whoever picks this up next.
 
----
+## D9's other three open items, all correctly blocked on #50 rather than stalled
 
-## Phase status
+- **#57** (three full timed rehearsals) — cannot start until #50 passes; a rehearsal of a
+  gate that hasn't itself passed once proves nothing.
+- **#59** (finale roster — who is physically present) — blocked on a CEO decision, not
+  engineering. Options and a recommendation were given in the phase-1 CEO draft
+  (`docs/09-company/01-vision-and-p0-cut.md` §5.3); never answered.
+- **#60** (code freeze) — blocked on #57 passing, a release tag, a tested rollback, and
+  tightened branch protection. None of those are meaningful before #50/#57 are real.
 
-| # | Phase | Status |
-|---|---|---|
-| 1 | Discovery & product definition | partial — CEO seat done, PM seat skipped |
-| 2 | Technical strategy & architecture | architect spec and CTO review both in flight (retrofitted after the CEO called out the skipped gates) |
-| 3 | UX design | **done** — `04-design-system.md` + `tokens.css`, PR #70, pending PM review |
-| 4 | Task breakdown | **audited** — `07-task-breakdown-audit.md`; four coverage gaps closed as #71, #72, #73 and the #49 resequence |
-| 5 | Implementation | ready to start at D1 |
-| 6 | Security review | D8–11 (#53) |
-| 7 | QA | D8–11 (#57) |
-| 8 | Deployment prep | folded into D1–D2 (#9, #10, #11) |
-| 9 | Documentation | D12–14 (#58) |
-| 10 | Post-launch feedback | not applicable — competition MVP |
+## What's actually done, verified rather than assumed
+
+D1 through D6 are closed on the board and the corresponding code is on `main`: Astro +
+Django scaffold, the frozen API contract, the `pktcfg` demo target with its rejection
+asymmetry, the mission state machine and persistence layer, the sandbox jail
+(`packages/sandbox/`), the model gateway with recorded-transcript replay, the C/C++
+toolchain adapter with ASan/UBSan, the SSE event stream, the authorize/snapshot endpoints,
+the fuzzing campaign runner, patch policy enforcement, clean-worktree verification, mission
+teardown, and the Command Center dashboard shell. Each went through at least one review
+round (security, QA, or both) before merging — this file does not re-summarize those
+rounds; see `docs/09-company/08-security-review.md` and `11-qa-report.md` for the full
+history.
+
+## The critical path now
+
+**#154 — wire 7 of 11 mission-lifecycle routers to the orchestrator.** Filed 2026-08-17.
+This is the actual blocker on #50, found by attempting the live run rather than trusting
+the board. Real, sizeable implementation work — not attempted in this reconciliation pass.
+Everything else in D7–D9 is downstream of it: #57 (rehearsals) needs #50 to pass once;
+#60 (freeze) needs #57. Nothing else on the board is close to gating; this is the one thing.
 
 ## Open, owned by the CEO
 
-1. **#2 — confirm the AI Kavach submission deadline.** The 14-day figure came from the CEO; the plan now assumes 2026-08-20. If that is wrong, every milestone shifts.
-2. **#3 — competition rules on team composition and agent-authored code.** Potentially disqualifying if assumed wrong.
-3. **#63 — whether `git bisect` stays cut.** It carries the git-aware root-cause novelty claim.
-4. **Whether Astro survives if D1 slips** — the engineering-manager's cut list puts falling back to Django templates second. That touches D-013, which is the CEO's.
+1. **#59 — finale roster.** Who is physically present for the run, and the runbook's
+   incident-lead/demo-operator/evidence-lead split. Registration and travel lead time
+   apply once decided. Unrelated to #154 — can be decided in parallel.
+2. **Staffing #154.** It's the single remaining piece of real engineering between here and
+   a demonstrable gate pass.
 
-Closed: #8 (visual references) answered by D-017 and D-018. GPU provider and budget made moot by D-015.
+Closed since the last version of this file: #2 (deadline), #3 (competition rules), #8
+(visual references), #63 (bisect stays cut) — all resolved earlier in the build and already
+reflected in `docs/09-company/03-seven-day-plan.md`.

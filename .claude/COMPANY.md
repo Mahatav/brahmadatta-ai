@@ -40,9 +40,11 @@ the repo and it can be rehired by name later. Never delete a `.claude/agents/*.m
 
 - **Log every hire and fire** in §4 below, with the date, the trigger, and the phase. One
   line each. The log is append-only.
-- **Cap concurrency at 3 active implementers.** A full company pass is many agent calls and
-  has died mid-implementation on a session limit before. Push WIP branches so nothing is
-  stranded. Prefer resuming a stopped agent (`SendMessage`) over restarting its work.
+- **Cap concurrency at 3 active implementers** *unless the CEO explicitly authorizes more for
+  a push.* Raised by explicit CEO instruction on 2026-08-17 for the closeout push to D9 —
+  scale to the real remaining work, not to a fixed number. Push WIP branches early and often
+  regardless of headcount; a full company pass is many agent calls and has died mid-run on a
+  session limit before. Prefer resuming a stopped agent (`SendMessage`) over restarting.
 - **Never hire a role to review its own work.** The reviewer is always the seat above.
 - **Verify subagent output before acting on it.** Agents read the codebase cold and will
   repeat a stale doc claim as fact. Several of these docs contain estimates presented as
@@ -124,6 +126,11 @@ Everyone below starts **on the bench.** The orchestrator hires per phase.
 
 Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 
+- 2026-08-17 · SCALE-UP · CEO authorized concurrency above 3 for the closeout push to D9.
+  Real remaining scope: #154 (wire 7 of 11 mission routers — the one true P0 blocker),
+  #50/#57/#60 downstream of it, #33 independent, plus selective un-cut of `CUT` items
+  (analysis rail, keyboard nav, presentation mode) if #154 lands with room to spare.
+  #44/#46/#47/#48 (rented GPU) stay untouched — real money, `needs:ceo`, not opted into.
 - 2026-08-06 · FOUNDED · company chartered from the MVP documentation pack; full roster on the bench
 - 2026-08-06 · HIRED · `ceo` · phase 1 · discovery needed a forced P0 ranking the pack does not contain
 - 2026-08-06 · FIRED · `ceo` · phase 1 · delivered `01-vision-and-p0-cut.md` and D-006…D-012; gate passed
@@ -163,3 +170,7 @@ push access. Agent work goes through the same PR and review chain as theirs.
   real command output. "Should pass" is reported as "not verified".
 - **Security work comes first** when it competes with a feature for the same slot.
 - Findings go in the issue or the PR, where the team reads them — not into the CEO's inbox.
+- 2026-08-17 · HIRED · `devops-engineer` · closeout · reviewing PR #155, standing merge-readiness duty across the fleet for this push
+- 2026-08-17 · HIRED · `cto` · closeout · design brief for #154 before backend starts, to pre-empt an SEC-15-shaped bug in the new HTTP surface
+- 2026-08-17 · HIRED · `competition-strategist` · closeout · #33, five-slide draft, independent of #154
+- 2026-08-17 · HIRED · `ui-ux-designer` · closeout · spec for pulling back #25/#52/#56 from CUT, independent of #154
