@@ -30,3 +30,4 @@ class MissionsConfig(AppConfig):
             verify_dispatch,  # noqa: F401
         )
         from workers.baseline import dispatch  # noqa: F401
+        from workers.fuzzing import dispatch as fuzzing_dispatch  # noqa: F401
