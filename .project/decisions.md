@@ -4642,3 +4642,90 @@ genuinely cannot land in time.
 against any environment where `model-host` is reachable, per its own SEC-50 ruling and
 CLAUDE.md's standing rule for isolation-relevant changes; CEO holds the fallback risk-acceptance
 authority stated above, only if invoked.
+
+
+## D-071 — T3 (`JobKind.CORRELATE` executor + transition policy): the two-signal fallback while T2's `record_finding` has not landed, and why CORRELATE writes no new row · 2026-08-17 · `backend-developer` seat
+
+Posted while implementing #168 T3 against D-061 §2/§4 and D-062's staffing plan.
+`orchestrator/correlate_executor.py`, `orchestrator/tests/test_correlate_executor.py`,
+`orchestrator/tests/test_correlate_routing.py`.
+
+**Decision** — `CORRELATE`'s executor decides "is there anything worth a patch attempt" from
+two signals, checked in priority order, with neither one invented: (1) real
+`missions.models.Finding` rows for this mission, the authoritative signal since it's what
+`orchestrator.candidates.record_patch_candidate`'s `finding_id` parameter actually needs; (2)
+falling back to the terminal `FUZZ` job's raw `Job.result["crashes_found"]` — the same key
+T0's own reference `_fuzz_transition_policy` already names as "the provisional FUZZ/CORRELATE
+contract" — only when no `Finding` row exists yet. Neither present: `result["correlated"] =
+False`, `source = "no_signal"`. The transition policy routes `correlated: True` results to
+`MissionState.PATCH` and everything else (a `SUCCEEDED` job with `correlated: False`, or a job
+whose result is missing the key entirely — e.g. `run_worker`'s own crash handler) to
+`MissionState.HUMAN_REVIEW`, per D-061 §2's own instruction that "the 'nothing to bind' →
+`HUMAN_REVIEW` decision belongs to the CORRELATE policy." `CANCELLED` defers (`None`, mirroring
+T1's `_baseline_transition_policy`); `FAILED`/`TIMED_OUT` (never retried,
+`MAX_ATTEMPTS_BY_KIND[CORRELATE] == 1`) route to `Mission.FAILED` — treated as the correlate
+step itself never completing, not a legitimate "looked and found nothing" outcome (that always
+reports `SUCCEEDED`).
+
+**Options considered** — (a) read only `Finding` rows, leave the raw `FUZZ` result unread —
+correct once T2 lands `record_finding`, but as of this task landing (checked directly: `git
+diff main...feat/168-t2-fuzz-minimize` is empty except for pre-#168 libFuzzer-runner commits
+already on `main`; no `FUZZ` executor or `record_finding` call exists on that branch yet) this
+would make CORRELATE report "nothing to bind" for *every* mission that reaches it, regardless of
+what FUZZ actually found, which defeats the point of testing this stage at all before T2 merges
+and silently degrades every fuzz-positive mission to `HUMAN_REVIEW` in the interim. (b) read
+only the raw `FUZZ` `Job.result`, ignore `Finding` rows entirely — simpler, but wrong the day
+T2's producer lands, since a real `Finding` row is what T4 (`PATCH_GENERATE`) actually binds a
+candidate to, and a raw crash count alone carries no `file_path`/fingerprint for T4 to work
+from. (c) the two-signal priority order implemented: correct against the current state of the
+repo (no `Finding` producer yet) *and* forward-compatible with T2's real producer landing later,
+with zero code change required here when it does — the `Finding`-rows branch simply starts
+being hit for real traffic and the raw-crash-count branch stops being exercised outside its own
+tests. (d) have this task write `record_finding` itself, since D-061 §4 names it as "T2 (or T3)"
+— rejected: T2 owns `FUZZ` end to end per D-062's staffing plan and is being built in parallel
+on its own branch right now; writing a producer function into that same seam from a different
+branch risks a merge conflict or two competing "who calls this" answers, for a function this
+task does not need in order to make the CORRELATE routing decision correctly today.
+
+**Pros and cons** — (c)'s cost is that a mission whose only signal is the raw crash count
+reaches `PATCH` today with no bound `Finding` for T4 to work from yet — named explicitly in the
+module's own docstring ("What is incomplete") rather than hidden, and closes itself the moment
+T2's producer lands, with this module needing no change. (d) would close that gap sooner but
+at the cost of two engineers' branches touching the same producer function mid-sprint under a
+tight deadline, which this project's own schedule (Day 3 as an integration buffer, not new
+feature work) argues against.
+
+**Cost implications** — none; no new infrastructure, no new model. `CORRELATE` writes nothing
+to the database — its "terminal artifact" is the immutable `Job.result` the queue already
+protects (`orchestrator.queue.complete_job` only ever writes a `LEASED`/`RUNNING` job), so
+D-061 §3 rule 2's pre-execution existence check is structurally satisfied rather than coded:
+re-running this executor (crash-and-restart, a reclaimed lease) reads the same `Finding` rows
+and the same terminal `FUZZ` job every time and reaches the same answer, the same "safe by
+construction" shape `orchestrator/teardown_executor.py` documents for its own no-artifact case.
+
+**Security implications** — the `Finding`-rows query is scoped `mission=ctx.mission`, matching
+SEC-15's own discipline (`orchestrator/tests/test_cross_mission_evidence.py`'s precedent) — a
+dedicated test (`test_does_not_leak_another_missions_finding_rows`) proves a second mission's
+`Finding` row cannot make this mission's CORRELATE decision for it. No secret, no raw
+repository content, in either signal read or in `Job.result` written (D-061 §3 rule 3).
+
+**Scalability implications** — none; single-mission-at-a-time, one bounded query each for
+`Finding` and the terminal `FUZZ` job, matching D-061/D-062's framing throughout #168.
+
+**Recommendation / ruling** — (c), implemented as described, registered via
+`missions/apps.py::ready()` alongside T1/T7's own modules. Full test suite:
+`orchestrator/tests/test_correlate_executor.py` (6 tests — the two signals, the priority
+between them, the cross-mission leak guard) and `orchestrator/tests/test_correlate_routing.py`
+(13 tests — the direct policy unit tests, mirroring `test_stress_test_routing.py`'s own shape,
+plus real end-to-end exercises through `orchestrator.queue.dispatch_terminal_jobs` for both the
+"something to bind" and "nothing to bind" cases, including two that route the *real executor's*
+own output through the real dispatcher rather than a hand-written `Job.result`). Full suite:
+505 passed, 9 skipped (pre-existing Postgres-only tests, unrelated), 0 failed. `manage.py check`:
+zero issues.
+
+**Final approval authority** — CTO (technical) per D-061's own closing line that
+implementation-level calls inside an already-approved task breakdown are within
+backend-developer's scope. The `Finding`-model integration named as a fast-follow above ("What
+is incomplete" in `orchestrator/correlate_executor.py`'s own docstring) needs no separate
+sign-off — it activates automatically once T2 lands `record_finding`, and is flagged here so
+that landing is not mistaken for a silent gap.
