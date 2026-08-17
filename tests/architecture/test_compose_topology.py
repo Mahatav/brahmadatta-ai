@@ -214,6 +214,36 @@ def test_content_holding_services_are_never_routable(path: Path) -> None:
 
 
 @pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
+def test_only_the_ingress_publishes_a_host_port(path: Path) -> None:
+    """QA gap found reviewing PR #201 (D-075/SEC-50): every test above this one guards
+    `networks:`/`internal:` membership, but `ports:` (a host-port publish) is a
+    completely separate Compose mechanism that bypasses Docker network membership
+    entirely — a `ports:` entry on `model-host` or `model-host-auth` would make Ollama
+    (or its bearer-token gate) reachable from anything with LAN/host access, no Docker
+    daemon access required at all, which is a *lower* bar for an attacker than the
+    SEC-50 PoC this file's D-075 tests were written to guard against.
+
+    Verified live during PR #201 QA: injecting `ports: ["11434:11434"]` into
+    `model-host-auth` in this file left every existing test in this module green and
+    `docker compose config --quiet` silent — nothing here would have caught it.
+
+    docker-compose.yml's own header comment on the `nginx` service already states the
+    invariant this enforces: "the single published surface: nothing else maps a host
+    port." This was previously true by convention only, unchecked by any test.
+    """
+    doc = _load(path)
+    services = doc.get("services") or {}
+    published = {name for name, cfg in services.items() if (cfg or {}).get("ports")}
+    assert published == INGRESS, (
+        f"{path.name}: {sorted(published)} publish a host port via `ports:`. "
+        f"Only {sorted(INGRESS)} may — a `ports:` entry on any other service exposes "
+        "it to the host/LAN directly, bypassing every `internal: true` network "
+        "boundary this file otherwise enforces. See D-075/SEC-50 in "
+        ".project/decisions.md."
+    )
+
+
+@pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
 @pytest.mark.parametrize("service_name", ["nginx", "control-api"])
 def test_snapshot_buffer_tmpfs_exceeds_the_body_limit(
     path: Path, service_name: str
