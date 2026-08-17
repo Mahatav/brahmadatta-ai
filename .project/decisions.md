@@ -4388,3 +4388,257 @@ follow-up issue for the containerized sandbox-executor as the real post-competit
 **Final approval authority (whole record)** — CTO (technical) for the topology and staffing
 shape; `cybersecurity` holds the implementation gate per §5/§6.5; CEO holds any risk-acceptance
 escalation per §5.5 if cybersecurity judges the bare-metal exception needs one.
+
+
+---
+
+## D-075 — SEC-50 ruling: D-073 §3's "nothing to exfiltrate toward" mitigation does not hold;
+`model-host` gets a bearer-token proxy and a loopback-only bind, not a CEO risk acceptance ·
+2026-08-17 · CTO
+
+**Numbering note.** `main` tops out at D-070 as of this session. `D-071`–`D-074` exist only on
+open, unmerged branches (`feat/168-*` series, `feat/189-fuzz-worker-topology` / PR #197 which
+this record responds to, `docs/d073-fuzz-topology` / PR #195) and disagree with each other
+across branches — the exact collision this log's own D-023/D-024 note already warned about.
+Checked directly against `origin` for every open PR branch, not assumed: the highest number in
+use anywhere is D-074 (PR #197, PR #195). This record takes **D-075** so it does not collide
+with any of them once they merge, regardless of merge order.
+
+**Trigger** — cybersecurity's review of PR #197 (`feat/189-fuzz-worker-topology`, implementing
+this seat's own D-073 design), filed as **SEC-50**, HIGH/CRITICAL for finale deployment
+specifically, not blocking PR #197's merge (that PR's actual scope — kind-filtering,
+import-boundary — is sound and cleared to merge as-is). Full finding:
+https://github.com/Mahatav/brahmadatta-ai/pull/197#issuecomment-5315053710.
+
+D-073 §3 accepted the residual risk of running `fuzz-worker` bare-metal (outside `internal:
+true`, outside L1's network-level kill switch) on the argument that even a theoretical route
+toward `model-host` had "nothing to exfiltrate toward... since there is nothing for that
+process to exfiltrate toward even with a route out" — `fuzz-worker` structurally never holds a
+model-gateway client or credentials (confirmed true, still true, enforced by
+`tests/architecture/test_fuzz_worker_isolation.py`). Cybersecurity proved that mitigation
+insufficient with real commands, not reasoning alone: Docker daemon access — the one privilege
+`fuzz-worker` is irreducibly and deliberately given by D-073 itself — is *general-purpose
+network access* to every network the daemon manages. `internal: true` stops a network's
+existing members from routing to the internet; it does nothing to stop a new container,
+created by anything holding daemon access, from joining that network directly (`docker run
+--network backend ...`) and reaching every other member at L3/L4. Reproduced concretely: a
+freshly created container on an `--internal` network reached another container on that same
+network over plain TCP (`connect: refused`, not `timed out` — i.e. *reached*, just nothing
+listening on that exact port), while the network's own designed egress-block still held for
+requests leaving the network entirely. Combined with the separately-confirmed fact — I checked
+this myself, independently, before writing this record, not just trusting the finding — that
+`model-host` (`ollama/ollama`, both compose files, `OLLAMA_HOST: 0.0.0.0:11434`) has **no
+authentication of any kind**: no token, no password, nothing in `.env.example` or either
+compose file, and `services/model-gateway/gateway/client.py`'s `post_json`/`get_json` send no
+`Authorization` header because there has never been anything to send. "No model-gateway client,
+no credentials" was never actually the boundary — raw TCP reachability to `model-host:11434`
+*is* sufficient to run inference against it, and Docker daemon access is a trivial, structural
+way for `fuzz-worker` to get that reachability regardless of its own network namespace.
+
+**What I verified myself, directly, before ruling** (not taken on the finding's word alone):
+
+1. `infrastructure/compose/docker-compose.finale.yml` and `docker-compose.yml`, read in full.
+   `model-host` is `profiles: ["model"]` (opt-in) in both, on the `backend` network only
+   (`internal: true`, no published port, no gateway), `OLLAMA_HOST: 0.0.0.0:11434` — confirmed
+   this binds every interface *inside that container's own network namespace*, which is exactly
+   the interface every other member of `backend` sees it on. No `ports:` publish, no TLS, no
+   auth env var anywhere in either compose file or `.env.example`/`apps/control-api/.env.example`.
+2. `services/model-gateway/gateway/ollama.py` and `gateway/client.py`, read in full: the client
+   that actually talks to `model-host` sends `Content-Type: application/json` and nothing else —
+   no `Authorization`, no API key, no client cert. There is no code path today that could send a
+   credential even if `model-host` demanded one.
+3. `gateway/endpoint_policy.py`, read in full: the egress boundary this module enforces is
+   *which hosts the gateway itself is allowed to dial* (loopback/RFC1918/declared service names,
+   never a hosted provider). It says nothing about, and cannot say anything about, who else can
+   reach `model-host` once something else has network access to `backend` — a different question
+   than the one this module answers, and SEC-50 is precisely the gap between the two.
+4. Whether Ollama has a cheap built-in auth option: it does not. Ollama's HTTP API accepts no
+   credential of any kind server-side as of the version pinned here (`ollama/ollama@sha256:
+   f478761c...`) — `OLLAMA_ORIGINS` exists but is a browser `Origin`-header CORS allowlist, not
+   authentication, and is trivially bypassed by any non-browser client (exactly what `curl`/a
+   Docker-daemon-created container is). There is no `--api-key`, no bearer-token mode, nothing
+   to flip on. This rules out "the fastest possible fix" the task asked me to check for first —
+   it does not exist upstream.
+
+**Decision — fix now, not a CEO risk acceptance.** A concrete, cheap fix exists, fits well
+inside the ~3 days remaining, does not touch D-073's approved topology (bare-metal
+`fuzz-worker`, kind-scoped claiming — none of that changes), and closes the actual mechanism
+SEC-50 demonstrated rather than a proxy for it:
+
+1. **`model-host`: bind Ollama to loopback only inside its own network namespace.**
+   `OLLAMA_HOST: 127.0.0.1:11434` instead of `0.0.0.0:11434`, in both compose files. This alone
+   makes port 11434 unreachable from any *other* container on `backend`, however it got there —
+   loopback inside a network namespace is not visible on that namespace's external interface,
+   full stop, regardless of which bridge network the namespace's owning container is attached
+   to. The existing healthcheck (`ollama list`, exec'd inside the same container/namespace)
+   is unaffected — it still reaches loopback fine.
+2. **A bearer-token-checking nginx sidecar, sharing `model-host`'s network namespace, is the
+   only thing that can reach it.** New service `model-host-auth` (name TBD by whoever
+   implements — devops-engineer's call), `network_mode: "service:model-host"` (not its own
+   network membership — literally the same namespace, same IP as `model-host` on `backend`),
+   `depends_on: model-host: condition: service_healthy`, reusing the already-pinned
+   `nginxinc/nginx-unprivileged` digest already used for the ingress `nginx` service (no new
+   image to vet). It listens on the shared namespace's externally-visible interface — e.g.
+   `11434` itself, taking over the port number `model-host` no longer exposes there, so nothing
+   else in the codebase needs its target port changed — checks `Authorization: Bearer
+   <token>` against an env-supplied secret (`MODEL_HOST_BEARER_TOKEN`, `:?`-guarded in
+   `docker-compose.finale.yml` the same way `POSTGRES_PASSWORD`/`REDIS_PASSWORD` already are;
+   defaulted in dev's `.env.example` the same way `redis` has no password in dev today), and
+   `proxy_pass`es a matching request to `http://127.0.0.1:11434`. Use nginx's own
+   `docker-entrypoint.d` envsubst templating (`/etc/nginx/templates/*.template` →
+   `/etc/nginx/conf.d/`, already ships in the `nginxinc/nginx-unprivileged` base image, no
+   extra tooling) to interpolate the token into a static `if ($http_authorization != "Bearer
+   ${MODEL_HOST_BEARER_TOKEN}") { return 401; }` block ahead of the `proxy_pass` — the same
+   profile-switch-by-mounted-conf pattern this file already uses for `/admin` (D-019's own
+   `admin-deny.conf`/`admin-allow.conf` split), so this is idiom-consistent with the rest of
+   the compose file, not a new pattern.
+3. **Thread the token through the one caller that is supposed to have it.** Add
+   `MODEL_HOST_BEARER_TOKEN` to `gateway/settings.py`'s settings source and have
+   `gateway/client.py`'s `_json_request`/`get_json` send `Authorization: Bearer <token>` when
+   set (empty/unset in dev unless the operator opts in, matching how `MODEL_ENDPOINT`/
+   `MODEL_SERVICE_NAMES` already default to permissive-but-explicit in that module).
+   `control-api`/`worker` (the only processes ever given this token, via their normal
+   `env_file`) can produce it; `fuzz-worker` never receives it — it already has no
+   model-gateway configuration at all, per D-073 §5.1's own requirement, now independently
+   confirmed by `test_fuzz_worker_isolation.py`.
+
+**Why this actually closes the gap SEC-50 demonstrated, not just relocates it.** The attack
+proven was "Docker daemon access ⇒ join `backend` ⇒ reach `model-host` directly," and it works
+regardless of which network `model-host` sits on, because Docker daemon access lets an
+adversary `docker network connect` into *any* network the daemon already manages, named or not
+— so re-segmenting `model-host` onto a *different* internal network is not a durable fix on its
+own; an adversary with full daemon access can join that network too, the same way they joined
+`backend` in the PoC. What actually neutralizes this is that after this fix, joining `backend`
+(or any network `model-host`'s namespace sits on) only gets an adversary as far as a listener
+that demands a secret it structurally never holds — the same "enforced by what the process is
+never given, not by network topology" logic D-073 §3 already relied on for the model-gateway
+client, now applied to the one thing that logic missed: the *transport* itself needs a secret
+too, not just the client code. This is deliberately **not** relying on network segmentation
+alone, because SEC-50 already showed network segmentation alone doesn't survive Docker-daemon-
+level access on the same host.
+
+**Options considered:**
+
+- **(a) The fix above — loopback bind + bearer-token nginx sidecar sharing `model-host`'s
+  network namespace.** Chosen. Cheap (~half a day to a day: one compose service, one nginx
+  conf template, one settings/client change, one new required env var), reuses an
+  already-pinned image and an already-established compose idiom (D-019's profile-switch
+  pattern), and closes the mechanism actually demonstrated rather than one that sounds similar.
+- **(b) Network segmentation alone — move `model-host` off `backend` onto a new, narrower
+  internal network `fuzz-worker` is never told the name of.** Rejected as insufficient by
+  itself, for the reason stated above: Docker daemon access is not scoped by network names an
+  attacker doesn't already know — `docker network ls` trivially enumerates every network the
+  daemon manages, named or not, to anything holding daemon access. This is the same shape of
+  argument D-073 §2 already made rejecting remote-TLS Docker access as "authenticates who, not
+  what" — segmentation without an application-layer secret authenticates *which network*, not
+  *whether the caller is allowed to be there*.
+- **(c) Replace `fuzz-worker`'s raw Docker CLI access with a narrow, policy-enforcing wrapper
+  service — cybersecurity's own second suggestion, and D-073 §4's already-deferred permanent
+  "sandbox-executor" line item.** Correct as the eventual answer, explicitly not adopted here:
+  this is real infrastructure work (a new service, its own auth/contract, a credential
+  lifecycle) that D-073 §4 already scoped as "not a same-day fix, correctly deferred past
+  2026-08-20" for the *general* Docker-access problem — SEC-50 does not change that math, and
+  building it under a three-day clock to fix one specific unauthenticated downstream service is
+  worse engineering than fixing that one service directly. Tracked as the same post-competition
+  follow-up D-073 §4/§6.6 already named; SEC-50 does not enlarge its scope, it just adds one
+  more concrete reason it is worth doing eventually.
+- **(d) CEO risk acceptance instead of a fix.** Rejected as the primary path because a real fix
+  is not expensive relative to the finding's severity — cybersecurity rated this HIGH/CRITICAL
+  for the actual finale deployment, and (a) is a same-day, low-blast-radius change that does
+  not touch D-073's approved topology, does not block PR #197 (separate PR/branch), and does
+  not require re-opening any already-settled architectural question. Asking the CEO to accept a
+  HIGH/CRITICAL-rated, structurally-demonstrated live-exploitability gap when a cheap structural
+  fix exists is not a good use of that authority. Held in reserve as a **fallback only**, stated
+  explicitly below, in case (a) cannot land in time.
+
+**Cost implications** — one new compose service reusing an already-pinned image (no new image
+to vet or pin), one nginx conf template (~15 lines), one new required env var per environment
+(`MODEL_HOST_BEARER_TOKEN`, generated once per deployment, stored in `.env`, never committed —
+same handling as `POSTGRES_PASSWORD`/`REDIS_PASSWORD` already receive), a small settings/header
+change in `services/model-gateway`. No new infrastructure, no new network, no new credential
+lifecycle beyond "one more secret in `.env`."
+
+**Security implications** — closes SEC-50's demonstrated mechanism without depending on network
+topology holding against an adversary who already has Docker daemon access (topology alone was
+exactly what SEC-50 broke). Does not touch, weaken, or require re-litigating D-035/D-036 (socket
+never mounted into any container), D-073's kind-split topology, or PR #197's import-boundary
+work (SEC-49, tracked separately, unaffected by this). Residual risk after this fix, stated
+plainly: `fuzz-worker` retains Docker daemon access (that is D-073's own accepted, approved
+design, not something this record revisits) and could still use it to disrupt `backend` in
+other ways (e.g. resource exhaustion, or attacking `db`/`redis` similarly if those are ever
+found to have the same unauthenticated-transport gap — worth cybersecurity re-checking `redis`'s
+dev-mode no-password posture and `db`'s posture under this same "Docker access = network access"
+lens as a fast-follow, flagged here rather than silently assumed fine by analogy). This record
+closes the specific SEC-50 finding (`model-host` reachable and usable with zero credential via
+a Docker-daemon-granted network route); it does not claim to close every consequence of
+`fuzz-worker` holding Docker daemon access, which remains D-073's own accepted, scoped residual
+risk.
+
+**Scalability implications** — none; one more small proxy process on a profile that is already
+opt-in and already off by default in dev.
+
+**Verification required before this is treated as closing SEC-50** (assigned in the task
+breakdown below, not claimed done here — I have not implemented this myself in this session,
+only designed and ruled on it): re-run cybersecurity's own PoC methodology from the SEC-50
+finding — create an ad hoc container, join it to `backend` the way `fuzz-worker`'s Docker
+access would, and confirm the request to `model-host`'s address now gets refused without the
+token and succeeds with it. Code review alone is not sufficient for a finding that was proven
+wrong by running real commands; the fix needs the same treatment.
+
+**Fallback, only if (a) cannot land before 2026-08-20**: the CEO risk acceptance cybersecurity's
+ruling requires as the alternative to a fix. Stated here so it is not punted if the timeline
+slips — the risk statement the CEO would need to actually accept, in writing, in
+`.project/decisions.md`:
+
+> *If `infrastructure/scripts/run-fuzz-worker.sh` runs on the finale host with `model-host`
+> live (`--profile model` up) on the same Docker daemon, before SEC-50 is fixed: a compromise of
+> the `fuzz-worker` process — whether via a malicious/adversarial fuzz target under test, a
+> supply-chain-compromised fuzzing dependency, or an operator running a crafted `Job.payload` —
+> can use `fuzz-worker`'s own Docker daemon access (an irreducible, deliberately-granted
+> privilege under D-073) to create a new container on the `backend` network and reach
+> `model-host`'s inference API directly, with no credential required, regardless of
+> `fuzz-worker` itself never holding model-gateway code or credentials. This could be used to
+> run arbitrary inference requests against the local model host — plausible impact: resource
+> exhaustion of the model host during the live demo, or (if the model is ever given anything
+> resembling repository content or a system prompt worth reading, which it is not designed to
+> be today, but nothing structurally prevents a future prompt-construction bug from doing so) a
+> confidentiality exposure via inference responses. This is a real, demonstrated gap
+> (cybersecurity's SEC-50), not a theoretical one, rated HIGH/CRITICAL for the finale deployment
+> specifically.*
+
+**Recommendation / ruling** — fix now: option (a). Sized at half a day to a day; does not block
+PR #197's already-cleared merge; lands as its own small PR/branch before 2026-08-20, with the
+verification step above run for real before being marked closed. CEO risk acceptance is the
+documented fallback only, not the primary path, and should not be reached for unless (a)
+genuinely cannot land in time.
+
+**Task breakdown**
+
+1. `docker-compose.yml` / `docker-compose.finale.yml`: `OLLAMA_HOST: 127.0.0.1:11434` on
+   `model-host`; new `model-host-auth` service (`profiles: ["model"]`, `network_mode:
+   "service:model-host"`, `depends_on: model-host: condition: service_healthy`, the pinned
+   `nginxinc/nginx-unprivileged` digest, `read_only: true`, `cap_drop: ["ALL"]`, the standard
+   `x-hardening` anchor); new required `MODEL_HOST_BEARER_TOKEN` env var (`:?`-guarded in
+   finale, defaulted in dev) — devops-engineer, ~2-3 hrs.
+2. `infrastructure/compose/nginx/model-host-auth.conf.template` (new file): the
+   envsubst-templated bearer-check + `proxy_pass http://127.0.0.1:11434;` block, mirroring
+   `nginx/profile/admin-deny.conf`'s existing pattern for a mounted, deliberate access-control
+   conf — devops-engineer, ~1-2 hrs.
+3. `services/model-gateway/gateway/settings.py` + `gateway/client.py`: read
+   `MODEL_HOST_BEARER_TOKEN`, send `Authorization: Bearer <token>` when set — backend-developer,
+   ~1 hr, plus updating `gateway/tests/test_ollama_backend.py`'s fixtures to cover the header.
+4. Verification: the ad hoc-container PoC from cybersecurity's own SEC-50 methodology, re-run
+   against the fixed stack, both with and without the token — devops-engineer or cybersecurity,
+   ~1 hr.
+5. Cybersecurity re-review of items 1-4 before this is marked as closing SEC-50, per this
+   project's standing rule for isolation-relevant changes.
+6. Fast-follow, not blocking SEC-50's closure: re-check whether `redis`'s dev-mode
+   no-password posture and any other `backend`-network service share this same
+   "Docker-access-is-network-access, and this service trusts the network" shape — flagged in
+   the security-implications section above, owned by cybersecurity.
+
+**Final approval authority** — CTO (technical) for this ruling and the fix design;
+`cybersecurity` holds the implementation gate (task 5) before `run-fuzz-worker.sh` may run
+against any environment where `model-host` is reachable, per its own SEC-50 ruling and
+CLAUDE.md's standing rule for isolation-relevant changes; CEO holds the fallback risk-acceptance
+authority stated above, only if invoked.
