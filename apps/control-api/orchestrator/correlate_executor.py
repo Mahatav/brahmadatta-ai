@@ -158,7 +158,15 @@ def _correlate_executor(ctx: ExecutorContext) -> ExecutorResult:
         return ExecutorResult(outcome=JobOutcome.SUCCEEDED, detail=detail, result=result)
 
     fuzz_job = _latest_terminal_fuzz_job(ctx.mission)
-    crashes_found = int((fuzz_job.result or {}).get("crashes_found", 0) or 0) if fuzz_job else 0
+    raw_crashes_found = (fuzz_job.result or {}).get("crashes_found", 0) if fuzz_job else 0
+    try:
+        crashes_found = int(raw_crashes_found or 0)
+    except (TypeError, ValueError):
+        # A malformed crashes_found (SEC-44, PR #186 review) degrades to "no signal"
+        # rather than raising -- consistent with the missing-key/negative-value cases
+        # just above, which already treat an untrusted upstream value as absent
+        # instead of trusting its shape.
+        crashes_found = 0
 
     if crashes_found > 0:
         detail = (
