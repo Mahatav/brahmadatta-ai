@@ -1,11 +1,12 @@
 """Mission API.
 
-#154 is wiring the seven stubs this file froze at D1, split across two engineers and
-sequenced (not parallel) because both touch this file: `create`/`list`/`get` below
-delegate to `missions.service`; `preflight`/`start`/`pause`/`cancel` are the other
-half, still `NotImplementedYetError` stubs here until that PR lands on top of this
-one. The request and response schemas were real and complete from the freeze — that
-is what let the Command Center be built and typed against this surface before either
+#154 wired all seven stubs this file froze at D1, split across two engineers and
+sequenced (not parallel) because both touch this file: `create`/`list`/`get` and
+`preflight`/`start`/`pause`/`cancel` each delegate to `missions.service`, three lines
+each, matching `authorize_mission`/`create_snapshot` below — see that module's
+docstring for why `preflight_mission` alone opens its own row lock and the rest do
+not. The request and response schemas were real and complete from the freeze — that is
+what let the Command Center be built and typed against this surface before either
 half existed.
 
 The event log was never one of the stubs: `GET .../events` (SSE) and
@@ -30,7 +31,6 @@ from api.trace import get_trace_id
 from authorization import service
 from authorization.errors import MissionNotFoundError
 from contracts.authorization import AuthorizationRecord, AuthorizationRequest
-from contracts.errors import NotImplementedYetError
 from contracts.schemas.common import Acknowledgement, ErrorEnvelope, Page
 from contracts.schemas.envelope import MissionEvent
 from contracts.schemas.missions import (
@@ -49,8 +49,6 @@ from missions.models import Mission
 from missions.models import MissionEvent as MissionEventRow  # avoid shadowing the schema
 
 router = Router(tags=["missions"])
-
-ORCHESTRATOR_ISSUE = "#12 (orchestrator state machine)"
 
 #: OpenAPI description of the SSE response. django-ninja cannot express a
 #: `text/event-stream` body through `response=`, so it is declared explicitly and
@@ -155,7 +153,7 @@ def create_snapshot(request: HttpRequest, mission_id: UUID, payload: SnapshotReq
 )
 def preflight_mission(request: HttpRequest, mission_id: UUID):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    return mission_service.preflight_mission(mission_id)
 
 
 @router.post(
@@ -166,7 +164,10 @@ def preflight_mission(request: HttpRequest, mission_id: UUID):
 )
 def start_mission(request: HttpRequest, mission_id: UUID, payload: StartRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    ack = mission_service.start_mission(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(202, ack)
 
 
 @router.post(
@@ -177,7 +178,10 @@ def start_mission(request: HttpRequest, mission_id: UUID, payload: StartRequest)
 )
 def pause_mission(request: HttpRequest, mission_id: UUID, payload: PauseRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    ack = mission_service.pause_mission(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(202, ack)
 
 
 @router.post(
@@ -188,7 +192,10 @@ def pause_mission(request: HttpRequest, mission_id: UUID, payload: PauseRequest)
 )
 def cancel_mission(request: HttpRequest, mission_id: UUID, payload: CancelRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    ack = mission_service.cancel_mission(
+        mission_id, payload, trace_id=get_trace_id(request)
+    )
+    return Status(202, ack)
 
 
 @router.get(
