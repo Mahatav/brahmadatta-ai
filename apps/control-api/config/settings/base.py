@@ -168,6 +168,19 @@ MODEL_HOST_LIFECYCLE = {
     "command_timeout_seconds": env.get_int("MODEL_HOST_COMMAND_TIMEOUT_SECONDS", 60),
 }
 
+# --- Orchestrator / worker (#168, T0) -------------------------------------------
+#
+# `manage.py run_orchestrator` and `manage.py run_worker` (orchestrator/queue.py).
+# Architecture spec §3.5: "Backend developer (#12) decides: ... lease duration (60s
+# suggested); heartbeat interval (10s suggested); backoff shape" and "polling interval
+# (recommend 1s — this is one mission on one machine)". Every value here is that kind
+# of developer-scoped default, not a Fixed contract value — safe to retune without a
+# CTO call.
+ORCHESTRATOR_TICK_INTERVAL_SECONDS = env.get_float("ORCHESTRATOR_TICK_INTERVAL_SECONDS", 1.0)
+WORKER_JOB_LEASE_SECONDS = env.get_int("WORKER_JOB_LEASE_SECONDS", 60)
+WORKER_HEARTBEAT_INTERVAL_SECONDS = env.get_int("WORKER_HEARTBEAT_INTERVAL_SECONDS", 10)
+WORKER_POLL_INTERVAL_SECONDS = env.get_float("WORKER_POLL_INTERVAL_SECONDS", 1.0)
+
 # --- Sandbox policy defaults ---------------------------------------------------
 #
 # Consumed by the orchestrator (D2, issue #12) and by
