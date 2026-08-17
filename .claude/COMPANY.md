@@ -145,17 +145,21 @@ Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 - 2026-08-17 · HIRED · `ui-ux-designer` · closeout · spec for pulling back #25/#52/#56 from CUT, independent of #154
 - 2026-08-17 · HIRED · `general-purpose` as `competition-strategist` (2nd instance) · closeout · reconcile PR #157's slide redraft with the pre-existing honesty-tripwire test (`tests/test_submission_and_finale_closure.py`); wording-only fix, pushed as `3cff324`
 - 2026-08-17 · HIRED · `backend-developer` (Engineer A) · #154 · wired `create_mission`/`list_missions`/`get_mission`, PR #160
-- 2026-08-17 · HIRED · `engineering-manager` · #154 · review PR #160 against D-060 and the CTO brief before it moves up the chain. **First attempt failed**: the built-in `engineering-manager` type has no `Bash`/`gh` tool (Tools: Read, Write, Edit, Glob, Grep only per its registry entry), so it could not fetch the PR branch or run tests — it correctly refused to fabricate a verdict and said so. Retried as `general-purpose` reading `~/.claude/agents/engineering-manager.md` as its role, same workaround pattern as the project-local specialists noted above. Same limitation likely applies to `product-manager`, `software-architect` (has Bash, confirmed OK), `ui-ux-designer`, `ceo` — check the registry's Tools column before assuming shell access. Retry: APPROVE.
-- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #160's new idempotency-key write surface for SEC-15-shaped risk before merge. Verdict: CLEARED.
+- 2026-08-17 · HIRED · `engineering-manager` · #154 · review PR #160. **First attempt failed**: built-in `engineering-manager` has no `Bash`/`gh` tool — correctly refused to fabricate a verdict. Retried as `general-purpose` reading `~/.claude/agents/engineering-manager.md`. Same limitation likely applies to `product-manager`, `ui-ux-designer`, `ceo` — check the registry's Tools column before assuming shell access. Retry: APPROVE.
+- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #160's idempotency-key write surface. Verdict: CLEARED.
 - 2026-08-17 · MERGED · PR #160 (`create_mission`/`list_missions`/`get_mission`, 3 of 7 stubs) · #154 · both reviews signed off, CI green
 - 2026-08-17 · HIRED · `backend-developer` (Engineer B) · #154 · wired `preflight`/`start`/`pause`/`cancel`, fixed the `transitions.py` DoesNotExist bug, PR #161 rebased on #160
-- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #154 · review PR #161 against D-060 and the transition-table mechanics. Verdict: APPROVE.
-- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #161's row-lock concurrency (pause/cancel double-call races) for correctness under contention
-- 2026-08-17 · HIRED · `qa-engineer` · #154 · verify PR #161's concurrency tests actually exercise real contention, not mocked. Verdict: PASS — deliberately weakened the lock, confirmed the test catches it (5/5 failures), restored, confirmed green.
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #154 · review PR #161. Verdict: APPROVE.
+- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #161's row-lock concurrency. Verdict: CLEARED.
+- 2026-08-17 · HIRED · `qa-engineer` · #154 · verify PR #161's concurrency tests. Verdict: PASS — deliberately weakened the lock, confirmed the test catches it (5/5 failures), restored, confirmed green.
 - 2026-08-17 · HIRED · `general-purpose` as `security-research-engineer` (2nd instance) · #159 · fixed SEC-38 (freeze-before-kill) and SEC-35 (FSIZE fallback) in `packages/sandbox/jail.py`, PR #162
-- 2026-08-17 · HIRED · `cybersecurity` · #159 · binding D-056 independent re-attack of PR #162 (not a re-read) before the fuzzing worker's dependency on the jail can be trusted. Verdict: CLEARED — SEC-38 re-attacked with a harder adversarial variant (60x clean, ~220k process creations); SEC-35 re-attacked with a non-Python SIGXFSZ-ignoring target. Found and filed 3 new non-blocking residuals (#163/#164/#165).
+- 2026-08-17 · HIRED · `cybersecurity` · #159 · binding D-056 independent re-attack of PR #162. Verdict: CLEARED — SEC-38 re-attacked with a harder adversarial variant (60x clean, ~220k process creations); SEC-35 re-attacked with a non-Python SIGXFSZ-ignoring target. Found and filed 3 new non-blocking residuals (#163/#164/#165).
 - 2026-08-17 · MERGED · PR #162 (SEC-38/SEC-35 sandbox jail fixes) · #159 CLOSED
 - 2026-08-17 · MERGED · PR #161 (`preflight`/`start`/`pause`/`cancel`, rebased onto #160 post-squash) · #154 CLOSED · all 7 of 7 mission-lifecycle routers now wired; #50 unblocked
+- 2026-08-17 · MERGED · PR #157 (five-slide submission draft) · #33 · CI green after the wording-precision fix
+- 2026-08-17 · HIRED · `devops-engineer` · #50 · first live attempt at the D7 unattended gate run since #154 closed — fresh env, no-cache rebuild, real nine-step mission through the HTTP API
+
+**NOTE (2026-08-17): this log has been clobbered by concurrent agent writes twice this session** (agents with `Write`/`Edit` access reading a stale copy of this file at spawn time, then overwriting the whole file on their own save). Restored both times from the orchestrator's own record. If a hire-log entry you expect to see is missing, it may be a third occurrence — check recent PR/issue history on GitHub as the source of truth, not just this file.
 
 **Humans on the repo:** Mahatav (CEO, Kelowna) and Raunak (`raunaksachinkhanna`, India) — both
 push access. Agent work goes through the same PR and review chain as theirs.
