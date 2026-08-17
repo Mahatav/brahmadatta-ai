@@ -35,6 +35,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from authorization.errors import MissionNotFoundError
 from contracts.enums import (
     EventStatus,
     EventType,
@@ -118,7 +119,22 @@ def transition(
         # and nowhere else, so `Mission.state` cannot be moved by code that did not go
         # through this function — the convention that used to protect that was defeated
         # in four lines by a security review (SEC-16). See `missions/lifecycle.py`.
-        mission = Mission.objects.select_for_update().get(pk=mission_id)
+        #
+        # `Mission.DoesNotExist` is translated here, mirroring
+        # `authorization.service._lock_mission`. Every caller up to and including #154
+        # pre-locked the row through its own guard before ever reaching this line, so a
+        # bad `mission_id` never actually hit this `.get()` — `preflight`/`start`/
+        # `pause`/`cancel` are the first callers to hit `transition()` directly, and an
+        # uncaught `DoesNotExist` here would have been their first caller's first 500
+        # instead of a 404. There is no pre-check in those handlers to compensate: this
+        # is the one and only place `mission_id` is resolved, under the lock, which is
+        # the whole point of the lock-first pattern SEC-15 established.
+        try:
+            mission = Mission.objects.select_for_update().get(pk=mission_id)
+        except Mission.DoesNotExist as exc:
+            raise MissionNotFoundError(
+                "No mission with that id.", details={"mission_id": str(mission_id)}
+            ) from exc
         current = mission.state_enum
         aborting = target in _ABORT_TARGETS
 
