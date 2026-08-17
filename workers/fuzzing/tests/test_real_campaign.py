@@ -76,6 +76,17 @@ needs_real_fuzz_run = pytest.mark.skipif(
     ),
 )
 
+#: Unlike `needs_real_fuzz_run`, this does NOT require the opt-in env var: it needs a
+#: reachable docker daemon but never builds an image or runs a campaign — `docker run`
+#: against a nonexistent image reference fails in well under a second, so this is exactly
+#: the "cheap enough for a default `pytest` invocation" case the module docstring
+#: describes `needs_real_fuzz_run` itself as NOT being.
+needs_docker = pytest.mark.skipif(
+    not HAS_DOCKER,
+    reason=f"no {RUNTIME!r} daemon reachable on this host — skipped, not silently passed "
+    f"(HAS_DOCKER={HAS_DOCKER})",
+)
+
 
 @pytest.fixture(scope="session")
 def fuzz_image() -> str:
@@ -144,3 +155,57 @@ def test_real_libfuzzer_campaign_finds_the_seeded_heap_overflow(fuzz_image: str)
     assert "AddressSanitizer: heap-buffer-overflow" in outcome.run_output_excerpt, (
         "expected ASan's own heap-buffer-overflow summary line in the captured output"
     )
+
+
+@needs_docker
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "BUG filed by qa-engineer against PR #192 (2026-08-17): "
+        "packages.sandbox.errors.ContainerUnavailableError is not one of the exception "
+        "types workers.fuzzing.run.run_fuzzing_stage catches (only StepFailure, "
+        "AdapterError, ValueError from adapters.cpp.errors) — every OTHER failure mode "
+        "in this module (unpinned image string, CONFIGURE/BUILD/PROBE_TOOLCHAIN step "
+        "failure) is caught and shaped into a clean mode='NOT_RUN' FuzzingOutcome with a "
+        "FuzzFailure, but a syntactically valid, digest-pinned SANDBOX_FUZZ_IMAGE that "
+        "Docker cannot find or pull raises ContainerUnavailableError straight out of "
+        "run_fuzzing_stage instead. This is a real, live operational failure mode (a "
+        "stale pinned digest, a registry outage, a host that never ran "
+        "build-fuzz-image.sh) — not a hypothetical. xfail(strict=True) so this flips to a "
+        "hard failure (and needs un-xfailing) the moment it's fixed, rather than staying "
+        "silently green."
+    ),
+)
+def test_run_fuzzing_stage_reports_cleanly_when_the_pinned_image_cannot_be_found() -> None:
+    """The image itself failing to build/pull is a distinct failure mode from everything
+    `test_run_fuzzing.py`'s mocked `test_run_fuzzing_stage_reports_toolchain_blocker`
+    covers (an unpinned image *string*, rejected by `require_pinned` before Docker is
+    ever invoked) and from `test_libfuzzer_campaign_requires_a_digest_pinned_image`
+    (same). A digest-pinned reference that is syntactically valid but does not exist in
+    this daemon's image store/no registry can supply it is a real thing that happens
+    (stale pin, registry outage, a fresh host that has not run `build-fuzz-image.sh`
+    yet) — and #189/#192's whole point is that `SANDBOX_FUZZ_IMAGE` is a real, external,
+    digest-pinned dependency now, not a hypothetical. This calls the real
+    `run_fuzzing_stage` -> real `ContainerJail` -> a real `docker run` against a real
+    daemon (no monkeypatching) with a made-up-but-validly-formatted digest, and checks
+    that the failure is reported the same way every other failure in this module is:
+    a shaped `FuzzingOutcome`, not an uncaught exception.
+    """
+    nonexistent_but_validly_pinned_image = "brahmadatta-fuzz-toolchain@sha256:" + "b" * 64
+    policy = ContainerJailPolicy(
+        image=nonexistent_but_validly_pinned_image,
+        memory_mb=512,
+        cpu_limit=1.0,
+        wall_clock_seconds=30.0,
+    )
+
+    outcome = run_fuzzing_stage(
+        "test-192-missing-image",
+        PKTCFG_SOURCE,
+        policy=policy,
+        budget_seconds=10,
+    )
+
+    assert outcome.mode == "NOT_RUN"
+    assert outcome.failure is not None
+    assert outcome.ran is False

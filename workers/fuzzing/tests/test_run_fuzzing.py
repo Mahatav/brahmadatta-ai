@@ -76,6 +76,68 @@ def test_run_fuzzing_stage_shapes_live_campaign(
     assert outcome.as_dict()["toolchain"]["pinned"] is True
 
 
+def test_run_fuzzing_stage_reports_a_clean_zero_crash_campaign(
+    monkeypatch: pytest.MonkeyPatch, pktcfg_source: Path
+) -> None:
+    """The other half of `test_run_fuzzing_stage_shapes_live_campaign` (#192 QA review):
+    a campaign that genuinely runs its full budget and finds nothing is a normal,
+    *successful* `LIVE_CAMPAIGN` outcome (`ran=True`, `failure=None`) — not an error, and
+    not the same shape as a build/toolchain/probe failure.
+
+    Before this test, nothing exercised `run_fuzzing_stage` itself for the zero-crash
+    case: `test_run_fuzzing_stage_shapes_live_campaign` only ever supplies a 1-crash
+    `LibFuzzerRunResult`, and `workers/fuzzing/tests/test_cli.py::_outcome(crashes=0)`
+    hand-constructs a `FuzzingOutcome` directly with a non-`None` `failure` for its
+    0-crash case — that fixture was never produced by `run_fuzzing_stage`, so it does not
+    demonstrate what the real function actually returns. Reading
+    `workers/fuzzing/run.py::run_fuzzing_stage`'s success branch directly: it never passes
+    `failure=` when `result.failure is None`, regardless of `metrics.crashes_found` — so
+    `failure` defaults to `None` for a genuine clean run. This test proves that against
+    the real function, not by reading the source and trusting it.
+    """
+    mission_id = uuid.uuid4()
+
+    def fake_run(*args, **kwargs) -> LibFuzzerRunResult:
+        return LibFuzzerRunResult(
+            harness="pktcfg_fuzz",
+            engine="libFuzzer",
+            runtime_seconds=90.0,
+            metrics=LibFuzzerMetrics(
+                executions=1_500_000,
+                crashes_found=0,
+                unique_crashes=0,
+                coverage=61,
+                corpus_size=8,
+                artifact_paths=(),
+                sanitizers=("address", "undefined"),
+            ),
+            toolchain=_toolchain(),
+            events=({"type": "STAGE_PROGRESS", "metrics": {"executions": 1_500_000.0}},),
+        )
+
+    monkeypatch.setattr("workers.fuzzing.run.run_libfuzzer_campaign", fake_run)
+    outcome = run_fuzzing_stage(
+        mission_id,
+        pktcfg_source,
+        policy=ContainerJailPolicy(image=PINNED_IMAGE),
+        budget_seconds=90,
+    )
+
+    assert outcome.mode == "LIVE_CAMPAIGN"
+    assert outcome.failure is None
+    assert outcome.ran is True, "a zero-crash campaign that ran to completion is not a failure"
+    assert outcome.crashes_found == 0
+    assert outcome.unique_crashes == 0
+    assert outcome.executions == 1_500_000
+    assert outcome.artifact_refs == ()
+
+    events = emit_fuzzing_events(outcome)
+    assert events[1]["type"] == "STAGE_COMPLETED", "a clean run is not a MISSION_FAILED event"
+    assert events[1]["status"] == "SUCCEEDED"
+    assert events[1]["severity"] == "INFO", "no crash found is not HIGH severity"
+    assert events[1]["payload"]["report"]["mode"] == "LIVE_CAMPAIGN"
+
+
 def test_run_fuzzing_stage_reports_toolchain_blocker(
     monkeypatch: pytest.MonkeyPatch, pktcfg_source: Path
 ) -> None:
