@@ -119,10 +119,10 @@ reproduced twice consecutively.
   through Ollama on a loopback-only endpoint, for generating patch candidates once deterministic
   evidence exists. Repository content never leaves that endpoint — the model-serving policy is
   enforced as an allow-listed private-network rule, not a comment.
-- **Tier 3 — heavy escalation.** Designed as an architectural path, not built or claimed live in
-  this MVP. No specific heavy model is named anywhere in this submission — naming one before a
-  feasibility spike confirms it fits an obtainable, rentable topology is a commitment this team
-  isn't making on a slide.
+- **Tier 3 — heavy escalation.** Tier 3: designed escalation path only — an architectural path,
+  not built and not presented as live in this MVP. No specific heavy model is named anywhere in
+  this submission — naming one before a feasibility spike confirms it fits an obtainable,
+  rentable topology is a commitment this team isn't making on a slide.
 - **Compute posture.** CPU-first. Rented-GPU escalation is fully cut from this build (issues
   #44, #46, #47, #48 — real money, explicitly not opted into) in favor of process-level lease
   and teardown control of the local model host, which is what's actually demonstrated.
@@ -215,11 +215,11 @@ demo beat.**
 | Deterministic verification | Compile, reproducer replay, and regression decide the verdict — not model confidence | D6 verdict loop evidence; static-delta and renewed-fuzz gates explicitly logged `NOT_RUN`, not omitted |
 | Local AI only | Repository content is not sent to an external inference API | `.project/evidence/d5-model-serving.json` — loopback-only, policy-enforced |
 | Model hit rate | 10 of 10 live generation attempts schema/policy-valid | `.project/evidence/d6-model-generation-attempts.json` |
-| Metrics | No unmeasured number presented as measured; unbenchmarked rows stay unpublished | D-010; `.project/evidence/d8-benchmark-case-set.md` |
+| Metrics | No unmeasured number presented as measured; unbenchmarked or cut items are disclosed as not measured / cut, not unpublished by omission | D-010; `.project/evidence/d8-benchmark-case-set.md` |
 | Rented GPU | Not claimed as live; explicitly cut, not opted into | Issues #44/#46/#47/#48; P0 cut §2 |
 | Heavy model (Tier 3) | Not named; presented as designed escalation path only | CEO doc §6.4; no model name appears anywhere in this draft |
-| Full unattended run (D7) | **Not** claimed complete | Gate #50, open; blocked on #154, open |
-| Timed rehearsals (D8) | Not claimed complete | Gate #57, blocked on #50 |
+| Full unattended run (D7) | **Not** claimed complete — not claimed complete until #50 passes | Gate #50, open; blocked on #154, open |
+| Timed rehearsals (D8) | Not claimed complete — not claimed complete until #57 records real timings | Gate #57, blocked on #50 |
 | Fallback recording | Exists, hash-verified | `.project/evidence/fallback-demo-d6-manifest.json` |
 
 ---
