@@ -2816,3 +2816,330 @@ evidence files for the full technical detail and static + empirical confirmation
 
 **Final approval authority (staffing the fix)** — CTO / engineering-manager, per this
 project's normal issue-staffing process; not decided here.
+## D-061 — Design brief for #168 (mission-stage driver: nothing advances a mission past `VALIDATING`)
+
+Posted as a comment on #168 before hiring, same shape as D-060's brief for #154. Read
+`.project/evidence/d7-gate-50-live-run-2026-08-17.md` first — this record assumes it.
+
+**The one finding that reframes the whole brief.** #168's own text asks the driver-shape
+question (sync-in-request / poller / RQ) as if it were open. It is not. `docs/09-company/
+06-architecture-spec.md` §1.1 and §3, ratified in **D-024** (2026-08-07, this log) and
+**D-026**, already specify a Postgres `SELECT … FOR UPDATE SKIP LOCKED` job queue, a two-
+process split (`orchestrator` owns `Mission.state` and enqueues jobs; `worker` executes one
+job at a time and never writes state), a full failure-mode table (§6), an idempotency/retry
+contract (§3.3–3.4), and a `Job` Django model (`missions/models.py`, `JobKind`/`JobState`/
+`lease_owner`/`lease_expires_at`/`deadline_at`/`MAX_ATTEMPTS_BY_KIND`) that implements that
+schema exactly — migrated, tested at the model level, and **never once referenced by any
+producer or consumer anywhere in the codebase** (confirmed by grep: zero hits outside
+`missions/models.py` and `missions/tests/test_models.py`). This is the same shape as
+`workers/baseline`/`workers/fuzzing`/`orchestrator/candidates.py`/`orchestrator/
+verification.py` — real, designed, and in the `Job` table's case fully schema-complete —
+with no caller. #168 is not "design the driver". It is **"finish issue #12"**: implement the
+orchestrator tick loop and the worker claim/dispatch loop against a queue design that was
+already decided, and wire them to the stage code that already exists. Below reaffirms the
+ratified design against the current codebase rather than re-litigating it, and states what is
+new work versus what is "go build what §3 already specifies."
+
+### 1. Driver shape: reaffirm D-024; do not build RQ, do not run the pipeline synchronously
+
+**Decision** — DB-backed lease/poll queue (`Job` table, `SKIP LOCKED`), two processes
+(`orchestrator`, `worker`), per D-024/D-026/architecture-spec §1.1 and §3. Not
+synchronous-in-request. Not RQ/Celery.
+
+**Options considered** — (a) synchronous-in-request: `POST /start`'s handler runs the whole
+pipeline before responding; (b) a poller/DB-queue (the ratified design); (c) RQ/Celery on
+Redis, per the stale compose scaffolding.
+
+**Pros and cons** — (a) is the simplest code to write and is exactly wrong here for a reason
+independent of D-024's own argument: `workers/fuzzing/run.py`'s own default
+`budget_seconds=1800` (30 minutes, and the D4 kill criterion explicitly budgets a 30-minute
+fuzz window) would hold an ASGI request open for half an hour. `start_mission`'s router
+already returns `Status(202, ack)` — a 202 Accepted, not a 200 — which is the API's own
+existing signal that this was designed as "accepted for async processing," not "completed
+inline"; (a) would make that response a lie. It would also violate the `control-api` process's
+own stated boundary in architecture-spec §1.1's process table: "Must never: … Block on
+anything longer than a DB query." (c) is what the current `docker-compose.finale.yml`
+`worker` service's `command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}`
+assumes, and it is dead scaffolding: `django-rq` is not in `requirements.txt`, no `redis` Python
+client is either (checked directly — `requirements.txt` has no redis dependency at all, not
+even a bare client), `django_rq` is not in `INSTALLED_APPS`, and the `rqworker` management
+command therefore does not exist in this codebase today — the service would crash on its
+first line if the `worker` profile were ever activated. Devops has already flagged this exact
+gap inline in the compose file's own comment (`ARTIFACT_ROOT` block, `worker` service:
+"`CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`) has no `django_rq` in
+requirements.txt and was never reached by this rehearsal") — this ruling makes it
+authoritative rather than a comment: **do not add `django-rq`; delete the assumption.** (b) is
+what `Job`, `MAX_ATTEMPTS_BY_KIND`, and architecture-spec §3 already fully specify, costs zero
+new runtime dependencies (Django's ORM has supported `select_for_update(skip_locked=True)`
+natively since 2.0 — no library to add), is durable across a process restart with nothing in
+memory (the exact property the "overnight contract" §3.3 exists for, and this project's own
+`02-two-person-24h-cycle.md` schedule assumes it), and fits the single-mission-at-a-time
+constraint P2-12 already named as the reason Redis is unnecessary here.
+
+**Cost implications** — (b) is cheaper than (c): one fewer container image, one fewer network
+service, one fewer credential (`REDIS_PASSWORD`) to manage. `REDIS_URL` is currently declared
+in both compose profiles and consumed by **zero** Python code (grepped); it is vestigial and
+can be dropped from the stack once this lands — flagged as a follow-up cleanup, not blocking.
+
+**Security implications** — positive, per D-024's own analysis, unchanged: one fewer
+network-reachable stateful service inside `backend`/`api`.
+
+**Scalability implications** — none relevant at one mission at a time; D-024 already covers
+the post-competition path if that changes.
+
+**Recommendation** — build (b), to the letter of architecture-spec §3, as two new pieces:
+`manage.py run_orchestrator` (tick loop: claim nothing, only enqueues jobs on entry to a
+job-backed state, reaps expired leases, watches `deadline_at`, and is the **only** code path
+outside `authorization/service.py`'s existing calls that may invoke
+`orchestrator.transitions.transition()` off a job's terminal result) and `manage.py
+run_worker` (claim loop: `SKIP LOCKED`, heartbeat, `JobKind` dispatch table into the existing
+stage modules). Compose needs two changes beyond the `worker` command fix: add an
+`orchestrator` service (does not exist in either compose profile today — checked directly),
+and repoint `worker`'s `command` at `manage.py run_worker`. Both are devops-scoped once the
+management commands exist.
+
+**Final approval authority** — CTO (technical); this closes P2-12/D-024's remaining "flagged as
+business-cheap, not decided" thread for this specific consumer.
+
+### 2. Failure semantics: the vocabulary is fully built; the gap is only who produces it
+
+**Decision** — Use architecture-spec §6 verbatim as the failure-mode table; every `ErrorCode`
+and `MissionState` target it names already exists in `contracts/enums.py`
+(`BASELINE_BUILD_FAILED`, `BASELINE_FLAKY`, `SANDBOX_UNAVAILABLE`, `NO_REPRODUCIBLE_FINDING`,
+`MODEL_CAPACITY_UNAVAILABLE`, `JOB_TIMED_OUT`, etc. — checked directly, all present). No new
+contract work is needed here, only the executors that raise them correctly.
+
+**The one real trap for an implementer, found by reading the transition table, not the prose.**
+§6.3(a) says "if zero crashes → mission → `HUMAN_REVIEW`" after a `FUZZ` job times out inside
+its budget. Read literally against `MissionState` that means `STRESS_TEST → HUMAN_REVIEW` —
+but `contracts/state_machine.TRANSITIONS[MissionState.STRESS_TEST]` is `{CORRELATE, PAUSED} |
+_ABORTS` and has **no `HUMAN_REVIEW` member**. Only `CORRELATE`, `PATCH`, and `VERIFY` have
+`HUMAN_REVIEW` as a legal target. This is not a state-machine bug — `contracts/
+state_machine.py` is frozen (D-060's own precedent: CTO/software-architect own that table, not
+a downstream engineer) — it means the *orchestrator's* job-result handling for a `FUZZ` job
+with zero crashes must still enqueue `CORRELATE` (transition `STRESS_TEST → CORRELATE`), and
+the **`CORRELATE` executor** is where "nothing to bind" decides `HUMAN_REVIEW` and the
+orchestrator enqueues that transition instead of `PATCH`. An implementation that tries to
+transition straight from `STRESS_TEST` to `HUMAN_REVIEW` on zero crashes will hit
+`InvalidStateTransitionError` (409) the first time QA runs exactly the scenario §6.3(a)
+describes, on a target that fuzzes clean. Flagging this now because it is a five-minute fix if
+known up front and a confusing debugging session if found live, same category as D-060 §3.
+
+**Other confirmed mappings, briefly** (§6.2/§6.4, cross-checked against the live table): a
+`BASELINE` job failing configure/build → `Mission.FAILED` via the `_ABORTS` path (`BASELINE`
+has no non-abort target but `TRIAGE`, so `FAILED` is reachable from it — confirmed);
+`VERIFY`'s compile-gate failure is a legitimate `REJECTED` verdict via
+`derive_verdict`/`derive_mission_outcome`, never `FAILED` — do not conflate "our system broke"
+with "the patch was bad," per §6.2's own explicit warning.
+
+**Recommendation** — no contract changes required; each `JobKind` executor (task breakdown
+below) is responsible for choosing the *stage* result correctly against the existing table, not
+for inventing new states or codes.
+
+**Final approval authority** — CTO (technical); the "which state does a zero-crash timeout
+actually reach" mapping above is binding on the `CORRELATE`/orchestrator engineer, not a local
+judgment call.
+
+### 3. Idempotency/retry: the `Job` row's own fields are the discipline; two rules that are easy to get backwards
+
+**Decision** — Two non-negotiable rules for whoever writes the orchestrator tick loop and the
+worker dispatch table, mirroring D-060 §3's "found by reading the code, ruled once, applies to
+every implementer" shape:
+
+1. **The worker never calls `orchestrator.transitions.transition()`.** Architecture-spec §1.1's
+   process table is explicit: `worker` "Must never: Write `Mission.state`." Only the
+   orchestrator's tick loop, reading a job's terminal `state`/`result`, may call `transition()`
+   — mirroring exactly how `orchestrator/transitions.py`'s own module docstring already frames
+   itself as "the only writer of `Mission.state`" and how `missions/lifecycle.py`'s `SEC-16`
+   write-guard enforces it structurally today. A worker with the mission id already in hand and
+   a stage that just succeeded will be tempted to call `transition()` directly to save a hop —
+   that collapses the two-process boundary the whole design exists to keep (§3.2: "a job emits
+   many events and causes exactly one transition," read by the orchestrator, not decided by the
+   worker) and reintroduces exactly the kind of split-brain write path SEC-16 was built to
+   close for the HTTP handlers in #154.
+2. **Before a `JobKind` executor runs real work, check whether this stage's terminal artifact
+   already exists for this mission, and skip straight to reporting success if it does.** This is
+   what makes a crash-and-restart safe without extra bookkeeping: `BaselineReport` has a real
+   unique constraint per mission (checked directly in `missions/models.py`), so a worker that
+   died after writing the report but before its `Job` row reached `SUCCEEDED` must not blindly
+   re-run `run_baseline_stage` on restart — it would hit the constraint. The check-first pattern
+   is one query per executor, not new infrastructure. `PATCH_GENERATE` is the one kind where
+   this is *not* the right rule, by design (D-027's fan-out means multiple `PatchCandidate` rows
+   are the intended outcome of one stage) — that executor's own idempotency unit is "did *this
+   specific attempt number* already produce a candidate," using the job's `attempt` field, not
+   "has PATCH ever produced anything for this mission."
+
+**Options considered** — for rule 2: (a) always re-run the stage function on any retry
+(idempotent by re-execution); (b) check for an existing terminal artifact first, skip if
+present. (a) is simpler but is wrong for exactly the two stages that have a DB uniqueness
+constraint backing their "one per mission" invariant (`BaselineReport`;
+`Mission.verification_started_at`'s freeze for the candidate set makes a bare re-run of
+`PATCH_GENERATE` after verification has started a `CandidateSetFrozenError`, which is correct
+behavior but means the executor must check that state before assuming a clean retry is safe).
+
+**Cost implications** — one existence check per executor; already-established query patterns
+(`Mission.objects.select_for_update()`, or a plain read where no write follows).
+
+**Security implications** — none beyond what SEC-16/D-046 already close; this ruling keeps the
+new code inside those existing guarantees rather than opening a second path around them.
+
+**Scalability implications** — none at one worker, one mission.
+
+**Recommendation / ruling** — both rules mandatory. Flag any PR that has a worker call
+`transitions.transition()` directly, or a `JobKind` executor with no pre-execution check
+against its own terminal artifact (except `PATCH_GENERATE`, which uses `attempt`-scoped
+idempotency instead), for correction before merge.
+
+**Final approval authority** — CTO (technical).
+
+### 4. Concrete task breakdown
+
+Foundation, sequential, blocks everything else (recommend one engineer, or two working the two
+halves in parallel since they share no files):
+
+- **T0 — orchestrator tick loop + job enqueue.** New `orchestrator/queue.py` (or similarly
+  named module in the existing `orchestrator/` package, which already owns `Mission.state`):
+  `enqueue_job(mission_id, kind, payload, deadline_at, ...)`, the `SKIP LOCKED`-aware lease
+  reaper, the deadline watchdog, and the one function that reads a job's terminal row and calls
+  `transitions.transition()`. Plus `manage.py run_orchestrator`. This is the piece nothing else
+  can be tested end-to-end without.
+- **T0b — snapshot materialization.** `authorization/archive.py` has `enumerate_members` and
+  `build_tar_from_directory` but **no function that safely extracts a stored `Artifact`'s tar
+  back into a scratch directory** (checked directly — grepped for `extract`/`unpack_archive`,
+  zero hits). Every stage executor below needs a real on-disk `source_dir` to hand
+  `workers/baseline`/`orchestrator/verification.run_verification`; today there is no code path
+  that produces one from `ARTIFACT_ROOT/<sha256>`. Small, self-contained, reuses the existing
+  `_is_safe_member_name` guard, no dependency on T0 — independently implementable in parallel
+  by a second engineer.
+
+Once T0/T0b land, each `JobKind` executor is independently implementable in parallel (wiring an
+existing, tested function into the dispatch table plus the failure-mapping from §2):
+
+- **T1 — `BASELINE`/`SANITIZER_BUILD`.** Wraps `workers/baseline/run_baseline_stage`; §6.2
+  failure mapping; writes `BaselineReport`.
+- **T2 — `FUZZ`/`MINIMIZE`.** Wraps `workers/fuzzing/run_fuzzing_stage`; §6.3 timeout/stall
+  handling; throttled progress per §3.2. **New work, not just wiring:** there is no
+  `record_finding`-shaped function anywhere in the codebase today (grepped) — a crash in
+  `FuzzingOutcome` never becomes a `Finding` row. This executor (or T3) has to write it.
+- **T3 — `TRIAGE`(`ANALYZE`)/`CORRELATE`.** Per architecture-spec §2.5: `TRIAGE` is a near-stub
+  (`STAGE_STARTED` → a `LOG` event reading "No static analyzers configured in this build" →
+  `STAGE_COMPLETED`, empty `AnalyzerTool` coverage, no fabricated count — Semgrep/compiler-diag
+  are both CUT). `CORRELATE` is real but narrow: bind the sanitizer-confirmed crash to a
+  `SourceLocation`/`FindingDetail.code_slice`, and — per §2 above — this is where the
+  zero-crash → `HUMAN_REVIEW` decision actually lives, not at `STRESS_TEST`.
+- **T4 — `PATCH_GENERATE`.** `services/model-gateway/` (top-level, standalone) still exists
+  outside `apps/control-api/`, contradicting **D-026** ("becomes `apps/control-api/gateway/`, a
+  Python package imported only by the worker") — checked directly, the move was never done and
+  nothing in compose references `services/model-gateway` at all (one dead reference in an
+  endpoint-policy test script only). Recommend completing the D-026 move as part of this task
+  rather than importing across the old path, so there is one gateway location, not two. Calls
+  `orchestrator.candidates.record_patch_candidate` per attempt; implements the fan-out (§2.3)
+  and §6.4's degradation ladder.
+- **T5 — `VERIFY`.** Wraps `orchestrator/verification.run_verification` +
+  `orchestrator/candidates.record_verification`; per-gate progress per §3.2. The most "just
+  wire it" of the seven — both underlying functions are complete and tested.
+- **T6 — `EXPORT`.** This is #30/#32, and it is a **hard dependency of #168 closing #50, not a
+  parallel nice-to-have** — see the flagged gap below. Assembles `EvidenceBundle` from
+  `orchestrator/evidence_repository.py`'s already-real per-table readers
+  (`get_baseline_report`, `get_fuzzing_report`, `list_findings`, `list_patch_candidates`,
+  `get_patch_verification` — all exist and are exercised by the read-only evidence router
+  today), writes `report.md`/`report.json`/`manifest.json`/the tarball per architecture-spec
+  §5.3, and turns `GET /missions/{id}/evidence` and `POST /missions/{id}/export`'s current
+  `NotImplementedYetError` stubs into real responses.
+- **T7 — `TEARDOWN`.** Smallest of the seven: `orchestrator/teardown.py` is already real and
+  already invoked on commit for `CANCELLING`/every terminal state (`orchestrator/
+  transitions.py::_run_teardown_after_commit`) — this is mostly making sure a `TEARDOWN`
+  `JobKind` exists for symmetry with the spec's dispatch table, not new teardown logic.
+
+Devops-scoped, can run any time in parallel with T1–T7 once the management-command entry
+points exist: fix the `worker` service's `command` (drop `rqworker`), add the missing
+`orchestrator` service to both compose profiles (does not exist today in either), drop the now
+provably-vestigial `REDIS_URL`/`redis` service once `run_worker`/`run_orchestrator` are proven
+against it (follow-up, not blocking).
+
+**Not in this breakdown, flagged as a related-but-separate scope call for
+engineering-manager:** `preflight_mission` today implements none of architecture-spec §6.1's
+sandbox-start check ("start a `--network=none` container running `true`... the single most
+valuable preflight check... ~2 s") or §6.4's model-host health check ("the cheapest catch in
+the system... 10 s timeout"). Neither exists in `missions/service.py::preflight_mission` today
+(checked directly against its current four checks: `legal_transition`, `resume_origin`,
+`verdict_evidenced`, `authorization_and_stage`). Recommend adding both while the `Jail`/gateway
+wiring is being built anyway for T1/T4, but this is additive to #168's acceptance criteria, not
+required to close it — a call for engineering-manager to sequence, not a blocker I'm imposing
+here.
+
+### 5. Summary of latent gaps found before implementation starts (the #154-`DoesNotExist`-equivalent catches)
+
+1. Compose's `worker` service still targets `rqworker`/`django-rq`, which is not a dependency
+   and would crash on activation — do not extend it, replace it (§1).
+2. No `HUMAN_REVIEW` edge exists from `STRESS_TEST` in the frozen transition table — a
+   zero-crash fuzz timeout must route through `CORRELATE` first, not straight to `HUMAN_REVIEW`
+   (§2).
+3. No snapshot-archive-to-worktree extraction utility exists anywhere — every stage executor
+   needs one and none is built (§4, T0b).
+4. No `Finding`-recording function exists anywhere — fuzzing crashes never become `Finding` rows
+   today (§4, T2).
+5. `services/model-gateway/` was never moved into `apps/control-api/gateway/` per D-026, and
+   nothing wires it in — a second, unwired "gateway" pocket of real code (§4, T4).
+6. The `EXPORT` job (#30/#32) is a hard dependency of #168 actually closing #50, not
+   parallelizable slack — without it the driver reproduces the exact "stuck forever" bug one
+   stage later, at `EXPORTING`, and nothing in `assert_verdict_is_evidenced` would catch a
+   transition that skipped writing real evidence content, since it only checks that
+   verification records exist, not that an export ran (§4, T6).
+7. The worker-must-never-call-`transition()` / check-before-re-run discipline (§3) is exactly
+   the kind of rule an implementer optimizing for "fewest moving parts" will get backwards under
+   deadline pressure — called out explicitly for review to catch.
+
+**Final approval authority (this whole brief)** — CTO (technical). Staffing count and sequencing
+of T0–T7 against the roster is engineering-manager's call per this project's normal process;
+the ordering constraint (T0/T0b block T1–T7; T6 is not optional slack) is binding.
+
+## D-062 — Staffing plan for #168 against D-061, and the MVP scope call
+
+Posted as a comment on #168. Full plan there; this is the decision-record shape for the
+non-trivial calls in it, per engineering-manager's own process rules.
+
+**Decision** — Staff T0 (foundation, critical path) and T0b (foundation, independent) in
+parallel starting Day 1 (08-17), alongside T1/T5/T7 written against a pre-agreed executor
+interface contract (defined before T0 physically merges, so those three don't block on it),
+compose fixes (devops, parallel), and T4 started Day 1 rather than Day 2 since it is the
+long pole. T2/T3/T6 follow on Day 2 once T0/T0b land. Day 3 (08-19) is reserved as an
+integration/QA buffer, not new feature work, ahead of the 08-20 deadline.
+
+**Options considered** — (a) build the full D-061 scope as literally specified (all 7
+executors, T4 including the complete D-026 `services/model-gateway` → `apps/control-api/
+gateway/` relocation, plus devops's `REDIS_URL` cleanup and the two additive preflight
+checks CTO flagged) in strict T0/T0b-then-T1–T7 sequence; (b) the staggered-parallel plan
+above with T4 de-scoped to a stub gateway call against the *current* `services/model-gateway`
+import path, deferring the D-026 relocation past 08-20.
+
+**Pros and cons** — (a) matches D-061 to the letter and leaves no follow-up debt, but does
+not fit in 3 days without cutting the Day 3 integration buffer to near zero, and this exact
+issue (#168) exists *because* a fully-built, fully-tested-in-isolation piece (the `Job`
+model) was never exercised end-to-end before being called done — cutting the one pass that
+would catch the same failure mode again is the wrong tradeoff under this deadline. (b) fits
+in 3 days if Day 1's parallel tracks start on time and T0 does not slip, and still delivers
+every stage of the real state sequence (`BASELINE → … → EXPORTING → verdict`) for the #50
+demo — PATCH_GENERATE is not skippable, only its gateway import path is deferred. Its cost is
+one extra follow-up ticket (the D-026 move) and a real deviation from D-061 §4's explicit
+recommendation to fold that move into T4, which is why it's flagged for CTO sign-off rather
+than decided unilaterally here.
+
+**Cost implications** — (b) costs one deferred refactor (the package move), re-opened as a
+fast-follow after 08-20. No new infrastructure either way.
+
+**Security implications** — none beyond what D-061 already covers; T4-lite still calls
+`record_patch_candidate` for real and does not touch the SEC-16 write-guard boundary either
+way.
+
+**Scalability implications** — none; single-mission-at-a-time throughout, matching D-061.
+
+**Recommendation** — (b). Flag as a genuine finding, not a caveat: the full literal D-061
+scope is at real risk of not landing clean by 08-20 alongside a real integration pass. T0
+slipping past end of Day 1 is the failure mode that collapses the schedule and should trigger
+an immediate re-open of this scope conversation rather than a Day 3 discovery.
+
+**Final approval authority** — engineering-manager owns staffing/sequencing per D-061's own
+closing line. The T4-lite deferral specifically needs CTO sign-off, since it deviates from
+D-061 §4's explicit recommendation to complete the D-026 move inside T4 — posted as an open
+question on #168, not decided unilaterally here.
