@@ -156,6 +156,27 @@ pinned Ollama image on the internal `backend` network with `mem_limit` set, and 
 route. Use it when the model store has already been prepared; the app-facing loopback path
 above remains the quickest local developer check.
 
+**D-075 / SEC-50: `model-host` is not reachable directly any more, from anything.** Ollama
+inside that compose profile binds `127.0.0.1` only, inside its own container's network
+namespace — cybersecurity proved that Docker daemon access (the one privilege `fuzz-worker`
+is irreducibly granted, D-073) is general-purpose access to *join* `backend` directly, so
+`internal: true` alone never protected an unauthenticated `0.0.0.0`-bound service there. A
+bearer-token-checking `model-host-auth` nginx sidecar (`network_mode:
+"service:model-host"`, the pinned `nginxinc/nginx-unprivileged` image already used for the
+ingress) is now the only thing that can still reach it, and still answers on
+`model-host:11434` for every other caller on `backend` exactly as before. Set
+`MODEL_HOST_BEARER_TOKEN` (root `.env`, compose-only — never `apps/control-api/.env`, see
+that file's own comment on why) and either:
+
+- pass it straight to `OllamaCodeLlamaBackend(bearer_token=...)` / `GatewaySettings.
+  model_host_bearer_token`, or
+- pass `--bearer-token` (or set `MODEL_HOST_BEARER_TOKEN` in the shell) to
+  `gateway.tools.model_prep`'s `doctor`/`measure`/`attempts` subcommands.
+
+A request without the header gets `401` from the sidecar before Ollama ever sees it; the
+bare loopback `ollama serve` shape below is unaffected — that target has no auth of any
+kind to send, and none is required for it.
+
 The control API now treats that host as mission-scoped compute when
 `MODEL_HOST_LIFECYCLE_ENABLED=true`. Entering `PATCH` runs:
 

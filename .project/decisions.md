@@ -5693,3 +5693,298 @@ implementation, following D-073's own ruling; `cybersecurity` holds the review g
 required before any of this runs against the finale host, per D-073 §5/§6.5 and
 CLAUDE.md's standing rule for isolation-relevant changes. Not yet reviewed as of this
 entry — PR opened as draft for that reason.
+
+---
+
+## D-078 — implementing D-075 (SEC-50 fix): three real corrections found by actually
+bringing the stack up, and where `MODEL_HOST_BEARER_TOKEN` is (and is not) declared · 2026-08-17
+· devops-engineer
+
+**Numbering note.** This branch (`fix/189-model-host-auth`) is cut from `main`, which tops out
+at D-070 — neither D-071–D-074 nor **D-075** (the CTO ruling this record implements, PR #200,
+branch `docs/d075-sec-50-model-host-auth-ruling`, not yet merged) exist in this file on this
+branch. Checked directly against every open branch and PR before numbering this record, the
+same way D-075's own numbering note did: the highest `## D-` heading anywhere is D-075, so this
+record takes **D-078** to avoid colliding with it once both land, regardless of merge order.
+D-075's own text is not reproduced here — see PR #200 or `git show
+docs/d075-sec-50-model-host-auth-ruling:.project/decisions.md` for the full ruling this record
+implements. This is the implementation record D-075's own task breakdown asked for (items 1, 2,
+3 partial, 4), not a re-litigation of the ruling itself.
+
+**Trigger** — implementing D-075's task breakdown (`infrastructure/scripts/run-fuzz-worker.sh`
+gate: bind Ollama to loopback, front it with a bearer-token nginx sidecar sharing its network
+namespace, thread the token through `services/model-gateway`). Three things D-075's design did
+not anticipate — because they only surface when the stack actually runs, not on inspection —
+required a real decision during implementation, all verified by actually bringing
+`docker compose --profile model up` up on both `docker-compose.yml` and
+`docker-compose.finale.yml` and probing it with real HTTP requests (recorded on the PR, not
+just asserted here).
+
+**1. Ollama's own internal port had to move from 11434 to 11435.**
+
+D-075's design assumed the sidecar takes over port 11434 on the shared namespace's external
+interface "so nothing else in the codebase needs its target port changed." True for every
+*external* caller (`model-host:11434` is unchanged for anything on `backend`), but the sidecar
+still needs `proxy_pass` to reach Ollama somewhere inside the shared namespace — and
+`OLLAMA_HOST=127.0.0.1:11434` plus nginx `listen 11434;` (wildcard, `0.0.0.0`) in the SAME
+network namespace do not coexist: a wildcard bind on a port collides with an already-bound
+exact address on that same port at the kernel level (`EADDRINUSE`, confirmed live —
+`brahmadatta-model-host-auth` failed to start with exactly this error the first time this was
+brought up). Two options: give nginx a specific non-wildcard bind (requires a static IP
+assignment for `model-host` on `backend`, which does not have a pinned subnet today, unlike
+`api`), or move Ollama's *internal* port. Moved Ollama's internal port to 11435 — it is not
+part of any external contract (nothing outside this container/namespace has dialed it directly
+since before this fix existed), so changing it is invisible to every other service, while
+pinning a static IP for `model-host` would have been a second, unrelated network-topology
+change to a file that does not need one. `OLLAMA_HOST: 127.0.0.1:11435` in both compose files;
+`proxy_pass http://127.0.0.1:11435;` in the template.
+
+**2. The sidecar's `proxy_pass` had to rewrite the `Host` header to `127.0.0.1`.**
+
+With the port fixed, the very next real request came back `403` from Ollama itself — not the
+sidecar's own `401`. Ollama enforces its own Host-header allowlist (distinct from
+`OLLAMA_ORIGINS`, which is a browser `Origin`-header CORS check, not this) and refuses anything
+other than `localhost`/`127.0.0.1`/`0.0.0.0`, regardless of whether the caller is otherwise
+authenticated — confirmed live by sending a request through with the caller's real Host header
+(`model-host:11434`, the compose service name a normal `backend` caller uses) and watching
+Ollama itself reject it with `403` even after the sidecar had already accepted the correct
+bearer token. Fixed: `proxy_set_header Host 127.0.0.1;` in the template, so Ollama sees exactly
+the Host it already trusts regardless of what the original caller addressed it as. This is a
+genuine finding about Ollama's own behaviour, not a workaround for anything this fix introduced
+— it would have bitten *any* reverse proxy in front of Ollama, D-075-shaped or not.
+
+**3. `/etc/nginx/conf.d` needed an explicit `mode=1777` on its tmpfs mount.**
+
+The sidecar's `read_only: true` + tmpfs pattern mirrors the ingress `nginx` service exactly,
+but the ingress service never actually needs to *write* into `/var/cache/nginx`/`/var/run` at
+startup — this sidecar does, because `NGINX_ENVSUBST_OUTPUT_DIR` (`/etc/nginx/conf.d` by
+default) is where the image's own `20-envsubst-on-templates.sh` entrypoint step writes the
+rendered `model-host-auth.conf` before nginx starts. A bare `tmpfs: [/etc/nginx/conf.d]` entry
+comes back `root:root 0775` — confirmed live (`ls -ld` inside the running container) — which
+uid 101 (this image's `nginx` user) cannot write into; the image's own baked-in
+`/etc/nginx/conf.d` is `nginx:root 0775` and only writable there because uid 101 *owns* it, an
+ownership a plain tmpfs mount does not preserve. First attempt failed with `20-envsubst-on-
+templates.sh: ERROR: /etc/nginx/templates exists, but /etc/nginx/conf.d is not writable`. Fixed
+with `- /etc/nginx/conf.d:mode=1777` (matches `/tmp`'s own default mode, which is why `/tmp`
+needed no such override).
+
+**4. `MODEL_HOST_BEARER_TOKEN` is declared ONLY in the repository-root `.env.example`
+(compose-only), deliberately never in `apps/control-api/.env.example`.**
+
+D-075 named `apps/control-api/.env.example` as a candidate location by analogy with
+`MODEL_HOST_LIFECYCLE_*` (declared in both root and `apps/control-api/.env.example` today) but
+did not resolve which file(s) the new token belongs in. Checked directly: D-073's bare-metal
+`fuzz-worker` process (`infrastructure/scripts/run-fuzz-worker.sh`, PR #197, not yet merged —
+read via `gh pr diff 197`) sources `apps/control-api/.env` **wholesale**
+(`set -a; source "${CONTROL_API}/.env"; set +a`) whenever `DATABASE_URL` is not already set in
+the calling shell, to get Postgres reachability outside the compose network. Declaring
+`MODEL_HOST_BEARER_TOKEN` in that file would place it in `fuzz-worker`'s process environment
+the moment an operator's real `apps/control-api/.env` contains both — an ambient exposure that
+holds regardless of whether `fuzz-worker`'s own code ever imports `gateway` or reads the
+variable, which is exactly the class of leak this entire fix exists to close. `fuzz-worker` is
+not a compose service at all (D-073), so `control-api`/`worker`'s normal `env_file: ../../.env`
+already delivers the token to the only processes that are ever supposed to have it, with no
+`apps/control-api/.env.example` declaration required. `apps/control-api/.env.example` instead
+gets a comment explaining the omission, so a future edit does not "helpfully" add it back
+without re-reading this reasoning. `tests/architecture/test_compose_topology.py::
+test_model_host_bearer_token_is_declared_only_in_the_compose_env_example` guards this.
+
+**Options considered (for item 4 specifically, the only one with more than one defensible
+answer):**
+
+- **(a) Root `.env.example` only.** Chosen. Matches every compose-only secret's existing
+  pattern in that file (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`) and is the one placement that
+  cannot reach `fuzz-worker`'s environment through `run-fuzz-worker.sh`'s own `source` line.
+- **(b) Both files, mirroring `MODEL_HOST_LIFECYCLE_*`.** Rejected: `MODEL_HOST_LIFECYCLE_*`
+  are non-secret configuration (compose file paths, profile names, timeouts) with no
+  confidentiality property to protect if `fuzz-worker` happens to see them; a bearer token is
+  exactly the kind of value D-075 exists to keep away from that process. The analogy does not
+  hold for a secret.
+- **(c) `apps/control-api/.env.example` only, since that is where the eventual T4 (`feat/168-
+  t4-patch-generate`, not on this branch) wiring will presumably read it from `MODEL_ENDPOINT`-
+  style.** Rejected outright for the ambient-exposure reason above — this is the option D-075's
+  own phrasing could be read to suggest, and checking `run-fuzz-worker.sh` directly is what
+  ruled it out.
+
+**Cost implications** — zero beyond D-075's own estimate; these are corrections found while
+implementing the same half-day-to-a-day fix, not new scope. No new service, no new secret
+beyond the one D-075 already named.
+
+**Security implications** — items 1–3 are availability/correctness fixes (the sidecar would not
+start, or would forward 403s, without them) with no security regression either way. Item 4 is
+itself a security decision: it closes an ambient-secret-exposure path to `fuzz-worker` that
+D-075's text did not explicitly rule on, using the same "fuzz-worker must never receive this
+token" requirement D-075 already stated as its goal for the *code-import* path
+(`tests/architecture/test_fuzz_worker_isolation.py`, not present on this branch — lives on PR
+#197) and extending it to the *environment-variable* path, which that test does not and cannot
+cover (it asserts imports, not `os.environ` contents).
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — implemented as described; see this PR's own verification section
+for the live proof (`docker compose --profile model up`, real `curl` probes with/without the
+token from a container freshly joined to `backend` — the exact SEC-50 PoC shape — and the
+production `gateway.tools.model_prep doctor` command run against the real sidecar+Ollama pair
+through a container attached only to `backend`, confirming `401` without the token and a real
+Ollama response with it). Cybersecurity re-review is still required before this is marked as
+closing SEC-50, per D-075's own task breakdown item 5 and this project's standing rule for
+isolation-relevant changes — not claimed done here.
+
+**Final approval authority** — CTO (technical), per D-075's own final-approval line, which this
+record implements without revisiting; items 1–3 are implementation corrections within that
+already-approved design, not new architectural calls. Item 4 is flagged at the same formality
+as the rest of this record because it is a real judgment call about where a secret is
+declared, even though it follows directly from D-073/D-075's own stated intent.
+
+---
+
+## D-079 — SEC-51 ruling: what D-075/D-078 actually closed, what it did not, and why no bigger
+fix lands before 2026-08-20 · 2026-08-17 · CTO
+
+**Context.** Cybersecurity's PR #201 re-review (re-attacking the live, fixed stack, not a diff
+read) confirms SEC-50 as literally scoped — a container joining `backend` and reaching
+`model-host` directly, unauthenticated — is closed and re-verified with real requests: refused
+connect on the raw port, `401` with no/garbage token, `200` with the real token, a full port
+scan of the shared namespace showing nothing else answers. That verdict is not being revisited
+here. The same review surfaced a new, more fundamental finding, **SEC-51 (HIGH)**: Docker
+daemon access — the one privilege `fuzz-worker` is irreducibly and deliberately granted under
+D-073, precisely so it can run `ContainerJail` for fuzzing campaigns — defeats D-075/D-078's
+fix without touching the network path at all. `docker inspect brahmadatta-model-host-auth`
+returns `MODEL_HOST_BEARER_TOKEN` in plaintext (proven live by cybersecurity's own command
+output, not asserted); `docker exec` into `model-host` reaches Ollama over its own loopback
+directly. This record rules on SEC-51.
+
+**Verification performed before ruling (this session, not re-litigating cybersecurity's own
+live PoC, which already produced real command output).** Read `infrastructure/compose/
+docker-compose.yml` on this branch directly: `model-host-auth`'s `MODEL_HOST_BEARER_TOKEN` is
+supplied via a plain `environment:` entry (compose's standard mechanism), which Docker always
+stores as part of the container's config and returns verbatim from `docker inspect
+--format '{{json .Config.Env}}'` — this is not this repo's bug, it is how every container
+runtime built on the Docker/OCI config model works; there is no compose-level mechanism (short
+of Swarm/Compose secrets bind-mounted as files, discussed and rejected below) that keeps an
+`environment:`-declared value out of `docker inspect`. Confirmed `model-host` has no bind mount
+or network boundary that would stop `docker exec` from any process holding daemon access —
+`docker exec` operates through the daemon socket directly and is not mediated by the container's
+own network namespace or listeners at all. Cybersecurity's technical claim is accurate; the
+options below are evaluated on that basis.
+
+**Options considered.**
+
+- **(a) Run `model-host` on a genuinely separate Docker daemon/host that `fuzz-worker`'s own
+  daemon has no reach to.** The only mechanism that actually survives "attacker has Docker
+  daemon access" as a threat model, because it removes the shared daemon rather than trying to
+  further restrict what a process with full daemon access can do to containers on it — nothing
+  short of that removal is durable, for the same reason D-075 itself already rejected network
+  segmentation alone (`docker network ls`/`connect` enumerate and join anything the daemon
+  manages; the equivalent argument here is `docker inspect`/`exec` reach anything the daemon
+  manages). Concretely this means: a second host (or a nested/remote Docker daemon with its own
+  independent auth — TLS client certs, which is exactly the "authenticates who, not what"
+  mechanism D-073 §2 already evaluated and found insufficient on its own for the *general*
+  fuzz-worker-access problem, though it would be sufficient *here* since the question is "can
+  this specific daemon reach that daemon at all," not "what can an authenticated caller do"),
+  finale-up.sh and `run-fuzz-worker.sh` re-plumbed to talk to it, a new network path opened and
+  secured between the two hosts, and a full rehearsal of that new topology. This is real
+  infrastructure work — new provisioning, new deployment code, new failure modes — not a
+  same-day change, and it is not close to one: D-075/D-078's own fix, by comparison, was
+  correctly sized at half a day to a day specifically because it stayed inside one daemon, one
+  compose file, one process's namespace. Rejected as required-before-2026-08-20, for reasons
+  stated under Recommendation below.
+- **(b) Accept SEC-50's fix as real, worthwhile defense-in-depth; document SEC-51 explicitly as
+  a residual risk within D-073's own already-accepted envelope; no further fix before
+  2026-08-20.** This is cybersecurity's own recommendation in the PR #201 review ("costs a
+  paragraph, not a rebuild") and this record adopts it. Chosen — see Recommendation.
+- **(c) Replace `fuzz-worker`'s raw Docker CLI access with a narrow, policy-enforcing wrapper
+  service.** The eventual correct answer for the *general* problem SEC-51 is one more instance
+  of — already D-073 §4/§6.6's named, deferred "sandbox-executor" follow-up, and already
+  correctly scoped there as post-2026-08-20 work, for the same reason D-075 gave when it
+  declined to build this under a three-day clock to fix one downstream service: this is real
+  infrastructure (a new service, its own auth/contract, a credential lifecycle) that does not
+  get smaller by being motivated by SEC-51 instead of SEC-50. SEC-51 does not enlarge this
+  item's scope; it adds one more concrete reason it is worth doing eventually. Not adopted here,
+  unchanged from D-073.
+
+**Recommendation / ruling — option (b). SEC-51 is a documented, accepted residual risk. It is
+not required to be fixed before 2026-08-20.**
+
+Reasoning, stated plainly rather than deferred to "cybersecurity said so":
+
+1. **The precondition is significant and was already accepted, at CTO authority, under D-073.**
+   SEC-51 requires `fuzz-worker` to already be compromised — a live adversary with code
+   execution inside the one process D-073 deliberately gave Docker daemon access to, for
+   fuzzing to work at all. D-073 already accepted that privilege as irreducible for this
+   project's timeline, and D-075's own residual-risk paragraph already stated in writing that
+   "`fuzz-worker` retains Docker daemon access ... could still use it to disrupt `backend` in
+   other ways." SEC-51 does not open a new door; it proves, with a real command, exactly how far
+   through the already-acknowledged door an attacker who is already inside gets. That is
+   materially different from a finding that introduces new exposure the project had not already
+   priced in.
+2. **The finale's actual threat model does not feature the adversary SEC-51 requires.** This is
+   a single-host demo, run by a single trusted operator, fuzzing a known, non-adversarial target
+   (`pktcfg`) chosen for this exercise — not a hosted, multi-tenant, or internet-facing service
+   where an external party has both motive and opportunity to compromise the fuzz worker
+   specifically to pivot toward inference credentials. The gap is real and the reasoning behind
+   it is sound engineering; the probability-weighted risk against this specific, time-boxed
+   demo is low. This is exactly the class of finding CLAUDE.md's proportionality principle
+   exists for — not "ignore it," but "size the response to who is actually plausible as an
+   attacker within scope, on this timeline."
+3. **Cybersecurity itself did not rate this CRITICAL.** The standing rule ("a critical security
+   finding is waived only by written CEO risk acceptance") is written against CRITICAL, and
+   cybersecurity's own review is explicit: "I'm not rating it CRITICAL." Combined with point 1
+   — that the underlying risk boundary was already CTO-approved under D-073, and this finding
+   sharpens rather than expands it — SEC-51 does not cross the bar that requires a fresh,
+   written CEO risk acceptance. It stays at CTO final-approval authority, the same authority
+   that already accepted D-073's design. I am ruling on it here rather than escalating it, and
+   recording the reasoning so the call is auditable, not asserted.
+4. **The bigger fix is not a good use of the three days remaining.** Per `.project/state.md`,
+   the actual gate blocking the finale demo from existing at all is `#50` — seven of eleven
+   mission-lifecycle HTTP routes are still unwired stubs, discovered by an end-to-end audit that
+   the per-module test suites did not catch. That is the critical path. Spending a meaningful
+   fraction of the three days remaining before 2026-08-20 standing up a second Docker daemon,
+   re-plumbing two deployment scripts, and rehearsing a new topology — to close a gap whose
+   precondition is "the fuzz worker is already compromised," in a threat model where that
+   precondition is implausible — would trade a small, already-priced-in residual risk for a real
+   chance of not having a working mission API to demo at all. That is the wrong trade under this
+   timeline, independent of SEC-51's technical merits.
+
+**What is explicitly NOT true, and must not be read into "SEC-50 closed" from here forward —
+this is the addendum cybersecurity's review asked for:**
+
+> D-075/D-078's fix is real and worth having: it closes the literal, demonstrated SEC-50 attack
+> (a container joining `backend` and reaching `model-host` with zero credential), and it raises
+> the bar against any adversary whose capability tops out at "network route to `backend`" —
+> which matters against some threat classes even though it is not the one SEC-51 is about. **It
+> does not mean, and must not be read to mean, that `fuzz-worker` is now safe to run near a live
+> `model-host`.** The actual safety property the finale depends on when both are up together has
+> never rested on this network/auth boundary — it rests entirely on `fuzz-worker` itself never
+> being compromised in the first place. That property is carried by `fuzz-worker`'s own
+> isolation — `ContainerJail`'s hardening and the fuzz target's own containment (D-053, D-073) —
+> not by this PR. If `fuzz-worker`'s own containment is ever weakened, extended, or reused for a
+> less-trusted fuzz target than `pktcfg`, this residual risk gets re-evaluated from scratch; it
+> is not a one-time acceptance that travels forward unexamined.
+
+**Cost implications** — zero new engineering cost before 2026-08-20 (this record itself is the
+only deliverable). Option (a)'s cost, if ever picked up post-competition alongside D-073 §4/
+§6.6's sandbox-executor line: a second host or isolated remote daemon, new deployment plumbing,
+new rehearsal cycle — materially larger than D-075/D-078's half-day-to-a-day fix.
+
+**Security implications** — SEC-50 (network-route, zero-credential access) stays closed. SEC-51
+(Docker-daemon-access defeats the token) is recorded as an accepted residual risk, scoped to the
+precondition "`fuzz-worker` is already compromised," which is itself D-073's own accepted,
+irreducible design tradeoff. No new exposure is introduced by this ruling; it makes an existing,
+already-accepted boundary explicit rather than leaving it implicit in D-075's residual-risk
+paragraph. Fast-follow, unchanged from D-075 task 6: cybersecurity's own recommendation to
+re-check `redis`'s dev-mode no-password posture and any other `backend`-network service for the
+same "Docker access is a strictly broader capability than network access" shape remains open and
+owned by cybersecurity, not superseded by this record.
+
+**Scalability implications** — none.
+
+**Recommendation** — PR #201 is clear to merge (cybersecurity's own verdict: "PASS WITH
+CONDITIONS ... not a blocker on this PR's merge"); this record satisfies the stated condition.
+No further code change is required before 2026-08-20 to close SEC-51. `#50` (mission API
+routing) is the correct next claim on the three days remaining, not this.
+
+**Final approval authority** — CTO (technical), consistent with D-073/D-075's own final-approval
+lines, which this record extends rather than reopens. No CEO risk acceptance is required per
+point 3 above; this is noted for CEO/PM visibility in the handoff, not routed as a required
+sign-off.

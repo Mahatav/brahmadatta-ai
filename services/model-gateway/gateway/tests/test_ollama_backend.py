@@ -29,16 +29,12 @@ class FakeHTTPResponse:
         return self.body
 
 
-def test_ollama_backend_posts_to_local_chat_and_parses_patch(
-    monkeypatch: pytest.MonkeyPatch,
-    request_: GenerationRequest,
-) -> None:
-    seen: dict[str, Any] = {}
-
+def _make_fake_urlopen(seen: dict[str, Any]) -> Any:
     def fake_urlopen(request: Any, timeout: float) -> FakeHTTPResponse:
         seen["url"] = request.full_url
         seen["timeout"] = timeout
         seen["payload"] = json.loads(request.data.decode("utf-8"))
+        seen["authorization"] = request.get_header("Authorization")
         return FakeHTTPResponse(
             {
                 "message": {
@@ -55,7 +51,15 @@ def test_ollama_backend_posts_to_local_chat_and_parses_patch(
             }
         )
 
-    monkeypatch.setattr("gateway.client.urlopen", fake_urlopen)
+    return fake_urlopen
+
+
+def test_ollama_backend_posts_to_local_chat_and_parses_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("gateway.client.urlopen", _make_fake_urlopen(seen))
 
     candidate, wall_time_ms, output_tokens = OllamaCodeLlamaBackend().generate(request_)
 
@@ -68,6 +72,38 @@ def test_ollama_backend_posts_to_local_chat_and_parses_patch(
     assert candidate.confidence == 0.57
     assert wall_time_ms >= 0
     assert output_tokens == 42
+
+
+def test_ollama_backend_sends_no_authorization_header_when_no_token_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """The default shape: a bare `ollama serve` on loopback has no auth of any kind
+    to send. Sending `Authorization: Bearer ` (empty) rather than omitting the header
+    entirely would be a different, wrong claim.
+    """
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("gateway.client.urlopen", _make_fake_urlopen(seen))
+
+    OllamaCodeLlamaBackend().generate(request_)
+
+    assert seen["authorization"] is None
+
+
+def test_ollama_backend_sends_bearer_token_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """D-075 / SEC-50: the compose `model-host-auth` sidecar rejects every request
+    without exactly this header — this is the assertion that the Ollama backend
+    actually sends it when a token is configured, not merely that the field exists.
+    """
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("gateway.client.urlopen", _make_fake_urlopen(seen))
+
+    OllamaCodeLlamaBackend(bearer_token="s3cr3t-token").generate(request_)
+
+    assert seen["authorization"] == "Bearer s3cr3t-token"
 
 
 def test_ollama_candidate_parser_accepts_json_inside_text() -> None:

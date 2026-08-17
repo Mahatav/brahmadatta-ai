@@ -94,6 +94,20 @@ def _service_names(args: argparse.Namespace) -> list[str]:
     return [name.strip() for raw in args.service_name for name in raw.split(",") if name.strip()]
 
 
+def _bearer_token(args: argparse.Namespace) -> str:
+    """D-075 / SEC-50. `--bearer-token`, defaulted from `MODEL_HOST_BEARER_TOKEN` in
+    the environment so an operator running this against the compose `model-host-auth`
+    sidecar (`--endpoint http://model-host:11434` or similar, from inside the
+    `backend` network) does not have to repeat the value on every invocation. Blank is
+    fine for the loopback `ollama serve` shape this tool's own defaults assume — that
+    target has no auth of any kind to send.
+    """
+    explicit = getattr(args, "bearer_token", None)
+    if explicit:
+        return explicit
+    return os.environ.get("MODEL_HOST_BEARER_TOKEN", "")
+
+
 def _local_endpoint_record(endpoint: str, service_names: list[str]) -> dict[str, object]:
     decision = classify(endpoint, service_names=service_names)
     assert_local_inference_endpoint("MODEL_ENDPOINT", endpoint, service_names=service_names)
@@ -260,7 +274,7 @@ def _stream_openai_compatible(args: argparse.Namespace) -> dict[str, object]:
     first_token_ms: int | None = None
     chunks = 0
     observed_chars = 0
-    for line in iter_response_lines(url, payload, args.timeout_sec):
+    for line in iter_response_lines(url, payload, args.timeout_sec, bearer_token=_bearer_token(args)):
         if not line.startswith("data:"):
             continue
         data = line.removeprefix("data:").strip()
@@ -343,7 +357,7 @@ def _stream_ollama(args: argparse.Namespace) -> dict[str, object]:
     observed_chars = 0
     content_parts: list[str] = []
     final_event: dict[str, Any] = {}
-    for line in iter_response_lines(url, payload, args.timeout_sec):
+    for line in iter_response_lines(url, payload, args.timeout_sec, bearer_token=_bearer_token(args)):
         if not line:
             continue
         try:
@@ -451,6 +465,7 @@ def _cmd_attempts(args: argparse.Namespace) -> int:
             model_revision=args.revision,
             model_artifact_sha256=args.artifact_sha256,
             timeout_sec=args.timeout_sec,
+            bearer_token=_bearer_token(args),
         )
     else:
         backend = FakeMeasuredBackend(
@@ -567,7 +582,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "hardware": _hardware_snapshot(),
     }
     try:
-        tags = get_json(urljoin(args.endpoint.rstrip("/") + "/", "tags"), args.timeout_sec)
+        tags = get_json(
+            urljoin(args.endpoint.rstrip("/") + "/", "tags"),
+            args.timeout_sec,
+            bearer_token=_bearer_token(args),
+        )
     except (GatewayError, OSError, URLError) as exc:
         payload["message"] = str(exc)
         _write_json(payload, args.output)
@@ -662,6 +681,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--artifact-sha256", default="")
     doctor.add_argument("--timeout-sec", type=float, default=5.0)
     doctor.add_argument("--output", default="-")
+    # D-075 / SEC-50: required to reach the compose model-host-auth sidecar; not
+    # required for a bare loopback `ollama serve`. Defaults from MODEL_HOST_BEARER_TOKEN.
+    doctor.add_argument("--bearer-token", default=None)
     measure = sub.add_parser("measure", help="measure local backend latency evidence")
     measure.add_argument("--backend", choices=["fake", "openai-compatible", "ollama"], required=True)
     measure.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
@@ -681,6 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     measure.add_argument("--fake-first-token-ms", type=int, default=250)
     measure.add_argument("--fake-wall-time-ms", type=int, default=4200)
     measure.add_argument("--fake-output-tokens", type=int, default=128)
+    # D-075 / SEC-50: see the matching --bearer-token comment on `doctor` above.
+    measure.add_argument("--bearer-token", default=None)
     attempts = sub.add_parser("attempts", help="record D6 live model patch-generation attempts")
     attempts.add_argument("--backend", choices=["fake", "ollama"], required=True)
     attempts.add_argument("--attempts", type=int, default=10)
@@ -700,6 +724,8 @@ def build_parser() -> argparse.ArgumentParser:
     attempts.add_argument("--timeout-sec", type=float, default=300.0)
     attempts.add_argument("--fake-wall-time-ms", type=int, default=4200)
     attempts.add_argument("--fake-output-tokens", type=int, default=128)
+    # D-075 / SEC-50: see the matching --bearer-token comment on `doctor` above.
+    attempts.add_argument("--bearer-token", default=None)
     plan = sub.add_parser("plan", help="print the real operator command shape")
     plan.add_argument("--evidence-dir", default="evidence/model-prep")
     return parser

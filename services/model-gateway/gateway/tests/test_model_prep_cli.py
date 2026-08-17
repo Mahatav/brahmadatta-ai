@@ -98,7 +98,7 @@ def test_doctor_reports_missing_codellama_as_degraded(
     monkeypatch.setattr(
         model_prep,
         "get_json",
-        lambda url, timeout: {"models": [{"name": "llama3.2:latest"}]},
+        lambda url, timeout, **kwargs: {"models": [{"name": "llama3.2:latest"}]},
     )
 
     assert (
@@ -129,7 +129,7 @@ def test_doctor_reports_codellama_ready(tmp_path: Path, monkeypatch: Any) -> Non
     monkeypatch.setattr(
         model_prep,
         "get_json",
-        lambda url, timeout: {"models": [{"model": "codellama:7b-instruct"}]},
+        lambda url, timeout, **kwargs: {"models": [{"model": "codellama:7b-instruct"}]},
     )
 
     assert (
@@ -150,6 +150,72 @@ def test_doctor_reports_codellama_ready(tmp_path: Path, monkeypatch: Any) -> Non
     assert payload["checks"]["endpoint_reachable"] is True
     assert payload["checks"]["model_present"] is True
     assert payload["degraded_state"]["active"] is False
+
+
+def test_doctor_sends_bearer_token_when_configured(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """D-075 / SEC-50. `--bearer-token` (or MODEL_HOST_BEARER_TOKEN in the
+    environment) must reach `get_json` as the keyword the client turns into
+    `Authorization: Bearer <token>` — the header the compose `model-host-auth`
+    sidecar requires before it will proxy to Ollama at all.
+    """
+    output = tmp_path / "doctor.json"
+    seen: dict[str, Any] = {}
+
+    def fake_get_json(url: str, timeout: float, **kwargs: Any) -> dict[str, Any]:
+        seen["bearer_token"] = kwargs.get("bearer_token")
+        return {"models": [{"model": "codellama:7b-instruct"}]}
+
+    monkeypatch.setattr(model_prep, "get_json", fake_get_json)
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://model-host:11434/api",
+                "--service-name",
+                "model-host",
+                "--bearer-token",
+                "s3cr3t-token",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+    assert seen["bearer_token"] == "s3cr3t-token"
+
+
+def test_doctor_falls_back_to_bearer_token_env_var(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    output = tmp_path / "doctor.json"
+    seen: dict[str, Any] = {}
+
+    def fake_get_json(url: str, timeout: float, **kwargs: Any) -> dict[str, Any]:
+        seen["bearer_token"] = kwargs.get("bearer_token")
+        return {"models": [{"model": "codellama:7b-instruct"}]}
+
+    monkeypatch.setattr(model_prep, "get_json", fake_get_json)
+    monkeypatch.setenv("MODEL_HOST_BEARER_TOKEN", "from-the-environment")
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://model-host:11434/api",
+                "--service-name",
+                "model-host",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+    assert seen["bearer_token"] == "from-the-environment"
 
 
 def test_fake_measure_goes_through_gateway_and_emits_evidence(tmp_path: Path) -> None:
@@ -236,7 +302,7 @@ def test_ollama_measure_records_codellama_stream_evidence(
     output = tmp_path / "measurement.json"
     seen: dict[str, Any] = {}
 
-    def fake_iter_response_lines(url: str, payload: dict[str, Any], timeout: float):
+    def fake_iter_response_lines(url: str, payload: dict[str, Any], timeout: float, **kwargs: Any):
         seen["url"] = url
         seen["payload"] = payload
         yield json.dumps(

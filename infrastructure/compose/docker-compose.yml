@@ -240,17 +240,118 @@ services:
     <<: *hardening
     mem_limit: ${MODEL_HOST_MEM_LIMIT:-8g}
     environment:
-      OLLAMA_HOST: 0.0.0.0:11434
+      # D-075 / SEC-50: loopback-only, INSIDE this container's own network namespace.
+      # Cybersecurity proved that `internal: true` on `backend` (below) does not stop a
+      # NEW container — created by anything holding Docker daemon access, which
+      # `fuzz-worker` is irreducibly granted under D-073 — from joining `backend`
+      # directly and reaching a `0.0.0.0`-bound service at L3/L4 regardless of network
+      # membership at compose-authoring time. Binding loopback-only here means 11434 is
+      # unreachable from any OTHER container on `backend`, however it got there — not
+      # because of which network this container sits on, but because loopback inside a
+      # network namespace is never visible on that namespace's external interface, full
+      # stop. `model-host-auth` below shares this exact namespace
+      # (`network_mode: "service:model-host"`) and is the only thing that still reaches
+      # it; everything else on `backend` now hits a listener that demands a bearer
+      # token it structurally never holds. See D-075 in .project/decisions.md.
+      #
+      # Port 11435, not 11434: nginx (below) needs to bind `11434` itself, wildcard, so
+      # every OTHER container on `backend` keeps reaching `model-host:11434` unchanged.
+      # A wildcard `0.0.0.0:11434` bind and an exact `127.0.0.1:11434` bind in the SAME
+      # network namespace collide at the kernel level (`EADDRINUSE` — the wildcard bind
+      # is refused because it would shadow the already-bound specific address on that
+      # exact port) regardless of bind order; verified by actually bringing this pair
+      # up. Different ports is the fix, not a workaround: nothing outside this
+      # container/namespace ever dials Ollama directly any more, so its own internal
+      # port number is free to be anything and is not part of any external contract.
+      OLLAMA_HOST: 127.0.0.1:11435
     volumes:
       - ollama-models:/root/.ollama
     networks:
       - backend
     healthcheck:
+      # Unaffected by the loopback-only bind: `ollama list` execs inside this same
+      # container/namespace, which always reaches its own loopback regardless of what
+      # the external interface exposes.
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 20s
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # model-host-auth — D-075 / SEC-50. Bearer-token gate in front of Ollama.
+  #
+  # `network_mode: "service:model-host"`, NOT its own `backend` membership: this
+  # container joins model-host's network namespace outright — same IP, same loopback,
+  # same interfaces — rather than becoming a second, independent member of `backend`.
+  # That is what makes it the ONLY thing that can still reach Ollama's now
+  # loopback-only 11434: it runs *inside* the one namespace where that loopback is
+  # visible, instead of routing to it over `backend` the way every other container on
+  # that network — including one a Docker-daemon-holding adversary joins directly, per
+  # SEC-50's own PoC — would have to.
+  #
+  # It takes over port 11434 on the shared namespace's `backend`-visible interface —
+  # the port Ollama itself no longer answers there — so every other container on
+  # `backend` still reaches `model-host:11434` exactly as before; only the answer at
+  # that address changes. It now demands `Authorization: Bearer
+  # <MODEL_HOST_BEARER_TOKEN>` or returns 401. See
+  # infrastructure/compose/nginx/model-host-auth/ for the conf template — the same
+  # envsubst-templated, mounted-conf idiom D-019 already established for
+  # nginx/profile/admin-allow.conf vs admin-deny.conf.
+  #
+  # Must never be given `fuzz-worker`'s environment, and `fuzz-worker` must never be
+  # given this token: `fuzz-worker` is a bare-metal host process (D-073,
+  # infrastructure/scripts/run-fuzz-worker.sh), not a compose service, has no
+  # model-gateway client of any kind, and has no reason to reach `model-host` at all —
+  # independently enforced by tests/architecture/test_fuzz_worker_isolation.py on the
+  # branch that introduces it. `MODEL_HOST_BEARER_TOKEN` is deliberately declared only
+  # in THIS file's .env (compose-only), never in apps/control-api/.env.example, because
+  # `run-fuzz-worker.sh` sources apps/control-api/.env wholesale
+  # (`set -a; source .env; set +a`) — a var declared there would land in fuzz-worker's
+  # process environment even though its code never reads it.
+  # ---------------------------------------------------------------------------
+  model-host-auth:
+    profiles: ["model"]
+    image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+    container_name: brahmadatta-model-host-auth
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+      # NGINX_ENVSUBST_OUTPUT_DIR default. The image's own envsubst entrypoint step
+      # (docker-entrypoint.d/20-envsubst-on-templates.sh, ships in
+      # nginxinc/nginx-unprivileged, no extra tooling) writes the rendered
+      # model-host-auth.conf here at container start, before nginx boots — must be
+      # writable even though the rest of the filesystem is read_only. `mode=1777`
+      # is required, not decorative: a bare tmpfs mount over this path comes back
+      # `root:root 0775` (verified by actually bringing this service up), which uid
+      # 101 (this image's `nginx` user, see nginx.conf's header comment) cannot write
+      # into — the image's own baked-in `/etc/nginx/conf.d` is `nginx:root 0775` and
+      # only writable because uid 101 OWNS it there; a plain tmpfs mount does not
+      # preserve that ownership.
+      - /etc/nginx/conf.d:mode=1777
+    cap_drop: ["ALL"]
+    environment:
+      # Dev default: blank. This is the SAME "unset = that credential cannot
+      # authenticate, fails closed" convention CONTROL_API_REVIEWER_TOKEN/
+      # CONTROL_API_ADMIN_TOKEN already use above — NOT the same convention
+      # REDIS_PASSWORD's blank dev default uses, which disables redis's auth mechanism
+      # outright (no --requirepass at all). This nginx conf has no such bypass: a
+      # blank token here means the header check can never match anything a real client
+      # sends, so `--profile model` stays unusable in dev until a real value is
+      # generated and set — deliberately, because SEC-50's gate has to hold the moment
+      # `model-host` is reachable in ANY environment, not just the finale deployment.
+      MODEL_HOST_BEARER_TOKEN: ${MODEL_HOST_BEARER_TOKEN:-}
+    volumes:
+      - ./nginx/model-host-auth/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/model-host-auth/templates:/etc/nginx/templates:ro
+    network_mode: "service:model-host"
+    depends_on:
+      model-host:
+        condition: service_healthy
     restart: "no"
 
   # ---------------------------------------------------------------------------

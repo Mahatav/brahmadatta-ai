@@ -57,6 +57,14 @@ class GatewaySettings:
     prompt_version: str = ""
     response_schema_version: str = ""
 
+    #: D-075 / SEC-50. Sent as `Authorization: Bearer <token>` by the caller that
+    #: constructs a live backend (e.g. `gateway.ollama.OllamaCodeLlamaBackend`) with
+    #: it — `GatewaySettings` itself does not call the backend, it only carries the
+    #: value the same way it carries `endpoint`. Blank is legal: only the compose
+    #: `model-host-auth` sidecar demands this header today, and a bare `ollama serve`
+    #: on loopback (this module's other supported shape) has no auth to send at all.
+    model_host_bearer_token: str = ""
+
     #: Populated by `validate()` so callers do not re-derive it.
     _validated: bool = field(default=False, compare=False)
 
@@ -123,5 +131,6 @@ def from_environment(env: Mapping[str, str] | None = None) -> GatewaySettings:
         resolve_endpoint=_bool(source.get("MODEL_RESOLVE_ENDPOINT"), default=True),
         prompt_version=(source.get("MODEL_PROMPT_VERSION") or "").strip(),
         response_schema_version=(source.get("MODEL_RESPONSE_SCHEMA_VERSION") or "").strip(),
+        model_host_bearer_token=(source.get("MODEL_HOST_BEARER_TOKEN") or "").strip(),
     )
     return settings.validate()
