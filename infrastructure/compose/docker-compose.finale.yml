@@ -89,6 +89,12 @@ services:
       context: ../../apps/control-api
       dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
       target: runtime          # source baked in; nothing mounted
+      # D-032: control-api.Dockerfile's `runtime` target COPYs demo/repositories in at
+      # build time instead of it being bind-mounted (see that Dockerfile's comment).
+      # demo/ sits outside this build's own context (apps/control-api/), so it is
+      # supplied as a second, named build context rather than a path inside `context:`.
+      additional_contexts:
+        demo-repositories: ../../demo/repositories
     container_name: brahmadatta-finale-control-api
     <<: [*env-file, *hardening]
     read_only: true
@@ -121,10 +127,27 @@ services:
       # is visible where the deployment is described, and so a future settings module that
       # does read it from the environment gets the right answer.
       CONN_MAX_AGE: "0"
+      # `config.settings.base.ARTIFACT_ROOT` defaults to `BASE_DIR / "var" / "artifacts"`
+      # (`/app/var/artifacts`) — inside `/app`, which the `runtime` image target bakes in
+      # read-only and this service's own `read_only: true` enforces at the container
+      # level too. The content-addressed snapshot store has therefore never been able to
+      # write a single byte under the finale profile: `POST .../snapshot` 500s on
+      # `OSError: [Errno 30] Read-only file system: '/app/var'` the moment it tries to
+      # materialize the tar it just built. Repointed at a named volume, same pattern as
+      # `evidence:` below. Found running the #50 live rehearsal, 2026-08-17.
+      ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
     volumes:
       - django-static:/app/staticfiles
       # Evidence artifacts survive a container replacement.
       - evidence:/var/lib/brahmadatta/evidence
+      # The content-addressed snapshot artifact store — see the ARTIFACT_ROOT comment
+      # above. Distinct from `evidence`: this is ingested snapshot bytes, not exported
+      # evidence bundles.
+      - artifacts:/var/lib/brahmadatta/artifacts
+      # NOTE: no bind mount for `/demo/repositories` here — D-032 forbids a host-path
+      # mount into finale control-api. It is baked into the `runtime` image at build
+      # time instead; see the `additional_contexts` block above and
+      # control-api.Dockerfile's `COPY --from=demo-repositories`.
     networks:
       # `api`, NOT a shared ingress network. nginx is the only other member.
       - api
@@ -191,6 +214,10 @@ services:
       context: ../../apps/control-api
       dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
       target: runtime
+      # Mirrors control-api's additional_contexts above — same image target, same
+      # build-time COPY of demo/repositories, same D-032 reasoning.
+      additional_contexts:
+        demo-repositories: ../../demo/repositories
     container_name: brahmadatta-finale-worker
     <<: [*env-file, *hardening]
     read_only: true
@@ -201,9 +228,17 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.finale
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
       REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
+      # Mirrors control-api's ARTIFACT_ROOT fix above, for parity if this profile is
+      # ever activated. NOT independently verified working end to end — see #50's
+      # evidence bundle: `CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`)
+      # has no `django_rq` in requirements.txt and was never reached by this rehearsal.
+      ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
+      - artifacts:/var/lib/brahmadatta/artifacts
+      # NOTE: no bind mount for `/demo/repositories` here — see control-api's identical
+      # note above. Baked into the image via `additional_contexts` instead.
     networks:
       - backend
     depends_on:
@@ -260,4 +295,5 @@ volumes:
   nginx-logs:
   django-static:
   evidence:
+  artifacts:
   ollama-models:

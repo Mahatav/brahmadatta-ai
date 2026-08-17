@@ -1,0 +1,128 @@
+{
+  "kind": "d7-gate-50-live-run",
+  "schema_version": "d7-gate-50-live-run/1",
+  "generated_at": "2026-08-17T05:30:00Z",
+  "issue": 50,
+  "context": "First live attempt at the #50 D7 gate (unattended nine-step minimum-viable-demo run) since #154 closed all 7 remaining mission-lifecycle HTTP router stubs (PR #160, PR #161, merged 2026-08-17). Run against origin/main @ 2dc1c72 on a dedicated local branch (gate-50-live-run) created from origin/main so as not to disturb other agents' in-progress branches found mid-merge-conflict in this working tree at session start.",
+  "verdict": "FAIL",
+  "verdict_reason": "The mission-lifecycle HTTP API (all 11 routers, now genuinely wired per #154) supports create -> authorize -> snapshot -> preflight -> start, which moves a mission to SNAPSHOTTED -> VALIDATING. Nothing in the reachable HTTP surface, and nothing running automatically in the background, ever calls orchestrator.transitions.transition() again after that point. A mission started through the real API is empirically confirmed stuck at VALIDATING indefinitely (60s unattended observation, zero state change) even though contracts.state_machine.TRANSITIONS legally permits VALIDATING -> BASELINE and the real baseline/fuzzing/patch/verification code (workers/baseline/run.py, workers/fuzzing/, orchestrator/candidates.py, orchestrator/verification.py) exists and is unit-tested. Nothing wires the state machine's automatic stages to that code. The nine-step demo (CEO doc §3) cannot be driven end to end through the real HTTP API today. Not an environment problem, not a #154 regression — #154's own acceptance criteria stopped at 'start' and never claimed more.",
+  "environment_checks": [
+    {
+      "id": "branch",
+      "description": "Testing against today's actual merged code, not a stale checkout",
+      "status": "pass",
+      "detail": "Created gate-50-live-run from origin/main @ 2dc1c72 (includes PR #160, #161, #162, #157). Working tree at session start was mid-stash-conflict on a different, unrelated branch (docs/close-154-159, owned by a concurrent agent) — left untouched; did not resolve or force through that conflict."
+    },
+    {
+      "id": "env-file",
+      "description": ".env exists, no REPLACE_ME placeholders, real generated secrets",
+      "status": "pass",
+      "detail": "Pre-existing .env from a prior session was already valid (no placeholders); fixed its permission from 644 to 600 (finale-up.sh warns but does not block on this)."
+    },
+    {
+      "id": "no-cache-rebuild",
+      "description": "control-api image forced through --no-cache so today's merged code is actually running, per the documented stale-image trap",
+      "status": "pass",
+      "detail": "docker compose build --no-cache control-api; confirmed via /api/v1/system/health returning app_env: \"finale\" after each rebuild (3 rebuilds total this session, each reconfirmed)."
+    },
+    {
+      "id": "postgres-tls",
+      "description": "Postgres speaks TLS, satisfying brahmadatta.E005 under APP_ENV=finale",
+      "status": "pass",
+      "detail": "Certs already present and valid (infrastructure/compose/postgres/certs/, expires 2027-08-17). DATABASE_URL in .env already carried ?sslmode=require from the prior session's fix (#155). Not regenerated — not needed."
+    },
+    {
+      "id": "finale-up",
+      "description": "infrastructure/scripts/finale-up.sh preflight and post-start assertions",
+      "status": "pass",
+      "detail": "All assertions passed: compose config valid, nginx -t passed, /admin/ returns 404, HSTS absent, /healthz reachable."
+    },
+    {
+      "id": "manage-check",
+      "description": "manage.py check passes clean",
+      "status": "pass",
+      "detail": "\"System check identified no issues (0 silenced).\" — confirmed 3 times across this session (after each control-api rebuild)."
+    },
+    {
+      "id": "migrations",
+      "description": "Migrations apply cleanly, including any new ones from #154",
+      "status": "pass",
+      "detail": "missions.0003_mission_idempotency_key (new in #154's PR #160) was pending on the reused pgdata volume from a prior session; applied cleanly with manage.py migrate --no-input."
+    }
+  ],
+  "new_bugs_found_and_fixed_this_session": [
+    {
+      "id": "GATE50-BUG-1",
+      "title": "SNAPSHOT_SOURCE_ROOT (/demo/repositories) was never mounted into control-api in any compose profile, dev or finale",
+      "severity": "blocking",
+      "scope": "devops / infrastructure compose config — fixed in this session",
+      "detail": "config.settings.base.SNAPSHOT_SOURCE_ROOT defaults to BASE_DIR.parent.parent/demo/repositories. Neither docker-compose.yml (dev) nor docker-compose.finale.yml mounted the repo's demo/repositories/ directory into the control-api container at that path. source=\"git\" snapshot ingestion — the only way to hand the container a local demo target like pktcfg without a real git remote — had therefore never actually worked containerized in any profile. Confirmed by exec into the container: /demo/repositories did not exist.",
+      "fix": "Added a read-only bind mount ../../demo/repositories:/demo/repositories:ro to the control-api service (and, for parity, the worker service) in both infrastructure/compose/docker-compose.finale.yml and infrastructure/compose/docker-compose.yml.",
+      "verified": "docker exec into the rebuilt container confirmed /demo/repositories/pktcfg is now visible and readable with the expected file listing."
+    },
+    {
+      "id": "GATE50-BUG-2",
+      "title": "ARTIFACT_ROOT (snapshot content-addressed store) pointed inside the finale image's read-only /app, and the fallback fix (a named volume) was still root-owned against a non-root, capability-dropped container",
+      "severity": "blocking",
+      "scope": "devops / infrastructure compose + Dockerfile — fixed in this session",
+      "detail": "Two-stage discovery. (1) config.settings.base.ARTIFACT_ROOT defaults to BASE_DIR/var/artifacts, i.e. /app/var/artifacts — inside the finale runtime image's baked-in source tree, which is read_only: true at the container level. POST .../snapshot 500'd with OSError: [Errno 30] Read-only file system: '/app/var' the moment it tried to materialize the tar it had just built. (2) Repointing ARTIFACT_ROOT at a named volume (/var/lib/brahmadatta/artifacts) fixed the read-only problem but hit a second one: Docker creates named volumes empty and root-owned; the finale control-api container runs as uid 10001 (app) with cap_drop: [\"ALL\"] and no CHOWN capability, so it could not write into its own volume either — PermissionError: [Errno 13] Permission denied. The pre-existing 'evidence' volume (for exported evidence bundles) has the identical latent bug; it had simply never been exercised by any prior partial verification, since nothing had reached mission teardown/export before #154 wired the routers that let a mission progress that far.",
+      "fix": "Set ARTIFACT_ROOT=/var/lib/brahmadatta/artifacts as an explicit env var on control-api (and worker) in docker-compose.finale.yml, added a new artifacts: named volume, and — to fix the ownership problem for both this new volume and the pre-existing evidence volume in one place — added `RUN mkdir -p /var/lib/brahmadatta/{artifacts,evidence} && chown -R app:app /var/lib/brahmadatta` to the runtime stage of infrastructure/compose/images/control-api.Dockerfile, before USER app:app. This relies on documented Docker behavior: a fresh named volume is seeded from whatever already exists at its mount point in the image, ownership included, on first mount.",
+      "verified": "Rebuilt --no-cache, removed the already-initialized (root-owned) artifacts and evidence volumes, recreated the container, and confirmed via docker exec ls -la /var/lib/brahmadatta/ that both directories are now owned by app:app. Snapshot ingestion (step 3 below) then succeeded."
+    }
+  ],
+  "unresolved_blocker_reported_not_fixed": {
+    "id": "GATE50-BLOCKER",
+    "title": "No mechanism — HTTP endpoint or automatic background process — advances a mission past VALIDATING",
+    "severity": "P0, blocks #50 and everything downstream (#57, #60)",
+    "scope_note": "This is application/orchestration engineering, not infrastructure. Per instructions, reported rather than attempted: this is the same size and shape of work as #154 itself (a full backend-developer + engineering-manager + cybersecurity + qa-engineer review cycle), not a small, clearly-scoped devops fix.",
+    "static_evidence": [
+      "apps/control-api/api/routers/missions.py contains exactly 11 endpoints: create, list, get, authorize, snapshot, preflight, start, pause, cancel, events, events/replay. None of them, and nothing in evidence.py or system.py, ever calls contracts.state_machine target BASELINE/TRIAGE/STRESS_TEST/CORRELATE/PATCH/VERIFY/EXPORTING.",
+      "orchestrator/transitions.py's transition() is the sole writer of Mission.state. Its only two automatic (transaction.on_commit) side effects are teardown (on CANCELLING/terminal) and starting the model host lease (on entering PATCH) — neither of those advances the state machine itself.",
+      "start_mission() (missions/service.py:338) is documented as 'Start the autonomous workflow' but its implementation performs exactly one transition, SNAPSHOTTED -> VALIDATING, and returns.",
+      "workers/baseline/run.py's own module docstring states plainly: 'No orchestrator or event bus exists yet (#12), so nothing here posts these anywhere; emit_baseline_events is what a caller — the future orchestrator, or a script proving the D3 gate by hand — calls'. That caller was never built. Confirmed by grep: nothing under apps/control-api imports workers.baseline, workers.fuzzing, or workers.replay.",
+      "No Django signal (post_save/pre_save) exists anywhere in apps/control-api on the Mission model.",
+      "No django_rq / celery / rq dependency exists in apps/control-api/requirements.txt or config/settings. The finale compose file's worker service (profile \"worker\", not activated by default) runs `python manage.py rqworker default` as its default command — a command that would itself fail immediately since django-rq is not installed; this service has never been exercised end to end.",
+      "No apps/control-api/*/management/commands/*.py exists at all (find returned empty) — there is no CLI driver either."
+    ],
+    "empirical_evidence": "See transcript below. A mission driven for real through create -> authorize -> snapshot -> preflight -> start reached VALIDATING at 2026-08-17T05:21:29.029Z and was polled every 10s for 60s unattended; state, progress, and last_event_sequence never changed. allowed_transitions in the mission detail response correctly listed BASELINE as a legal next state per the state machine — confirming the block is 'nothing calls it', not 'the state machine forbids it'. The same gap recurs one step further out: cancel_mission (VALIDATING -> CANCELLING) worked and correctly triggered teardown (real, wired, confirmed via the TEARDOWN_CONFIRMED event), but CANCELLING -> CANCELLED has the identical problem — orchestrator/teardown.py's teardown_started_compute() only reaps compute and emits events, it never calls transition() to finalize the mission — so the test mission is permanently stuck in CANCELLING too, not CANCELLED.",
+    "recommendation": "This needs a scoped ticket the same shape as #154: a mission-stage driver that, for each state VALIDATING through EXPORTING (and CANCELLING -> CANCELLED / FAILED -> FAILED-confirmed), actually invokes the already-built, already-tested stage code (workers/baseline, workers/fuzzing, orchestrator/candidates.py, orchestrator/verification.py, teardown.py's own missing final transition) and then calls orchestrator.transitions.transition() to record the outcome. Whether that driver is synchronous-in-request, a background poller, or a real RQ/Celery worker (the compose scaffolding for the latter already exists but is unwired and untested) is an architecture decision for the CTO/software-architect, not a call this report makes."
+  },
+  "nine_step_flow_attempted": {
+    "target": "demo/repositories/pktcfg",
+    "mission_id": "61986d7c-f3e4-474f-b87f-3dab605d84a4",
+    "steps": [
+      {"n": 1, "name": "Target + Authorize + snapshot chosen", "endpoint": "POST /api/v1/missions", "http_status": 201, "result": "PASS", "detail": "Mission created, state=CREATED. (First attempt 422'd on adapter enum value — real validation, corrected to C_CMAKE_CTEST and retried.)"},
+      {"n": 2, "name": "Authorize", "endpoint": "POST /api/v1/missions/{id}/authorize", "http_status": 201, "result": "PASS", "detail": "AuthorizationRecord created, state=AUTHORIZED, granted_by=devops-engineer-gate50-run, valid 240 minutes."},
+      {"n": 3, "name": "Snapshot", "endpoint": "POST /api/v1/missions/{id}/snapshot", "http_status": 201, "result": "PASS (after fixing GATE50-BUG-1 and GATE50-BUG-2)", "detail": "source=git, repository_ref=pktcfg (resolved server-side from the mission's own repository_ref). archive_sha256 discovered honestly via the server's own SnapshotDigestMismatchError (a deliberate placeholder digest submitted first, per how an operator without local tar tooling would actually learn the real value; the server never trusts a client-supplied digest — it recomputes and 409s on mismatch). Real snapshot recorded: 33 files, 58131 bytes, sha256=b7a82f9fcd03bcef24ff3b275b51e6fd916ef2d9b78357975796256fec4b5fe3."},
+      {"n": 4, "name": "Baseline (preflight gate)", "endpoint": "POST /api/v1/missions/{id}/preflight", "http_status": 200, "result": "PASS (preflight only — does not itself run configure/build/ctest)", "detail": "passed=true, all 4 checks true (legal_transition, resume_origin, verdict_evidenced, authorization_and_stage), blocking_codes=[]. Note: this endpoint validates that a start WOULD be legal; it is not the CEO doc's step 3 (\"Configure, build, ctest → all tests pass\") — no code path reachable from the HTTP API runs an actual baseline build. See blocker above."},
+      {"n": 5, "name": "Start (\"the autonomous workflow\")", "endpoint": "POST /api/v1/missions/{id}/start", "http_status": 202, "result": "PASS as far as its own scope goes", "detail": "SNAPSHOTTED -> VALIDATING accepted. This is the last real state change reachable through the HTTP API."},
+      {"n": "5b", "name": "Unattended observation window", "endpoint": "GET /api/v1/missions/{id} x6, 10s apart", "http_status": 200, "result": "FAIL — this is the gate failure", "detail": "State, progress (36.36%, stage=INGEST), and last_event_sequence=3 were unchanged across all 6 polls over 60s. allowed_transitions correctly listed BASELINE, confirming the block is the absence of a caller, not a state-machine refusal."},
+      {"n": "6-9", "name": "Finding / Patch / Verdicts A+B / Evidence / Teardown", "endpoint": "n/a", "http_status": null, "result": "NOT REACHED", "detail": "Cannot be attempted through the real HTTP API today — blocked upstream by the missing pipeline driver. This is exactly where the run stops; nothing further was faked or simulated to produce a false pass."}
+    ],
+    "cleanup_exercise": {
+      "action": "POST /api/v1/missions/{id}/cancel (confirm=true)",
+      "http_status": 202,
+      "result": "PARTIAL — VALIDATING -> CANCELLING accepted and teardown genuinely ran (TEARDOWN_CONFIRMED event, detail: 'no mission-scoped compute was running', released=true — correct, since no sandbox had ever been spawned), but CANCELLING -> CANCELLED never fires for the same root-cause reason as the main blocker. Mission is left in a real, non-terminal CANCELLING state in the database.",
+      "final_mission_state_file": ".project/evidence/d7-gate-50-live-run-2026-08-17-final-mission-state.json"
+    }
+  },
+  "docker_ps_a_final": [
+    "brahmadatta-finale-control-api Up 2 minutes (healthy)",
+    "brahmadatta-finale-nginx Up 9 minutes (healthy)",
+    "brahmadatta-finale-redis Up 9 minutes (healthy)",
+    "brahmadatta-finale-db Up 9 minutes (healthy)",
+    "infra-postgres-1 Up 3 weeks (unrelated project, pre-existing)",
+    "good_marketer_web-frontend-1 Exited 3 weeks ago (unrelated project, pre-existing)",
+    "good_marketer_web-backend-1 Exited 3 weeks ago (unrelated project, pre-existing)",
+    "good_marketer_web-ollama-pull-1 Exited 4 weeks ago (unrelated project, pre-existing)",
+    "good_marketer_web-ollama-1 Exited 3 weeks ago (unrelated project, pre-existing)"
+  ],
+  "strays_check": "Zero sandbox containers were ever created (baseline/fuzzing never ran), so the strays check the acceptance criteria asks for is trivially satisfied for THIS run, but proves nothing — it never got far enough to spawn a sandbox to leak in the first place. This is not evidence the teardown path is safe under real load, only that it doesn't crash when there is nothing to reap.",
+  "stack_left_running": true,
+  "stack_left_running_reason": "The finale stack (rebuilt image with both fixes, TLS Postgres, migrated DB) was left running rather than torn down, so whoever picks up the pipeline-driver work can retest immediately without repeating this session's ~10 minutes of build/migrate/mount setup. Reconstruction is fully reproducible from a clean state regardless via: docker compose --env-file .env -f infrastructure/compose/docker-compose.finale.yml build --no-cache control-api && infrastructure/scripts/finale-up.sh && docker exec brahmadatta-finale-control-api python manage.py migrate --no-input.",
+  "files_changed_this_session": [
+    "infrastructure/compose/docker-compose.finale.yml",
+    "infrastructure/compose/docker-compose.yml",
+    "infrastructure/compose/images/control-api.Dockerfile"
+  ]
+}

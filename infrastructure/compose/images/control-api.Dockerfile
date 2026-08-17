@@ -109,6 +109,39 @@ ENV DJANGO_SETTINGS_MODULE=config.settings.finale
 
 COPY --chown=app:app . /app
 
+# `config.settings.base.SNAPSHOT_SOURCE_ROOT` defaults to `/demo/repositories`
+# (`BASE_DIR.parent.parent / "demo" / "repositories"`, resolving to `/demo/repositories`
+# when BASE_DIR is `/app`) — the only way to hand the container a local demo target
+# (e.g. `pktcfg`) for `source="git"` snapshot ingestion without a real git remote.
+#
+# D-032: the finale compose file may not bind-mount host paths into control-api — the
+# finale image is the artifact, and a source mount makes what runs on stage different
+# from what was tested (tests/architecture/test_compose_topology.py::
+# test_the_finale_profile_has_no_source_mounts_into_control_api enforces this). So this
+# is baked in at build time instead, the same pattern as `COPY --chown=app:app . /app`
+# two lines up and as images/postgres-tls.Dockerfile's baked-in TLS certs. `demo/` lives
+# outside this Dockerfile's build context (apps/control-api/, owned by the backend
+# developer — see the file header) by design, so it arrives via a named additional
+# build context rather than a path inside `.`: `demo-repositories`, pointed at
+# `../../demo/repositories` by both the `control-api` and `worker` services' `build:`
+# blocks in docker-compose.finale.yml. `docker compose build` resolves it automatically;
+# a bare `docker build` needs `--build-context demo-repositories=../../demo/repositories`.
+COPY --from=demo-repositories --chown=app:app . /demo/repositories
+
+# `docker-compose.finale.yml` mounts named volumes at these two paths for the
+# content-addressed artifact store (ARTIFACT_ROOT) and the exported evidence bundle
+# store. A fresh named volume is created empty and root-owned; Docker seeds it from
+# whatever already exists at the mount point in the image at first mount, ownership
+# included — so creating these here, owned by `app`, is what lets the non-root
+# `runtime` process (USER app:app below, and `read_only: true` + `cap_drop: ["ALL"]`
+# in the finale compose file — no CHOWN capability at runtime to fix this after the
+# fact) actually write into them. Without this, both paths 500 on first write with
+# `PermissionError: [Errno 13] Permission denied`. Found running the #50 live
+# rehearsal, 2026-08-17 — `evidence/` had never been reached by any prior partial
+# verification, and `artifacts/` had never existed as a writable path in any profile.
+RUN mkdir -p /var/lib/brahmadatta/artifacts /var/lib/brahmadatta/evidence \
+ && chown -R app:app /var/lib/brahmadatta
+
 USER app:app
 EXPOSE 8000
 
