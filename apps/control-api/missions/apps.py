@@ -24,6 +24,7 @@ class MissionsConfig(AppConfig):
         # forgot to register is a visible NotImplementedError, not a silent no-op.
         from orchestrator import (
             correlate_executor,  # noqa: F401
+            export_executor,  # noqa: F401
             patch_generate_executor,  # noqa: F401
             teardown_executor,  # noqa: F401
             verify_dispatch,  # noqa: F401

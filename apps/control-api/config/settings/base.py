@@ -250,9 +250,7 @@ SANDBOX_POLICY = {
 # read. SNAPSHOT_STAGING_ROOT bounds an uploaded archive's archive_ref the same way.
 ARTIFACT_ROOT = Path(env.get_str("ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifacts")))
 SNAPSHOT_SOURCE_ROOT = Path(
-    env.get_str(
-        "SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories")
-    )
+    env.get_str("SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories"))
 )
 SNAPSHOT_STAGING_ROOT = Path(
     env.get_str("SNAPSHOT_STAGING_ROOT", str(BASE_DIR / "var" / "uploads"))
@@ -278,6 +276,21 @@ SNAPSHOT_MAX_BYTES = env.get_int("SNAPSHOT_MAX_BYTES", 536_870_912)
 SNAPSHOT_WORKSPACE_ROOT = Path(
     env.get_str("SNAPSHOT_WORKSPACE_ROOT", str(BASE_DIR / "var" / "workspaces"))
 )
+
+#: Where `orchestrator.evidence_export.export_mission` (#168, T6) assembles the
+#: `report.md`/`report.json`/`manifest.json`/`gate-matrix.json`/`tool-versions.json`
+#: directory and its `.tar.gz` before the tarball is ingested into `ARTIFACT_ROOT`
+#: (content-addressed, durable) and the scratch directory is discarded. A sibling of
+#: `SNAPSHOT_WORKSPACE_ROOT` for the same reason that root is kept apart from
+#: `ARTIFACT_ROOT`: a different lifecycle (created and torn down per export) from the
+#: content-addressed store it feeds.
+EXPORT_WORKSPACE_ROOT = Path(
+    env.get_str("EXPORT_WORKSPACE_ROOT", str(BASE_DIR / "var" / "exports"))
+)
+#: Byte ceiling for one evidence bundle tarball. The bundle never contains the
+#: target's source archive (architecture spec §5.3, "never in"), so this is far
+#: smaller than `SNAPSHOT_MAX_BYTES` — 64 MiB is generous for diffs, logs and JSON.
+EVIDENCE_BUNDLE_MAX_BYTES = env.get_int("EVIDENCE_BUNDLE_MAX_BYTES", 67_108_864)
 
 # --- Security headers ----------------------------------------------------------
 

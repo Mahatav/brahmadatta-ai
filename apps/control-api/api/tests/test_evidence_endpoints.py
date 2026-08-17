@@ -36,6 +36,7 @@ from missions.models import (
 pytestmark = pytest.mark.django_db
 
 OPERATOR = settings.CONTROL_API_TOKENS["operator"]
+REVIEWER = settings.CONTROL_API_TOKENS["reviewer"]
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 ARTIFACT = {
     "uri": "artifact://mission/reproducer/crash.bin",
@@ -56,11 +57,34 @@ def client() -> Client:
 
 @pytest.fixture
 def evidence_rows():
+    from datetime import timedelta
+
+    from missions.models import Authorization, Snapshot
+
     mission = Mission.objects.create(
         name="pktcfg",
         repository_ref="file:///demo/repositories/pktcfg",
         adapter=LanguageAdapter.C_CMAKE_CTEST.value,
         policy={},
+    )
+    # Snapshot + Authorization: assemble_evidence_bundle/export_mission (#168, T6)
+    # require both to exist for this mission — see orchestrator.evidence_bundle's
+    # EvidenceUnavailableError. Added here rather than a second fixture so the
+    # existing findings/baseline/fuzzing/patch tests below keep working unmodified.
+    Authorization.objects.create(
+        mission=mission,
+        statement="I am authorized to test this repository on behalf of the owner.",
+        granted_by="Mahatav Arora",
+        granted_at=NOW - timedelta(minutes=5),
+        expires_at=NOW + timedelta(hours=8),
+        repository_ref="file:///demo/repositories/pktcfg",
+    )
+    Snapshot.objects.create(
+        mission=mission,
+        commit_sha="0" * 40,
+        archive_sha256="d" * 64,
+        file_count=31,
+        bytes_total=120_000,
     )
     finding = Finding.objects.create(
         mission=mission,
@@ -143,9 +167,7 @@ def evidence_rows():
 def test_findings_are_queryable_by_mission(client: Client, evidence_rows):
     mission, finding, _, _ = evidence_rows
 
-    response = client.get(
-        f"/api/v1/missions/{mission.id}/findings", **bearer(OPERATOR)
-    )
+    response = client.get(f"/api/v1/missions/{mission.id}/findings", **bearer(OPERATOR))
 
     assert response.status_code == 200
     body = response.json()
@@ -154,9 +176,7 @@ def test_findings_are_queryable_by_mission(client: Client, evidence_rows):
     assert body["items"][0]["location"]["file_path"] == "src/decode.c"
 
 
-def test_finding_detail_is_queryable_by_mission_and_finding(
-    client: Client, evidence_rows
-):
+def test_finding_detail_is_queryable_by_mission_and_finding(client: Client, evidence_rows):
     mission, finding, _, _ = evidence_rows
 
     response = client.get(
@@ -175,18 +195,18 @@ def test_baseline_fuzzing_patch_and_verification_reads(client: Client, evidence_
     mission, _, patch, verification = evidence_rows
 
     assert (
-        client.get(f"/api/v1/missions/{mission.id}/baseline", **bearer(OPERATOR))
-        .json()["tests_passed"]
+        client.get(f"/api/v1/missions/{mission.id}/baseline", **bearer(OPERATOR)).json()[
+            "tests_passed"
+        ]
         == 8
     )
     assert (
-        client.get(f"/api/v1/missions/{mission.id}/fuzzing", **bearer(OPERATOR))
-        .json()["unique_crashes"]
+        client.get(f"/api/v1/missions/{mission.id}/fuzzing", **bearer(OPERATOR)).json()[
+            "unique_crashes"
+        ]
         == 1
     )
-    patches = client.get(
-        f"/api/v1/missions/{mission.id}/patches", **bearer(OPERATOR)
-    ).json()
+    patches = client.get(f"/api/v1/missions/{mission.id}/patches", **bearer(OPERATOR)).json()
     assert patches["items"][0]["id"] == str(patch.id)
 
     response = client.get(
@@ -196,6 +216,86 @@ def test_baseline_fuzzing_patch_and_verification_reads(client: Client, evidence_
     assert response.status_code == 200
     assert response.json()["id"] == str(verification.id)
     assert response.json()["verdict"] == "VERIFIED"
+
+
+def _override_export_roots(settings, tmp_path):
+    settings.ARTIFACT_ROOT = tmp_path / "artifacts"
+    settings.EXPORT_WORKSPACE_ROOT = tmp_path / "exports"
+
+
+def test_get_evidence_bundle_returns_the_assembled_bundle(
+    client: Client, evidence_rows, settings, tmp_path
+):
+    """`GET /evidence` (#168, T6) — previously `NotImplementedYetError`, now a real
+    read over `orchestrator.evidence_bundle.assemble_evidence_bundle`."""
+    _override_export_roots(settings, tmp_path)
+    mission, finding, patch, _verification = evidence_rows
+
+    response = client.get(f"/api/v1/missions/{mission.id}/evidence", **bearer(OPERATOR))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mission_id"] == str(mission.id)
+    assert body["baseline"]["tests_passed"] == 8
+    assert body["fuzzing"]["unique_crashes"] == 1
+    assert len(body["findings"]) == 1
+    assert body["findings"][0]["id"] == str(finding.id)
+    assert len(body["patches"]) == 1
+    assert body["patches"][0]["id"] == str(patch.id)
+    assert len(body["verifications"]) == 1
+    assert body["verifications"][0]["verdict"] == "VERIFIED"
+    assert body["verdict_summary"]["mission_verdict"] == "VERIFIED"
+    assert body["recommended_patch_id"] == str(patch.id)
+    assert body["isolation_mode"] == "SUBPROCESS_JAIL"
+    assert "content" not in json.dumps(body)
+
+
+def test_get_evidence_bundle_404s_for_unknown_mission(client: Client):
+    response = client.get(
+        "/api/v1/missions/00000000-0000-0000-0000-000000000000/evidence",
+        **bearer(OPERATOR),
+    )
+    assert response.status_code == 404
+
+
+def test_export_evidence_writes_a_durable_bundle_and_returns_202(
+    client: Client, evidence_rows, settings, tmp_path
+):
+    """`POST /export` (#168, T6) — previously `NotImplementedYetError`, now a real
+    write via `orchestrator.evidence_export.export_mission`: a durable, content-
+    addressed tarball under `ARTIFACT_ROOT`, an `Export` row, and a 202 receipt."""
+    _override_export_roots(settings, tmp_path)
+    mission, _, _, _ = evidence_rows
+
+    response = client.post(
+        f"/api/v1/missions/{mission.id}/export",
+        data=json.dumps({"formats": ["markdown", "json"], "include_artifacts": False}),
+        content_type="application/json",
+        **bearer(OPERATOR),
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["mission_id"] == str(mission.id)
+    assert body["formats"] == ["markdown", "json"]
+    assert len(body["artifacts"]) == 1
+    artifact_ref = body["artifacts"][0]
+    assert artifact_ref["kind"] == "evidence_bundle"
+    stored_path = settings.ARTIFACT_ROOT / artifact_ref["sha256"][:2] / artifact_ref["sha256"]
+    assert stored_path.is_file()
+
+
+def test_export_evidence_requires_operator_role(client: Client, evidence_rows):
+    mission, _, _, _ = evidence_rows
+
+    response = client.post(
+        f"/api/v1/missions/{mission.id}/export",
+        data=json.dumps({}),
+        content_type="application/json",
+        **bearer(REVIEWER),
+    )
+
+    assert response.status_code == 403
 
 
 def _passing_gates() -> GateMatrix:
