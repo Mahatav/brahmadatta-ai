@@ -268,6 +268,48 @@ def test_file_size_limit_can_be_raised_as_a_specific_error() -> None:
     assert "per-file limit" in str(excinfo.value)
 
 
+def test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz(jail) -> None:
+    """SEC-35, residual gap (cybersecurity review of #113, re-opened by #159).
+
+    `_classify`'s `SIGXFSZ` branch only fires if the target actually receives and dies
+    to that signal. CPython does not: `signal.getsignal(signal.SIGXFSZ) is SIG_IGN` at
+    interpreter start (confirmed below), so a write that crosses `RLIMIT_FSIZE` fails at
+    the syscall with `EFBIG` and surfaces to Python as an ordinary `OSError` — the
+    process is free to do anything with that, including nothing recognizable at all.
+    The original SEC-35 test used `/bin/dd`, which *does* honour the signal, which is
+    exactly why it never caught this — the acceptance criteria for #159 call that out
+    by name and require a real Python target instead.
+
+    This mirrors an uncaught, naive target: no try/except, just the default CPython
+    traceback that already prints "OSError: [Errno 27] File too large" to stderr on
+    the way to a nonzero exit.
+    """
+    policy = JailPolicy(cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=1 * MIB)
+    with Jail.create(policy) as jail_:
+        result = jail_.run(
+            python(
+                """
+                import signal
+                assert signal.getsignal(signal.SIGXFSZ) is signal.SIG_IGN, (
+                    "this test assumes CPython's default SIGXFSZ disposition; if that "
+                    "assumption is now false the test needs to be revisited"
+                )
+                with open("toolarge.bin", "wb") as fh:
+                    for _ in range(50):
+                        fh.write(b"x" * (1024 * 1024))
+                        fh.flush()
+                print("wrote past the limit without being stopped")
+                """
+            )
+        )
+    assert result.exit_code != 0, result.summary()
+    assert result.signal_number is None, (
+        "the whole point: no signal reaches a target that ignores SIGXFSZ"
+    )
+    assert "wrote past the limit" not in result.stdout
+    assert result.limit_hit is LimitKind.FILE_SIZE, result.summary()
+
+
 def test_file_size_limit_bounds_one_file_not_aggregate_usage(jail) -> None:
     """SEC-36 (cybersecurity review of #113, Low). The docstring on `max_file_bytes`
     said this stops "a pathological build product filling the disk" — an overclaim.
@@ -407,6 +449,107 @@ def test_timeout_kills_a_grandchild_that_detaches_via_setsid(tmp_path: Path) -> 
         f"the detached descendant (pid {detached_pid}) outlived the mission by escaping "
         f"the process group. killpg() was never going to reach it; only a parent-id-based "
         f"sweep, independent of process group membership, can."
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the SEC-38 sweep is Linux-only (/proc-based); see _proc_descendants in jail.py",
+)
+def test_sweep_catches_rapid_repeated_detachment(tmp_path: Path) -> None:
+    """SEC-38 (cybersecurity review of #113, MEDIUM, re-opened by #159).
+
+    `_sweep_detached_descendants`'s single-detachment case (the test above) was never
+    the gap. The gap is a descendant that keeps forking new, independently-detached
+    descendants of its own *after* the pre-kill snapshot (`known`) was taken — the
+    final sweep's own re-walk of `/proc` is anchored on this jail's own child pid
+    (`root_pid`), and that pid is normally already dead and reaped by the time the
+    sweep runs (`_kill_group` kills and reaps the direct child before ever calling
+    this), so a plain `_proc_descendants(root_pid)` walk finds nothing new for the
+    entire sweep — only pids already captured in `known` by literal pid membership
+    ever get cleaned up. Anything forked by a still-alive detached descendant *after*
+    the snapshot has no path back to `root_pid` and is invisible to that walk,
+    deterministically, for as long as it keeps happening.
+
+    This is the review's own stated bar for a sufficient regression test: not a single
+    detachment, but many descendants forking and detaching in quick succession, spanning
+    the real kill window (`kill_grace_seconds` left at its actual default, 5.0 — not
+    tightened to make the race easier to hit). A `driver` process detaches immediately,
+    then spends 4 real seconds forking a new, separately-detached leaf roughly every
+    20ms; the jail's 1.5s wall clock guarantees the pre-kill snapshot lands in the
+    middle of that window, so leaves born after it are forking *while the sweep is
+    actively running*, not before it starts.
+    """
+    assert JailPolicy().kill_grace_seconds == 5.0, (
+        "this test is required to reproduce at the module's real default, not an "
+        "artificially tightened value"
+    )
+    pid_dir = tmp_path / "leaves"
+    pid_dir.mkdir()
+    policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=1.5, max_processes=1024)
+
+    with Jail.create(policy) as jail:
+        result = jail.run(
+            python(
+                f"""
+                import os, time
+
+                pid_dir = {str(pid_dir)!r}
+
+                driver = os.fork()
+                if driver == 0:
+                    os.setsid()
+                    end = time.monotonic() + 4.0
+                    i = 0
+                    while time.monotonic() < end:
+                        i += 1
+                        leaf = os.fork()
+                        if leaf == 0:
+                            os.setsid()
+                            path = os.path.join(pid_dir, f"leaf-{{i}}-{{os.getpid()}}")
+                            with open(path, "w") as fh:
+                                fh.write(str(os.getpid()))
+                                fh.flush()
+                            time.sleep(600)
+                            os._exit(0)
+                        try:
+                            os.waitpid(leaf, os.WNOHANG)
+                        except ChildProcessError:
+                            pass
+                        time.sleep(0.02)
+                    os._exit(0)
+                time.sleep(600)
+                """
+            )
+        )
+
+    assert result.limit_hit is LimitKind.WALL_CLOCK, result.summary()
+
+    deadline = time.monotonic() + 6.0
+    leaf_files: list[Path] = []
+    while time.monotonic() < deadline:
+        leaf_files = list(pid_dir.iterdir())
+        if len(leaf_files) >= 40:
+            break
+        time.sleep(0.1)
+    leaf_pids = [int(p.read_text().strip()) for p in leaf_files]
+    assert len(leaf_pids) >= 40, (
+        f"the fork loop only produced {len(leaf_pids)} leaves before the jail returned; "
+        f"not enough to trust this as a real exercise of rapid repeated detachment"
+    )
+
+    deadline = time.monotonic() + 10
+    survivors = list(leaf_pids)
+    while time.monotonic() < deadline:
+        survivors = [pid for pid in leaf_pids if _alive(pid)]
+        if not survivors:
+            break
+        time.sleep(0.2)
+
+    assert not survivors, (
+        f"{len(survivors)}/{len(leaf_pids)} rapidly-detached descendants outlived the "
+        f"mission (SEC-38) — the sweep must catch all of them, not just the ones "
+        f"present at the pre-kill snapshot: {sorted(survivors)}"
     )
 
 

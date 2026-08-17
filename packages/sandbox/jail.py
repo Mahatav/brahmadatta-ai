@@ -42,22 +42,27 @@ live in `packages/sandbox/tests/test_jail.py`:
 | cleanup on success / failure / cancel | `test_cleanup_*` |
 | the environment is scrubbed | `test_environment_is_scrubbed_to_the_allowlist` |
 | `limits_applied` is measured per run, not guessed from the platform (D-054) | `test_limits_applied_is_a_real_per_run_measurement` |
+| a detached descendant cannot survive rapid, repeated fork-and-detach (SEC-38) | `test_sweep_catches_rapid_repeated_detachment` |
+| `FILE_SIZE` is reported even for a target whose `SIGXFSZ` disposition is `SIG_IGN` (SEC-35) | `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz` |
 
-**Two open gaps, ruled on and gated rather than silently accepted (D-056).** Both require an
-adversarial target and are not reachable through `#16`/`#17`/`#27`'s ordinary `cmake`/`ctest`
-invocation — they are why this module cannot be pointed at `#28`'s fuzzing worker until both
-close:
+**Two gaps D-056 gated `#28`'s fuzzing worker on, fixed by `#159` — not yet independently
+re-verified.** Both were found by the security review of `#113`, both required an
+adversarial target neither `#16`/`#17`/`#27`'s ordinary `cmake`/`ctest` invocation nor a
+single-shot regression test would reach, and both are now covered by the named tests
+above. **That is not the same thing as closed.** D-056 was explicit that a self-report does
+not satisfy it — only `cybersecurity` independently re-attacking each one does — and `#159`
+tracks that re-verification as still outstanding. Until it lands, treat `#28` as still
+gated on it, not as unblocked by the strength of this fix alone:
 
-| Gap | Condition to trigger it | Tracking |
+| Gap | What was wrong | What changed |
 |---|---|---|
-| **SEC-38** — a detached descendant can survive `_sweep_detached_descendants` under rapid, repeated fork-and-detach (~1-in-10 to 1-in-15 in testing), reproducing at the real default `kill_grace_seconds=5.0`. The final sweep's re-walk is anchored on this jail's own child pid, which is already dead by the time of that walk, so a descendant reparenting between two poll iterations can go briefly invisible. | A target that forks and `setsid()`s repeatedly near the kill window — the exact pattern a hostile or malformed fuzz target can produce, not ordinary build/test behaviour. | `#28`'s Definition of Done. A single-detachment test is not sufficient re-verification for this — the regression test must exercise *rapid, repeated* detachment. |
-| **SEC-35** — `_classify`'s `SIGXFSZ` branch does not fire for a target that ignores or handles that signal. CPython does so by default (`signal.getsignal(SIGXFSZ) == SIG_IGN` at interpreter start), so a Python-based target genuinely stopped by `RLIMIT_FSIZE` reports `limit_hit == NONE` instead. The jail still stops the process — this is an evidence-accuracy gap, not an isolation escape. | A Python-based (or any `SIGXFSZ`-ignoring) target actually hitting `max_file_bytes`. | `#28`'s Definition of Done. The fix needs the same stderr/on-disk-size fallback `MEMORY`'s branch already uses, verified against a Python target, not `dd`. |
+| **SEC-38** | `_sweep_detached_descendants`'s final re-walk was anchored on this jail's own child pid, which is normally already dead (reaped) by the time the sweep runs — `_kill_group` signals and waits on it first. A walk rooted at a pid nothing claims as parent finds nothing, so any descendant a *tracked* pid forked after the pre-kill snapshot had no path back to it and was lost, deterministically, for as long as that kept happening — reproducing at the real default `kill_grace_seconds=5.0` under rapid, repeated fork-and-detach. | The walk now runs from every tracked pid each pass, not just the dead root — but killing on discovery just relocates that same race onto the newly-found pid's own next `fork()`. Closing it needed a freeze step: every pid is `SIGSTOP`ped and *confirmed* stopped before anything is killed, with the discover-then-freeze cycle run to a fixed point (nothing new turns up with everything currently tracked already frozen) before any `SIGKILL` is sent — see `_sweep_detached_descendants` and `_freeze`. `test_sweep_catches_rapid_repeated_detachment` chains many rapid fork-and-detach cycles at the real default grace period and requires zero survivors, run repeatedly, not a single detachment. |
+| **SEC-35** | `_classify`'s `SIGXFSZ` branch only fires if the target actually receives and dies to that signal. CPython does not — `signal.getsignal(SIGXFSZ) is SIG_IGN` at interpreter start — so a Python target genuinely stopped by `RLIMIT_FSIZE` gets an ordinary `OSError` (`errno.EFBIG`) instead and can do anything with it, reporting `limit_hit == NONE`. Evidence-accuracy gap, not an isolation escape: the limit still stopped the process either way. | `_classify` gets the same fallback `MEMORY`'s branch already relies on for the same kind of ambiguity: a recognizable stderr marker, or (independent of anything the target says) a file on disk sized at the policy's cap — direct evidence `RLIMIT_FSIZE` actually stopped a write, gated behind `exit_code != 0` so an ordinary successful build never pays for the check. `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz`, verified against a real Python target, not `dd` — `dd` honours the signal, which is why the original SEC-35 test never caught this. |
 
-**No caller may point this jail at generated or fuzzer-derived input before both close.**
-
-Anything not in that table is *intended*, not enforced. In particular this module does
-**not** prevent a running process from reading outside the jail, opening a network
-socket, or exhausting a limit the kernel applies per-user rather than per-process.
+Anything not in the enforced-properties table above is *intended*, not enforced. In
+particular this module does **not** prevent a running process from reading outside the
+jail, opening a network socket, or exhausting a limit the kernel applies per-user rather
+than per-process.
 """
 
 from __future__ import annotations
@@ -103,6 +108,81 @@ _MEASURE_LOCK = threading.Lock()
 _MIB = 1024 * 1024
 
 
+def _proc_children_map() -> dict[int, list[int]]:
+    """Every currently-visible process on this machine, indexed by its recorded parent
+    id: `{ppid: [pid, ...]}`.
+
+    Factored out of `_proc_descendants` so a caller that needs to walk from more than
+    one root — `_sweep_detached_descendants` does, see SEC-38 — can build this map once
+    and reuse it, instead of re-listing all of `/proc` per root.
+
+    Linux only (`/proc/*/stat`). Returns an empty map on any other platform or if
+    `/proc` is unreadable, rather than raising — a caller that cannot do the walk needs
+    to know that as "found nothing", the same shape as "there was nothing to find", not
+    as a crash in a cleanup path that is often running during error handling already.
+    """
+    if sys.platform != "linux":
+        return {}
+
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {}
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            # Gone between listdir() and read() — a race inherent to /proc, not an
+            # error. It simply is not there anymore.
+            continue
+        # `comm` (the second field) is wrapped in parens and can itself contain spaces
+        # or parens, so the reliable split point is the *last* ')' in the line, not the
+        # first whitespace. Everything after it is space-separated, and ppid is field 4
+        # overall, i.e. the second field after that split.
+        after_comm = stat.rpartition(")")[2].split()
+        if len(after_comm) < 2:
+            continue
+        try:
+            ppid = int(after_comm[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    return children
+
+
+def _walk_descendants(children: dict[int, list[int]], roots: Sequence[int]) -> set[int]:
+    """Breadth-first walk of `children` (as built by `_proc_children_map`) starting from
+    every pid in `roots` at once.
+
+    Multiple simultaneous roots is what makes the SEC-38 fix work: any pid already known
+    to be a tracked descendant can itself have forked children of its own since the last
+    time anyone looked, and those children's only path back to anything is through *that*
+    pid, not through whichever process started the whole tree. Walking from one root
+    only finds what is still reachable from that one pid at this exact moment — walking
+    from every currently-tracked pid finds everything reachable from any of them.
+
+    A root itself is never included in the result unless it is also reachable from a
+    *different* root (harmless either way, since every root gets checked directly by the
+    caller).
+    """
+    roots_set = set(roots)
+    found: set[int] = set()
+    frontier = list(roots_set)
+    while frontier:
+        pid = frontier.pop()
+        for child in children.get(pid, ()):
+            if child in found or child in roots_set:
+                continue
+            found.add(child)
+            frontier.append(child)
+    return found
+
+
 def _proc_descendants(root_pid: int) -> set[int]:
     """Every process still descended from `root_pid`, found by walking `/proc`'s
     parent-id links rather than by process group or session membership.
@@ -120,48 +200,12 @@ def _proc_descendants(root_pid: int) -> set[int]:
     Does not catch a process that double-forks to reparent itself under init — that
     changes the parent id itself, not just the group, and is a harder problem this
     function does not claim to solve. See `packages/sandbox/README.md`.
+
+    A single, fixed root taken once is exactly the shape that leaves SEC-38 open — see
+    `_sweep_detached_descendants`, which walks from every tracked pid instead of just
+    this one.
     """
-    if sys.platform != "linux":
-        return set()
-
-    children: dict[int, list[int]] = {}
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return set()
-
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-        except OSError:
-            # Gone between listdir() and read() — a race inherent to /proc, not an
-            # error. It simply is not a descendant anymore.
-            continue
-        # `comm` (the second field) is wrapped in parens and can itself contain spaces
-        # or parens, so the reliable split point is the *last* ')' in the line, not the
-        # first whitespace. Everything after it is space-separated, and ppid is field 4
-        # overall, i.e. the second field after that split.
-        after_comm = stat.rpartition(")")[2].split()
-        if len(after_comm) < 2:
-            continue
-        try:
-            ppid = int(after_comm[1])
-        except ValueError:
-            continue
-        children.setdefault(ppid, []).append(pid)
-
-    found: set[int] = set()
-    frontier = [root_pid]
-    while frontier:
-        pid = frontier.pop()
-        for child in children.get(pid, ()):
-            if child not in found:
-                found.add(child)
-                frontier.append(child)
-    return found
+    return _walk_descendants(_proc_children_map(), [root_pid])
 
 
 def _pid_running(pid: int) -> bool:
@@ -196,6 +240,88 @@ def _pid_running(pid: int) -> bool:
     except PermissionError:  # pragma: no cover - exists, owned elsewhere
         return True
     return True
+
+
+def _proc_state(pid: int) -> str | None:
+    """The single-character state field from `/proc/<pid>/stat` (`R`, `S`, `T` for
+    stopped, `Z` for zombie, ...), or `None` if there is no such pid to read.
+
+    Linux only, like everything else in this file that reads `/proc`.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    fields = stat.rpartition(")")[2].split()
+    return fields[0] if fields else None
+
+
+def _freeze(pids: set[int], timeout: float = 1.0) -> None:
+    """`SIGSTOP` every pid in `pids` and block until each one is confirmed actually
+    stopped (or gone) — not merely signalled.
+
+    This is the piece that closes SEC-38 rather than just narrowing it. Killing a
+    tracked pid the instant it is *discovered* races the pid's own next `fork()`: the
+    kernel does not serialize "this process receives a fatal signal" against "this
+    process is partway through creating a child", so a `SIGKILL` sent the moment a
+    descendant is found can still let it complete one more fork before it dies, and that
+    child's only link to anything tracked dies with it — the same invisibility as SEC-33
+    and the earlier half of SEC-38, recreated one level down, no matter how tightly the
+    discovery walk polls.
+
+    `SIGSTOP` does not have that problem. A stopped process is paused, not gone: its
+    process-table entry, and every child it has already forked, stay exactly as they
+    were until something `SIGCONT`s it (nothing here does) or kills it outright. Once a
+    pid's state is confirmed `T` (or the pid has already gone away on its own — also
+    fine, there is nothing left to freeze), it provably cannot fork anything further, so
+    a discovery walk run *after* every candidate is confirmed frozen cannot miss a child
+    that was created before the freeze — there is no "before" left to race against.
+
+    Best-effort per pid within `timeout`: a pid this process cannot signal (owned by
+    someone else), or that exits on its own before the stop lands, is not retried —
+    either way it is no longer a source of new children, which is the only property this
+    function exists to guarantee before the caller moves on to killing.
+    """
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except (ProcessLookupError, PermissionError):
+            continue
+
+    deadline = time.monotonic() + timeout
+    remaining = set(pids)
+    while remaining and time.monotonic() < deadline:
+        remaining = {
+            pid for pid in remaining if _proc_state(pid) not in (None, "T", "Z")
+        }
+        if remaining:
+            time.sleep(0.001)
+
+
+def _max_file_size(root: Path) -> int:
+    """The largest regular file anywhere under `root`, or 0 if there is none.
+
+    SEC-35's on-disk-evidence fallback (see `_classify`): when a target's `SIGXFSZ`
+    disposition means the signal branch above can't be trusted, the size of whatever it
+    was writing is independent, measured evidence the per-file cap was reached — not
+    something a target's own reporting (or lack of it) can hide. Errors reading any one
+    entry are swallowed rather than raised: a build directory can contain sockets, pipes,
+    permission-denied files, or entries that vanish mid-walk, none of which should turn a
+    classification helper into the reason a run's cleanup fails.
+    """
+    largest = 0
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _exc: None):
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                if path.is_symlink():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > largest:
+                largest = size
+    return largest
 
 
 @dataclass
@@ -419,6 +545,7 @@ class Jail:
             peak_mb=peak_mb,
             stderr=stderr,
             out_trunc=out_trunc or err_trunc,
+            workdir=workdir,
         )
 
         result = JailResult(
@@ -675,21 +802,83 @@ class Jail:
         optional: a fresh `/proc` walk *after* the direct child is dead finds nothing,
         because a detached descendant has by then reparented away from `root_pid`.
 
-        Two sources are combined on every pass, not just `known`: a currently-linked walk
-        also runs, to catch anything that forked *after* the snapshot was taken (during
-        the grace period, for instance) and is still attached to `root_pid` at that
-        moment. Between the two, a straggler has to actively evade both a point-in-time
-        snapshot and continuous re-observation to survive — which is a materially
-        different claim than "was in the process group when we checked".
+        SEC-38: `root_pid` is not a usable walk anchor here, and re-walking from it on
+        every pass — which is what this loop used to do — does not help. By the time
+        this method is even called, `_kill_group` has already signalled and (almost
+        always) reaped `root_pid`: `proc.wait()` succeeds within the ordinary
+        SIGTERM/SIGKILL sequence well before this runs. A `/proc` walk rooted at a pid
+        nothing still claims as its parent finds nothing, for the rest of this method's
+        lifetime — `known`, taken *before* that happened, was doing all of the real work,
+        and only for pids it happened to capture directly by pid. Anything a *tracked*
+        descendant forks after that snapshot — the exact shape of a target that detaches
+        repeatedly rather than once — had no path back to `root_pid` and was invisible to
+        the old re-walk for the sweep's entire remaining duration, not occasionally: every
+        time, for every fork after the moment `root_pid` died, which in practice is
+        already true beforehand almost every mission.
+
+        Walking from `root_pid` *and* from every pid already being tracked, every pass —
+        using a map of the whole process tree built once per pass (`_proc_children_map` /
+        `_walk_descendants`) — closes most of that: a tracked pid that is still alive has
+        a live, correct link to whatever it forks next, right up until the instant it
+        exits, so re-deriving the walk's roots from the tracking set itself, not from a
+        single pid that is normally already gone, lets a chain of detachments get
+        followed instead of losing the thread the moment the first link in it dies.
+        Nothing is ever dropped from `pending` once seen (in contrast to the old loop,
+        which discarded anything not currently alive at the end of each pass): a pid that
+        looks dead this instant may have forked one more child in its last moments, and
+        that child's only route to discovery is a walk that still treats its parent as a
+        root next pass too.
+
+        That alone is not sufficient, and testing it caught why: it just relocates the
+        race rather than closing it. Killing a tracked pid the moment it is *discovered*
+        races that pid's own `fork()` — the kernel does not serialize "deliver this fatal
+        signal" against "finish creating this child", so a `SIGKILL` sent the instant a
+        descendant is found can still let it complete one more fork before it dies, and
+        that child is lost exactly as before, just one level further down the chain. A
+        tighter poll interval shrinks this window without ever closing it, because it is
+        not really a polling-frequency problem — it is two independent things (the target
+        forking, and us killing) that a purely periodic re-walk has no way to order.
+
+        So this does not kill on discovery. Every pid found alive gets `SIGSTOP`ped and
+        *confirmed* stopped (`_freeze`) before anything is killed — not signalled, landed:
+        a stopped process cannot fork, so its process-table entry and every child it had
+        already produced when the stop landed stay exactly as they are, forever, with
+        nothing here ever sending it `SIGCONT`. Freezing one pid can itself surface a
+        child it forked moments before the stop took effect, so the loop below treats
+        "found something new" and "everything found so far is frozen" as the actual
+        exit condition, not a fixed number of passes: every discovery pass first freezes
+        whatever it just found and goes around again, and only once a pass finds nothing
+        beyond what is already frozen is it safe to kill the batch — at that point there
+        is no live, un-frozen pid left anywhere in the tracked tree that could still
+        produce something new to lose. That is what actually removes the race rather than
+        narrowing it: once every candidate is confirmed frozen, there is no "still
+        running" left for a new fork to happen from.
+
+        `test_sweep_catches_rapid_repeated_detachment` exercises many rapid, chained
+        fork-and-detach cycles at the module's real default `kill_grace_seconds` and
+        requires zero survivors across repeated runs, not merely fewer than before.
         """
         if sys.platform != "linux":
             return
 
         pending = set(known)
+        frozen: set[int] = set()
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            pending |= _proc_descendants(root_pid)
+            children = _proc_children_map()
+            pending |= _walk_descendants(children, [root_pid, *pending])
             pending.discard(root_pid)
+
+            # Anything alive and not yet confirmed frozen might still fork something we
+            # have not seen. Freeze it and go around again before considering killing
+            # anything — see the docstring above for why a single freeze-then-rewalk
+            # pass is not enough on its own and this has to run to a fixed point.
+            to_freeze = {pid for pid in pending if pid not in frozen and _pid_running(pid)}
+            if to_freeze:
+                _freeze(to_freeze)
+                frozen |= to_freeze
+                continue
+
             alive = {pid for pid in pending if _pid_running(pid)}
             if not alive:
                 return
@@ -698,12 +887,12 @@ class Jail:
                     os.kill(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     continue
-            pending = alive
-            time.sleep(0.1)
+            time.sleep(0.01)
 
         # One last check so a caller inspecting the outcome (a test, an evidence record)
         # sees the true state rather than an assumption that the loop above succeeded.
-        pending |= _proc_descendants(root_pid)
+        children = _proc_children_map()
+        pending |= _walk_descendants(children, [root_pid, *pending])
         remaining = {pid for pid in pending if pid != root_pid and _pid_running(pid)}
         if remaining:  # pragma: no cover - only reachable if SIGKILL itself is refused
             raise JailUnavailableError(
@@ -735,6 +924,7 @@ class Jail:
         peak_mb: float,
         stderr: str,
         out_trunc: bool,
+        workdir: Path,
     ) -> LimitKind:
         """Say which limit stopped the command, or `NONE`.
 
@@ -747,10 +937,11 @@ class Jail:
         if signal_number == signal.SIGXCPU:
             return LimitKind.CPU
         if signal_number == signal.SIGXFSZ:
-            # SEC-35: RLIMIT_FSIZE's soft and hard limits are set to the same value
-            # (unlike RLIMIT_CPU's staged soft-then-hard), so exceeding it always raises
-            # this signal directly rather than going through an intermediate warning
-            # stage. Nothing else in this process sends SIGXFSZ, so it is unambiguous.
+            # RLIMIT_FSIZE's soft and hard limits are set to the same value (unlike
+            # RLIMIT_CPU's staged soft-then-hard), so exceeding it always raises this
+            # signal directly rather than going through an intermediate warning stage.
+            # Nothing else in this process sends SIGXFSZ, so it is unambiguous — when it
+            # arrives at all. See the SEC-35 fallback below for when it does not.
             return LimitKind.FILE_SIZE
         if signal_number == signal.SIGKILL:
             # RLIMIT_CPU's hard limit lands one second after the soft one and arrives as
@@ -775,6 +966,35 @@ class Jail:
             return LimitKind.MEMORY
         if out_trunc:
             return LimitKind.OUTPUT
+
+        # SEC-35 (re-opened by #159): the SIGXFSZ branch above only fires if the target
+        # actually dies to that signal, and nothing requires that. CPython ignores
+        # SIGXFSZ by default (`signal.getsignal(SIGXFSZ) is SIG_IGN` at interpreter
+        # start) — a Python target that crosses RLIMIT_FSIZE gets an ordinary `OSError`
+        # (`errno.EFBIG`) at the failing `write()` instead of being killed, and is free
+        # to do anything with it, including nothing visible at all. This is the same
+        # ambiguity the MEMORY branch above already has to live with — a limit that
+        # stopped the command without the tidy, unambiguous signal this function would
+        # rather have — and it gets the same answer: don't wait for a signal that might
+        # never come, look for direct evidence the limit was actually hit. Two
+        # independent sources, either is enough, checked only once something already
+        # looks wrong (`exit_code != 0`) so an ordinary successful build never pays for
+        # either:
+        #   - the target's own words: CPython's default top-level handler for an
+        #     uncaught EFBIG prints exactly this text to stderr on its way out, and a
+        #     target that catches and reports the error itself is likely to mention the
+        #     same errno;
+        #   - what is actually on disk: RLIMIT_FSIZE stops a write at exactly the limit
+        #     (soft == hard here, so there is no partial-warning stage to land short of
+        #     it), so a file sized at the policy's cap is direct, measured evidence the
+        #     cap was hit — independent of whether the target said anything about it.
+        if exit_code != 0:
+            file_size_reported = any(
+                marker in stderr for marker in ("File too large", "Errno 27", "EFBIG")
+            )
+            if file_size_reported or _max_file_size(workdir) >= self._policy.max_file_bytes:
+                return LimitKind.FILE_SIZE
+
         if exit_code != 0 and peak_mb >= limit_mb * 0.95:
             return LimitKind.MEMORY
         return LimitKind.NONE

@@ -43,7 +43,9 @@ pytest packages/sandbox/tests -q
 | A wall-clock timeout fires and is reported, not hung | `test_wall_clock_timeout_is_reported_not_hung` |
 | The timeout kills grandchildren — no orphans | `test_timeout_kills_grandchildren_leaving_no_orphans` |
 | The timeout kills a grandchild that detached via `setsid()` (SEC-33, Linux) | `test_timeout_kills_a_grandchild_that_detaches_via_setsid` |
+| The sweep catches every descendant of rapid, repeated fork-and-detach, not just the ones present at the pre-kill snapshot (SEC-38, Linux) | `test_sweep_catches_rapid_repeated_detachment` |
 | A file-size limit is reported as `FILE_SIZE`, not `NONE` (SEC-35) | `test_file_size_limit_is_reported_as_file_size_not_none` |
+| `FILE_SIZE` is still reported for a target whose `SIGXFSZ` disposition is `SIG_IGN`, e.g. CPython (SEC-35, residual gap) | `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz` |
 | Output is capped rather than buffered without limit | `test_output_is_capped` |
 | Cleanup runs on success, on failure, and on cancel | `test_cleanup_on_success`, `test_cleanup_on_failure`, `test_cleanup_on_cancel` |
 | Cancel from another thread stops a running command | `test_cancel_stops_a_running_command_from_another_thread` |
@@ -104,8 +106,8 @@ fixed by the kernel at fork time and survives detachment intact. So `_kill_group
 2. Runs the ordinary `killpg()`-based SIGTERM-then-SIGKILL sequence, which still handles
    everything still in the process group — the common case, and cheaper than a full
    `/proc` walk for it.
-3. Sweeps the pre-kill snapshot (plus a fresh walk, to catch anything forked during the
-   grace period) and `SIGKILL`s each surviving pid directly, by pid, independent of
+3. Sweeps the pre-kill snapshot — expanded and re-frozen to a fixed point every pass, see
+   SEC-38 below — and `SIGKILL`s each surviving pid directly, by pid, independent of
    whatever group or session it has put itself in.
 
 This sweep is **Linux-only** (`/proc/*/stat`). That is the platform it is tested on and
@@ -119,6 +121,38 @@ not just the group — the exact link this fix depends on — and is a harder pr
 package does not claim to solve. It would need something closer to `PR_SET_CHILD_SUBREAPER`
 on the orchestrator process itself, or a pid namespace, which starts to look like the
 container boundary #15 exists for rather than a subprocess jail's job.
+
+### The sweep catches rapid, repeated detachment, not just one (SEC-38)
+
+The step-3 sweep above, as first shipped, combined the pre-kill snapshot with a *fresh*
+`/proc` walk on every poll pass, rooted at the jailed process's own pid — meant to catch
+anything a descendant forked after the snapshot was taken. It didn't work: by the time the
+sweep runs, `_kill_group` has already signalled and (almost always) reaped that pid, so a
+walk rooted at it finds nothing, for the sweep's entire remaining duration. Only pids the
+snapshot happened to capture directly, by pid, ever got cleaned up — anything a *tracked*
+descendant forked afterward, the exact shape of a target that detaches repeatedly instead
+of once, had no path back to the dead root and was invisible every time, not occasionally.
+`cybersecurity`'s review reproduced this directly, at the module's real default
+`kill_grace_seconds=5.0`, under rapid repeated fork-and-detach.
+
+Re-walking from every tracked pid each pass, not just the (normally dead) root, fixes most
+of that — a tracked pid that's still alive has a correct, live link to whatever it forks
+next. It is not sufficient on its own, though: killing a pid the instant it's discovered
+races that pid's own next `fork()`, since the kernel does not order "deliver this fatal
+signal" against "finish creating this child" — a `SIGKILL` sent on discovery can still let
+one more fork complete, and that child is lost exactly as before, just one level further
+down. A tighter poll interval only shrinks that window; it can't close it, because it
+isn't a polling-frequency problem.
+
+Closing it needs an extra step before anything is killed: every pid found alive is
+`SIGSTOP`ped and *confirmed* stopped, not merely signalled (`_freeze`). A stopped process
+cannot fork — its children up to that instant are fixed, permanently, since nothing here
+ever sends `SIGCONT`. The discover-and-freeze cycle runs to a fixed point (a pass finds
+nothing new, with everything currently tracked already frozen) before any `SIGKILL` is
+sent, so nothing pending can still be mid-`fork()` at the moment it's finally killed.
+`test_sweep_catches_rapid_repeated_detachment` chains many rapid fork-and-detach cycles at
+the real default grace period and requires zero survivors across repeated runs — the
+review's own bar: a single-detachment test does not demonstrate this.
 
 **A residual, deliberately accepted gap in verification, not in the kill itself:** a
 `SIGKILL`ed descendant that has already reparented away from this jail becomes a zombie
