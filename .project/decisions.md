@@ -3906,3 +3906,130 @@ new to this change and not this task's to fix unilaterally).
 the three implementation decisions themselves (map wiring, keep-both-teardown-paths, and the
 `on_commit` exception-safety fix in Decision 3) are within backend-developer's scope per this
 task's brief and D-061 §4's original delegation to T7/T0.
+
+## D-070 — control-api/worker container boot regression (#168 T1, PR #174): `additional_contexts` for `workers/`, `packages/`, `adapters/`, mirroring D-032's `demo-repositories` pattern · 2026-08-17 · `devops-engineer` seat
+
+**Trigger** — a backend-developer flagged, while merging `main` into an unrelated branch, that
+PR #174 (#168 T1, already on `main`) changed `missions/apps.py`'s `ready()` to unconditionally
+`from workers.baseline import dispatch`, which imports `packages.sandbox`. `ready()` runs on
+every Django process start (`manage.py`, ASGI/WSGI, `pytest-django`), and
+`control-api.Dockerfile`'s build context is `apps/control-api/` only —`workers/`, `packages/`,
+`adapters/` are repo-root siblings of `apps/`, never copied or mounted into either image in
+either compose profile. Verified real, not theoretical, by actually building and booting the
+container against current `main` before touching anything:
+`docker build -f infrastructure/compose/images/control-api.Dockerfile --target runtime
+--build-context demo-repositories=./demo/repositories -t verify:runtime ./apps/control-api`
+built clean (the build itself cannot fail on a missing Python import), but
+`docker run ... verify:runtime python manage.py check` raised:
+
+```
+File "/app/missions/apps.py", line 26, in ready
+    from workers.baseline import dispatch  # noqa: F401
+ModuleNotFoundError: No module named 'workers'
+```
+
+— identically for both the `dev` and `runtime` Dockerfile targets. This is a **container-only**
+regression: PR #174's own commit message and this repo's D-066 both claim a "cross-package
+import fix" already covers this (`config/settings/base.py` appends `REPO_ROOT =
+BASE_DIR.parent.parent` to `sys.path`). That fix is real and correct for the case it was
+written for — a bare-metal checkout or CI runner, where `apps/control-api` sits two directories
+below an on-disk repo root that actually contains `workers/`/`packages`/`adapters/` — but
+inside either container image, `BASE_DIR` (`/app`) *is* the flattened build context (this
+Dockerfile's own build context is `apps/control-api/` only, per its header), so
+`BASE_DIR.parent.parent` resolves to the container filesystem root and the `sys.path.append`
+silently matches nothing. Neither CI (runs `pytest` against a full bare-metal checkout, never
+builds this image) nor `docker compose config` (validates YAML shape, never runs `docker
+build`) could have caught this — confirmed by reading `.github/workflows/ci.yml` directly,
+not assumed.
+
+**Decision** — Apply the exact pattern PR #167/D-032 already established for
+`demo/repositories` (a repo-root sibling of `apps/`, reached without widening
+`control-api.Dockerfile`'s own build context): three more named Docker Compose
+`additional_contexts` entries — `workers-source`, `packages-source`, `adapters-source` — added
+to both `control-api` and `worker` services' `build:` blocks in `docker-compose.finale.yml`
+(runtime target), `COPY --from=<name> --chown=app:app . /app/<name>` added to
+`control-api.Dockerfile`'s `runtime` target, and equivalent plain bind mounts
+(`../../workers:/app/workers`, `../../packages:/app/packages`, `../../adapters:/app/adapters`)
+added to both services in `docker-compose.yml` (dev target copies nothing in at build time —
+source arrives entirely by bind mount, same as `demo/repositories`'s existing dev-vs-finale
+split). Landing at `/app/<name>` — plain subdirectories of `BASE_DIR`, already at
+`sys.path[0]` — makes `import workers`/`packages`/`adapters` resolve with zero further
+settings change; `REPO_ROOT`'s `sys.path.append` in `config/settings/base.py` is left alone as
+dead-but-harmless code for the bare-metal/CI case it was actually written for, since fixing it
+symmetrically (relative to a container's own root) is a bigger, riskier change to a file owned
+by backend-developer, and this fix only needed to close the container-boot gap, not rewrite
+someone else's already-tested settings logic.
+
+**Options considered** — (a) the `additional_contexts`/bind-mount fix above; (b) widen
+`control-api.Dockerfile`'s primary build context to the repo root, so a single `COPY . /app`
+picks up everything; (c) physically move `workers/`/`packages/`/`adapters/` under
+`apps/control-api/`, matching D-026's stated eventual end state (already flagged as a
+legitimate follow-up in D-066 itself); (d) patch `config/settings/base.py`'s `REPO_ROOT`
+computation to be container-aware (e.g. an env-var override).
+
+**Pros and cons** — (b) is the smallest textual diff but breaks the Dockerfile's own explicit,
+repeatedly-stated contract ("Build context is `apps/control-api/`... owned by the backend
+developer... so that no infrastructure change ever touches a file inside the application
+directory") and D-032's identical reasoning for `demo/repositories` — widening the primary
+context also pulls in `.git/`, `docs/`, `services/`, `tests/`, everything else at repo root,
+unless a much larger `.dockerignore` is grown to compensate, which is strictly more invasive
+than three named contexts. (c) is a real repo-layout migration (import paths, D-026's own
+import-direction test, six workers' packages, CI paths) — correctly out of scope for an urgent
+regression fix, and already flagged as a candidate follow-up in D-066. (d) is tempting since it
+would fix `tools/export_openapi.py`'s identical `REPO_ROOT` pattern too, but that script is
+never invoked inside either container (checked directly: no CI step or Dockerfile RUN/CMD
+references `export_openapi`) so fixing it here would be solving a problem this task doesn't
+have, and would touch `config/settings/base.py`, a file this task's owning role does not own —
+per this role's own standing instruction not to "fix" another role's code to make it deploy,
+better flagged than silently patched. (a) is the only option that fixes the actual container
+regression with no ownership boundary crossed and a precedent already reviewed and merged in
+this exact codebase (PR #167).
+
+**Cost implications** — none. No new dependency, no new service, no image-size concern worth
+noting (`du -sh packages workers adapters` = 936K/148K/168K combined, checked directly).
+
+**Security implications** — none beyond what `demo/repositories`'s identical mechanism already
+carries: these are three more repo-root source directories reachable from a
+build-time-only named context (`runtime`/finale) or a bind mount already scoped to the
+already-`internal: true` `api`/`backend` networks (dev) — no new egress, no new secret, no
+change to `read_only`/`cap_drop` posture on either service. Not marked `:ro` in the dev bind
+mounts (unlike `demo/repositories`), a deliberate difference: these are live source
+directories other roles actively edit locally, mirroring `apps/control-api`'s own writable
+`/app` mount, not read-only fixture data — `packages`/`workers`/`adapters` never held
+attacker-controlled bytes in the first place, so there is no new blast-radius question either
+way.
+
+**Scalability implications** — none; this only changes what is importable inside an
+already-running process, not any runtime resource ceiling.
+
+**Verification, stated plainly** — VERIFIED, not asserted: (1) `docker build --target runtime`
+with the three new `--build-context` flags built clean and the resulting image's `manage.py
+check` (finale settings, all required env vars supplied) reported `System check identified no
+issues (0 silenced)`; (2) the `dev` target, run with the exact bind-mount layout added to
+`docker-compose.yml`, likewise reported zero issues; (3) `docker compose -f docker-compose.yml
+--env-file ../../.env up -d db redis control-api` — the real compose command, not a simulation
+— brought `control-api` up clean (`docker ps` showed `Up`, no restart loop; logs showed a
+normal uvicorn startup, no traceback), and `docker exec brahmadatta-control-api python
+manage.py check` inside that live container reported zero issues; (4) both
+`orchestrator.executors.EXECUTOR_REGISTRY` entries (`workers.baseline.dispatch`,
+`orchestrator.teardown_executor`, the exact two modules `ready()` imports) register correctly
+inside the running container, checked directly via `docker exec ... python -c "..."`, not
+inferred; (5) `docker compose -f docker-compose.yml config --quiet` and
+`docker compose -f docker-compose.finale.yml config --quiet` both validate clean with the same
+env vars CI supplies; (6) the full host-side test suite — the same way CI itself runs it, since
+containers have no network egress by design (C4) and cannot `pip install` — passes: `apps/
+control-api`'s own suite (519 tests, matching CI's `Control API tests` step), root
+`tests/` (74 tests, matching CI's `Architecture tests` step, including the compose-topology
+tests that assert the finale profile has no source mounts into control-api — still true, this
+fix does not touch that), and `packages/sandbox`/`packages/test-fixtures` (79 passed, 4 skipped
+— all four skips pre-existing and platform/dependency-scoped, unrelated to this change:
+Darwin's `RLIMIT_AS`/`/proc` sandbox-test gaps and a missing dev-only `jsonschema` install).
+
+**Recommendation / ruling** — (a), implemented as described, pushed to
+`fix/168-docker-build-context`.
+
+**Final approval authority** — CTO (technical); this is an infrastructure fix restoring a
+contract (dev/finale parity, `apps/control-api`'s stated build-context boundary) DevOps already
+owns per its charter, not a new architectural call — flagged here at the same level of
+formality as D-032/D-066 since it blocks/unblocks already-landed T0/T0b/T1 work and the
+upcoming T5/T7 stages.
