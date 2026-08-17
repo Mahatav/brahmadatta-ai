@@ -4124,3 +4124,267 @@ acceptance recorded here — no such acceptance was sought or given.
 charter); CTO may arbitrate a dispute over the severity call above but cannot waive
 SEC-48 unilaterally; only a written CEO risk acceptance recorded in this file can
 override the block.
+
+
+---
+
+## D-073 — Topology for FUZZ execution: no socket, no bare TLS-remote daemon either; a
+kind-scoped `fuzz-worker` claims `FUZZ`/`MINIMIZE` off the host, everything else stays
+containerized and egress-denied · 2026-08-17 · CTO
+
+**Numbering/labelling note, read first.** The devops-engineer's D-072 §3 (open PR #192,
+`feat/189-fuzzing-image`, not yet on `main`) and `packages/sandbox/container.py`'s own module
+docstring both cite "**D-024**" as the ruling that forbids mounting the Docker socket. That is
+a stale label surviving a renumbering collision this log's own notes already warn about (see
+the numbering note appended to D-023/D-024 above). On `main` today, D-024 is
+"Job queue is Postgres `SELECT … FOR UPDATE SKIP LOCKED`; no broker" — unrelated. **The actual
+ruling forbidding a socket mount is D-036, "The container runtime socket is never mounted, and
+a test says so"** (`FORBIDDEN_SOCKET_PATHS`, `tests/architecture/test_container_isolation.py`),
+plus D-035's separate "worker container has no route off the host" invariant
+(architecture-spec §4.1 L1). Both stand. This decision does not touch `container.py`'s
+docstring or D-072's own text — those are other roles' or a prior session's work — but the
+record here uses the correct numbers, and whoever next edits `container.py` should fix the
+`D-024` references to `D-036` while there.
+
+**Trigger** — D-072 §3 (devops-engineer, real verification: a genuine 2308-execution libFuzzer
+campaign against `demo/repositories/pktcfg` found the seeded heap-buffer-overflow via
+`ContainerJail`, run directly against the host's own Docker daemon, not through the compose
+`worker` service). The finding: `ContainerJail.run` (`packages/sandbox/container.py::_run_cli`)
+shells out to a `docker` binary via `subprocess.run`, which needs the binary on `PATH` and a
+daemon reachable through whatever `DOCKER_HOST`/socket the process's environment resolves to.
+The compose `worker` service is built from `control-api.Dockerfile` (Python/uvicorn, no
+`docker` CLI, no socket mounted, by design), so the *containerized* `worker` cannot invoke
+`ContainerJail` at all today — proven, not assumed, by D-072's own successful run happening
+outside that container.
+
+### 1. What I read before deciding
+
+- `docs/09-company/06-architecture-spec.md` §1.1/§3/§4.1: `orchestrator` and `worker` are
+  separate processes (D-024's own ruling); `worker` claims jobs generically off one `Job`
+  table with `SKIP LOCKED` (`orchestrator/queue.py::claim_job`, checked directly — it filters
+  on `state`/`run_after` only, **no `kind` filter exists today**); and Invariant A's L1
+  ("the worker container has no route to the internet") is the mechanism that keeps the one
+  process holding both repository content and the model-gateway HTTP client
+  (`gateway/client.py`) from ever reaching a hosted inference API. The spec does not say
+  *how* `worker` is meant to reach a container runtime for `FUZZ` specifically — this gap
+  predates D-072; D-072 is the first task that actually exercised the path far enough to hit
+  it.
+- `packages/sandbox/container.py`: confirmed — CLI subprocess (`_run_cli`), no Docker SDK
+  import anywhere in the file, no explicit `env=` override on the `subprocess.run` calls, so
+  `DOCKER_HOST`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` in the calling process's environment
+  would be honored by the `docker` CLI **with no code change to this module** — a remote
+  context is mechanically available if `docker` is installed and reachable. This matters for
+  option (b) below: it is not blocked by the code, only by D-035/D-036's network posture.
+- `infrastructure/compose/docker-compose.yml` / `docker-compose.finale.yml`: `worker`'s
+  network is `backend` only (`internal: true`, no gateway — same family as L1), and its
+  `command` still defaults to `${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}`
+  — `django-rq` is not a dependency (confirmed absent from `requirements.txt`); this is dead
+  scaffolding already flagged in D-061/D-062 (`.project/decisions.md` line ~2862) and not yet
+  fixed on `main`. **No `orchestrator` service exists in either compose profile at all** — also
+  already flagged in D-061/D-062, also not yet fixed. So the containerized deploy path for
+  the real `run_orchestrator`/`run_worker` pair (built by T0/T0-series, `apps/control-api/
+  missions/management/commands/run_worker.py`) has never been fully wired end to end;
+  D-072's FUZZ-execution gap is one more item in that same unfinished list, not an isolated
+  regression.
+- Grepped this repo for "docker socket", "DinD", "docker-outside-of-docker", "remote docker",
+  "DOCKER_HOST", "TLS" near "docker": nothing beyond D-035/D-036/D-072 §3 itself. This problem
+  was not pre-anticipated with a named design; D-072 §3 is the first place it is written down.
+
+### 2. The core judgment call: option (b) (remote `DOCKER_HOST` over TLS) is not actually
+   safer than the socket mount D-036 forbids, and should not be adopted as the general answer
+
+A client certificate authenticates *who* may connect to the Docker Engine API; it does not
+scope *what* they may do once connected. The full Engine API — start a container with
+`--privileged`, bind-mount `/` from the daemon's host, join the host PID/network namespace —
+is reachable to anyone holding a valid client cert, exactly as D-036's own stated reasoning
+about the socket describes ("a container with that socket can start a sibling with
+`--privileged -v /:/host` and read or write anything"). Moving the same unrestricted API
+across a TCP+TLS boundary changes *transport*, not *capability*. A compromised `worker`
+process with `DOCKER_HOST=tcp://sandbox-executor:2376` and a valid client cert is exactly as
+dangerous as a compromised `worker` with the socket bind-mounted — worse, in one respect: it
+also requires opening `worker`'s network egress beyond L1's current "no route anywhere,"
+undoing part of Invariant A's own enforcement for the same process that holds the model-gateway
+client. **Option (b), as commonly implemented, is rejected as the general-purpose answer.** It
+is not "cheaper D-036-lite"; it is D-036's exact threat model with a TLS handshake in front of
+it, and it is scoped nowhere near narrowly enough to be worth that.
+
+This is the finding that should have been in D-072 §3 as the reason (b) needs its own scrutiny,
+not merely listed neutrally alongside (a) and (c) — flagged for the record now.
+
+### 3. Recommended topology: split the worker fleet by `JobKind`, not by transport
+
+**Decision** — `worker` stays exactly as architecture-spec §1.1/§4.1 describes: containerized,
+`internal: true`, no egress, claiming every `JobKind` **except** `FUZZ`/`MINIMIZE`. A second,
+purpose-built worker instance — `fuzz-worker` — claims only `FUZZ`/`MINIMIZE` jobs and is the
+**only** process anywhere in this system ever given the ability to invoke a container runtime.
+For the finale demo (§4 below) `fuzz-worker` runs directly on the host, outside any container
+boundary at all — so D-036's "no container mounts the socket" rule is not merely obeyed, it is
+inapplicable, because there is no container to mount anything into. For the post-competition
+product, `fuzz-worker` is the seed of the "sandbox-executor" pattern named in the brief: a
+single, narrow-purpose, network-egress-nothing process whose only job is "claim a `FUZZ`/
+`MINIMIZE` job, run `ContainerJail`, report the result" — never given a model-gateway client,
+never given repository-writing access beyond its own job's snapshot, so a compromise of it
+cannot reach the inference API (it never has credentials or a code path to try) and a
+compromise of the *general* `worker` cannot reach a container runtime (same reason, in
+reverse).
+
+**Options considered** — (a) a separate sandbox-executor host/service, `worker` talks to it
+over a small internal API/queue, the executor is the only thing that ever touches the Docker
+daemon — brief's own framing, adopted, but *scoped by `JobKind`-filtered claiming off the
+existing `Job` table* rather than a new bespoke RPC surface, because the queue **already is**
+that internal API: `Job` rows, `SKIP LOCKED`, a `lease_owner` — there is no need to invent a
+second transport when the first one already generalizes to "more than one worker fleet claiming
+different slices of the same table," which is exactly what a `kind`-filtered `claim_job` gives
+for free. (b) remote `DOCKER_HOST` over mutual TLS — rejected in §2, not because TLS is weak,
+but because the thing being protected by TLS (the raw Engine API) is too broad to protect this
+way; adopting it would mean re-litigating D-036's own argument and losing. (c) relax D-036 and
+mount the socket directly into the existing `worker` container — rejected outright, same as
+D-072 §3 already concluded; not on the table without a CEO risk acceptance overriding a
+documented Critical-adjacent binding decision, which nothing in this task justifies. (d) (mine,
+not in the brief's three) split the worker fleet by `JobKind` rather than building a new
+service — chosen, for the reasons in §4 below: it reuses `Job`/`claim_job` verbatim, needs one
+small, additive filter, and does not touch `ContainerJail`, the compose network topology, or
+any of D-035/D-036's already-tested assertions.
+
+**Why (d)/kind-split over a literally-separate "sandbox-executor service" with its own API**:
+the brief's (a) is architecturally right but is scoped as a new service with its own contract,
+auth, and failure modes — real work, and more of it than this timeline affords cleanly (§4).
+The queue already has everything a broker needs: a durable job table, lease/heartbeat fencing
+proven correct under concurrent claimers (`orchestrator/tests/test_queue_claim_locking.py`),
+and a `JobKind` dispatch table (`orchestrator/executors.py`) that already refuses to run a job
+kind that never registered. Filtering `claim_job` by `kind` turns "which process may touch a
+container runtime" into a property of *which jobs a given worker process claims*, enforced by
+the same row-locking mechanism that already enforces "which process may touch `Mission.state`"
+(D-045/SEC-16). No new network listener, no new credential, no new failure mode beyond "this
+worker fleet is down," which the existing lease-reclaim reaper (architecture-spec §3.4) already
+handles identically for every `JobKind`.
+
+**Cost implications** — one more long-running process to supervise (the `fuzz-worker`), zero
+new infrastructure (no new service, port, or credential) — a `--kinds` CLI flag and a `.filter
+(kind__in=...)` clause. Compares favorably to (a)-as-a-literal-service, which would cost a
+network listener, a schema or protocol for the RPC, and its own auth story.
+
+**Security implications** — this *increases* the precision of D-035/D-036's existing
+guarantees rather than trading one for the other: the general `worker` fleet (which holds the
+model-gateway client) never gains container-runtime access, and the one process that gains
+container-runtime access (`fuzz-worker`) never gains a model-gateway client or a route to
+`model-host` — enforced structurally (no such import exists in `workers/fuzzing/`, checked
+directly) rather than by discipline alone, matching D-026's own "the boundary that actually
+carries the risk stays a process/container boundary" argument. Residual risk, stated plainly
+in §5: for the finale demo `fuzz-worker` runs bare-metal, which forfeits L1's *network-level*
+kill switch for that one process specifically (it is not `internal: true` the way the
+containerized `worker` is) — mitigated by `fuzz-worker` never holding model-gateway code or
+credentials at all, so there is nothing for that process to exfiltrate toward even with a
+route out. Cybersecurity scrutiny required before this ships — see §6.
+
+**Scalability implications** — none beyond D-024/D-062's existing single-mission-at-a-time
+scope; a second worker fleet claiming a disjoint `kind` set is the same shape the architecture
+spec already names as "DevOps decides: worker replica count (1 or 2)" (§1.1), just split by
+capability instead of duplicated identically.
+
+**Final approval authority** — CTO (technical) for the topology; `cybersecurity` holds the
+review gate on the implementation per CLAUDE.md's standing rule for isolation-relevant changes,
+and specifically on the bare-metal-for-finale exception in §4/§5.
+
+### 4. Honest timeline read: the finale-demo shape is a same-day fix; the permanent
+   sandbox-executor service is not
+
+**Same-day, for 2026-08-20 (finale demo):** run `fuzz-worker` as a **bare-metal host process**
+— `python manage.py run_worker --kinds FUZZ,MINIMIZE` — pointed at the same Postgres the
+compose stack already runs (published on the host in dev; would need a published port or a
+host-network escape hatch in the finale profile, see task 4 below), using the operator's own
+already-verified Docker daemon exactly as D-072's own real campaign test already did. This is
+not a new execution shape — it is the **exact path D-072 §3 already proved works**, generalized
+from "a pytest process on the dev host" to "a supervised `run_worker` process on the finale
+host," with only a `--kinds` filter as new code. There is direct precedent for running a piece
+of this stack bare-metal rather than containerized: `infrastructure/scripts/build-fuzz-image.sh`
+already does, and CI's own `cpp-adapter`/`packages/sandbox` test jobs run `pytest` directly on
+the GitHub-hosted runner, not inside any of this repo's own images — "the process that touches
+Docker runs on the box that has Docker" is already this project's tested, working pattern; this
+decision extends it to `fuzz-worker` rather than inventing something new.
+
+**Not a same-day fix, correctly deferred past 2026-08-20:** the permanent, containerized
+"sandbox-executor" service — `fuzz-worker` itself running inside a narrowly-scoped container
+with either its own isolated Docker-in-Docker daemon or a registry-fronted remote daemon on a
+separate host, reachable over an authenticated channel, with a hardened API surface instead of
+raw `Job`-table claiming. That is real infrastructure work (a new image, a new network segment,
+a credential/cert lifecycle, and — because it is the one process in the whole system with
+container-runtime power — the single highest-value cybersecurity review target this project
+will have produced) and does not belong on a three-day clock next to T4 (`PATCH_GENERATE`,
+still not started per D-061/D-062) and #189's own remaining MINIMIZE crash-artifact gap.
+**Scope it down for the competition**: ship the bare-metal `fuzz-worker` exception now, flagged
+explicitly as a documented, time-boxed deviation from "everything containerized," and open a
+follow-up issue for the containerized sandbox-executor as the real post-competition fix.
+
+### 5. What cybersecurity should specifically scrutinize once this is implemented
+
+1. **`fuzz-worker`'s environment is not the general worker's environment.** It must have zero
+   model-gateway configuration (`gateway/client.py` never imported, no API key/base-URL env
+   var reachable) — the mitigating claim in §3's security-implications paragraph is only true
+   if this is checked, not assumed. Recommend the same shape as L3's `test_single_inference_
+   client.py`: an AST/import-set assertion that `workers/fuzzing/` (and whatever module
+   `fuzz-worker`'s entrypoint pulls in) never imports `gateway.client` or an HTTP client.
+2. **Bare-metal `fuzz-worker` really cannot reach `model-host`, not just "isn't configured
+   to."** If it runs on the same physical/VM host as the rest of the compose stack and that
+   host's own network allows it to reach `model-host`'s published/internal address, "no
+   credentials" is a weaker claim than "no route." Verify with an actual connect attempt
+   (same shape as `infrastructure/scripts/egress-test.sh`), not by code inspection alone.
+3. **`--kinds` filtering is enforced at the query, not just the CLI flag.** A `fuzz-worker`
+   invoked without `--kinds` (operator error, or a stale supervisor unit copied from the
+   general worker's config) must not silently claim `PATCH_GENERATE`/`EXPORT`/etc — confirm
+   the default, if `--kinds` is omitted, is either "refuse to start" or "claim nothing," never
+   "claim everything," which would quietly reopen exactly what this decision closes.
+4. **The finale host's own hardening.** A bare-metal process with real Docker daemon access is
+   the single most privileged thing running on that machine for the day of the demo — confirm
+   it is not also running as root, confirm the operator account it runs under is not also the
+   account judges or anyone else touches, and confirm `docker` on that host is the same
+   version/config this session's D-072 verification used (containerd store vs. overlay2
+   changes the digest-pinning story per D-072 §2 — worth a pre-flight check the morning of).
+5. **Whether the bare-metal exception needs its own written risk acceptance.** This decision
+   treats it as a scoped, time-boxed, CTO-approved deviation, not a change to D-035/D-036
+   themselves (those still bind the *containerized* `worker` fully). If cybersecurity judges
+   that distinction insufficient, escalate for a CEO risk acceptance per this seat's own
+   charter rather than treating my approval here as the final word — my authority covers the
+   technical topology, not overriding a `cybersecurity` veto on an isolation-relevant change.
+
+### 6. Task breakdown, sized against ~3 days
+
+1. **`claim_job`/`run_worker` kind filter** (backend-developer, ~1-2 hrs). Add an optional
+   `kinds: Iterable[JobKind] | None` parameter to `orchestrator.queue.claim_job`'s query
+   (`.filter(kind__in=kinds)` when provided) and a `--kinds FUZZ,MINIMIZE`-style CLI argument
+   to `run_worker.py`, threaded through `_claim_and_run`. Additive; does not change existing
+   callers' behavior when the parameter is omitted.
+2. **`fuzz-worker` bare-metal entrypoint + process supervision** (devops-engineer, ~half day).
+   A documented `manage.py run_worker --kinds FUZZ,MINIMIZE` invocation against the finale
+   Postgres (needs a reachable connection string from the host — check whether the finale
+   profile already publishes Postgres's port or needs one added), a systemd unit or equivalent
+   supervisor entry so it restarts like every other long-running process this project already
+   documents supervision for (architecture-spec §3.4's "dead worker visible within 60s"
+   already covers detection; this is only "start it and keep it started").
+3. **Confirm `SANDBOX_FUZZ_IMAGE` and Docker reachability from the finale host directly**
+   (devops-engineer, ~1 hr, mostly re-verification). D-072 already proved the image and
+   `ContainerJail` work on the dev host; re-run the same real-campaign check
+   (`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 pytest workers/fuzzing/tests/test_real_campaign.py`)
+   on the actual finale host before the demo, not just once in this session, since D-072 §2
+   already flagged that digest-pinning behavior differs by Docker storage driver.
+4. **The import-boundary test from §5.1** (backend-developer or cybersecurity, ~1-2 hrs):
+   assert `workers/fuzzing/` and `fuzz-worker`'s entrypoint module never import `gateway.client`
+   or a raw HTTP client library, mirroring `tests/security/test_single_inference_client.py`'s
+   existing AST-walk shape.
+5. **Cybersecurity review of the whole shape** (cybersecurity, ~half day) — the five items in
+   §5, run against the actual implementation, before this is treated as demo-ready. This is a
+   gate, not a parallel task; nothing in 1-4 ships to the finale host without it signing off,
+   per CLAUDE.md's standing rule for isolation-relevant changes.
+6. **Fast-follow, explicitly not on this timeline**: file an issue for the permanent
+   containerized sandbox-executor service (§4's "not a same-day fix" half) so the bare-metal
+   exception has a tracked, dated expiry rather than quietly becoming the permanent answer by
+   default.
+7. **Unblocking prerequisite, not new scope**: the compose `worker` service's stale `rqworker`
+   command and the missing `orchestrator` compose service (both already flagged in D-061/D-062,
+   both still unfixed on `main` as of this session) should land before or alongside this, since
+   they block the *general* `worker` fleet from running for real at all, independent of the
+   FUZZ-specific gap this decision addresses.
+
+**Final approval authority (whole record)** — CTO (technical) for the topology and staffing
+shape; `cybersecurity` holds the implementation gate per §5/§6.5; CEO holds any risk-acceptance
+escalation per §5.5 if cybersecurity judges the bare-metal exception needs one.
