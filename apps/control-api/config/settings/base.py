@@ -13,11 +13,46 @@ loudly at startup rather than degrading into an insecure state.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from config import env
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+# D-026 collapsed `model-gateway`/`evidence-builder`/`telemetry` into modules inside
+# this Django project, but `workers/`, `adapters/` and `packages/` (the stage code the
+# `JobKind` executors wire into — #168 T1/T2/...) were never moved in; they still live
+# one level up, as siblings of `apps/`. Nothing before this line put that directory on
+# `sys.path`, so `from workers.baseline.run import run_baseline_stage` (or any sibling
+# import) raised `ModuleNotFoundError` from every Django entrypoint (`manage.py`,
+# `wsgi`/`asgi`, and — critically — `pytest-django`, which imports this settings module
+# directly rather than going through `manage.py`).
+#
+# There IS a real name collision: `apps/control-api/tools/` (import contract:
+# `tools.export_openapi`, used by `contracts/tests/test_openapi_dump.py`) and
+# repo-root `tools/` (`fallback_demo.py`, `verdict_report.py`) are two different
+# packages sharing the bare name `tools`. Whichever one Python resolves first for
+# `import tools` wins that name for the rest of the process — the two can never both
+# be `tools` at once. `BASE_DIR` is therefore inserted at `sys.path[0]` *before*
+# `REPO_ROOT` is appended, deterministically, rather than relying on whatever already
+# put `BASE_DIR` on `sys.path` by the time this module runs (`manage.py`/`wsgi`/`asgi`
+# do, in their own `main()`/module scope — but nothing does under `pytest-django`,
+# which imports this settings module directly and never calls `manage.py`). Getting
+# this backwards is silent and order-dependent: it manifested as `contracts/tests/
+# test_openapi_dump.py` raising `ModuleNotFoundError: No module named
+# 'tools.export_openapi'` the first time this file appended without first inserting —
+# found by running the full suite, not by inspection. `apps/control-api`'s own
+# top-level packages (`api`, `authorization`, `config`, `contracts`, `missions`,
+# `orchestrator`, and now `tools`) have no other collision against repo root's
+# (`adapters`, `demo`, `docs`, `infrastructure`, `packages`, `services`, `tests`,
+# `workers` — checked directly), but the insert-before-append order is what makes
+# that true even if one is added later, not the absence of a name today.
+REPO_ROOT = BASE_DIR.parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 
 env.load_env_file(BASE_DIR)
 
