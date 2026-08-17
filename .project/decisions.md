@@ -6387,3 +6387,301 @@ requested from `cybersecurity` before merge.
 standing rule as D-081: only a written CEO risk acceptance recorded in this file
 overrides the block, short of that a fix + re-review is what lifts it); CTO for any
 dispute over the redaction-placement shape chosen.
+
+---
+
+## D-083 — T2 (`JobKind.FUZZ`/`MINIMIZE` executors, `orchestrator.findings.record_finding`): the sanitizer-memory question answered "no", the `MINIMIZE` artifact-durability gap, and five smaller calls · 2026-08-17 · `backend-developer` seat
+
+Implements the T2 slice of D-061/D-062 against `orchestrator/executors.py`'s interface
+contract (T0, merged) and the two already-built, already-tested modules D-061 §4 named:
+`workers/fuzzing/run.py::run_fuzzing_stage` (#148) and `adapters/cpp/fuzzing.py`
+(#28/#150). New code: `apps/control-api/orchestrator/findings.py` (the D-061 §5
+`Finding`-recording gap), `workers/fuzzing/dispatch.py`, two test files
+(`apps/control-api/orchestrator/tests/test_findings.py`,
+`apps/control-api/orchestrator/tests/test_fuzz_executor.py`), one `ready()` hook added to
+`missions/apps.py`, one new setting (`SANDBOX_FUZZ_IMAGE`, both `.env.example` files).
+
+### 1. The sanitizer-memory question the assignment asked me to check: answered "no, and here is the verified reason", not assumed either way
+
+**Decision** — `_fuzz_executor` builds a `packages.sandbox.container.ContainerJailPolicy`
+(`memory_mb` from `SANDBOX_MEMORY_MB`, default 8192) with no
+`MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`-equivalent override, even though `FUZZ` always
+builds with `-DPKTCFG_SANITIZE=ON` (`run_libfuzzer_campaign`'s configure step,
+unconditional — checked directly).
+
+**Options considered** — (a) assume the T1/T5 trap (`adapters/cpp/variants.py`'s
+`MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`, ~64 TiB, found the hard way against
+`packages.sandbox.jail.Jail`'s `RLIMIT_AS`) applies here too and add an equivalent
+override to `ContainerJailPolicy.memory_mb`; (b) assume it does not apply, without
+checking, because `run_fuzzing_stage` already uses a different sandbox class; (c) verify
+which sandboxing mechanism `run_fuzzing_stage`/`run_libfuzzer_campaign` actually uses and
+reason from there.
+
+**Pros and cons** — (a) would be following the assignment's own literal instruction
+("make sure your own Jail usage...accounts for this from the start") without reading past
+the word "Jail" — but `run_fuzzing_stage`'s signature (`policy: ContainerJailPolicy`) is
+not `packages.sandbox.jail.Jail`/`JailPolicy` at all; it is
+`packages.sandbox.container.ContainerJail`, a structurally different sandbox (#15/D-024,
+a rootful-daemon container with `--network none`, condition 6 of that ruling: `--memory`,
+a cgroup ceiling). Applying (a) anyway would set `memory_mb` to a number Docker's
+`--memory` flag cannot even express sanely (cgroup memory ceilings bound real hardware,
+not virtual address space) and would not fix anything, because the mechanism T1/T5 hit
+(`RLIMIT_AS` colliding with ASan's ~28 TiB shadow-memory *virtual* reservation) is a
+property of `RLIMIT_AS` specifically — `adapters/cpp/variants.py`'s own module docstring
+says this in its closing section: the durable fix is "an `RLIMIT_DATA`- or cgroup-based
+memory limit that actually constrains an ASan-instrumented process," which is exactly what
+`ContainerJailPolicy.memory_mb`/Docker's `--memory` already is. (b) is the exact "repeat
+T5's mistake" shape flagged against, just inverted (assuming safety instead of assuming
+danger, on no more evidence than my last assumption used). (c) is what was actually done:
+read `container.py`'s own module docstring and condition table, confirmed `--memory` maps
+to a cgroup `memory.max`/`memory.limit_in_bytes` ceiling on resident/charged pages (not
+reserved-but-untouched virtual address space, which is what ASan's shadow region mostly
+is), and confirmed no existing fuzzing test in this repository exercises a real container
+run against a real sanitizer-instrumented target to check this empirically (no pinned
+`llvm-fuzzer` image exists anywhere in the repo, in compose, or in `.env.example` before
+this task — checked directly, see §5 below).
+
+**Cost implications** — none; the existing `SANDBOX_MEMORY_MB` default is reused as-is.
+
+**Security implications** — none; this does not change the isolation posture, only
+confirms an existing default is correctly sized for `FUZZ`'s own workload.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (c), implemented (i.e., no override added), with the
+verified reasoning written into `workers/fuzzing/dispatch.py`'s own module docstring so a
+future reader does not have to re-derive it, and flagged here because "checked and found
+inapplicable" is a materially different, more defensible claim than "didn't think about
+it" — and the assignment specifically asked for the former.
+
+**Final approval authority** — CTO (technical); this is a verified technical claim about
+two different sandbox mechanisms' memory semantics, not a new architectural call, but is
+recorded at D-066/D-067's level of formality since a wrong guess here would silently
+produce a `FUZZ` stage that aborts on every sanitizer-instrumented run (T1/T5's own
+failure mode, one stage later) the first time a real pinned image exists to prove it
+either way. Genuinely welcomes correction once a real image lands and this can be
+verified empirically rather than by reading the two modules' own documented mechanisms —
+not treated as closed the way D-054's `limits_applied` design (an already-measured
+result) is.
+
+### 2. `MINIMIZE`'s real blocker: crash-artifact bytes never survive `run_fuzzing_stage`'s return, found by reading the code the task named, not assumed
+
+**Decision** — `_minimize_executor` (`@register_executor(JobKind.MINIMIZE)`) is real,
+registered code that always reports `FAILED`/`infra_failure=True`/`retry=False` with a
+detail naming the exact gap, rather than performing libFuzzer's `-minimize_crash=1` step
+for real.
+
+**Options considered** — (a) build real minimization: open a fresh `ContainerJail`,
+rebuild the harness, invoke `-minimize_crash=1` against the crash artifact, replay the
+minimized input, and set `Finding.reproducible=True` on success — the literal reading of
+"wiring the crash-minimization logic"; (b) the structural-blocker executor implemented.
+
+**Pros and cons** — (a) cannot be built at all against a real crash today: `FuzzingOutcome.
+artifact_refs` (`workers/fuzzing/run.py`) are paths *inside* `ContainerJail`'s worktree,
+and `run_libfuzzer_campaign` opens that jail with `with ContainerJail.create(...) as
+sandbox:` — `ContainerJail.close()` (run on every `with`-block exit,
+`packages/sandbox/container.py`) does `shutil.rmtree(self._root, ...)`, deleting the crash
+bytes before `run_fuzzing_stage` returns to this executor at all. Unlike
+`workers/baseline/run.py::run_baseline_stage`, which explicitly copies its one durable
+artifact (the JUnit report) out to `workspace_root` before its own jail tears down,
+nothing in `run_fuzzing_stage`/`run_libfuzzer_campaign` does the equivalent for a crash
+artifact — and `run_fuzzing_stage`'s signature has no `workspace_root` parameter to
+receive one even if it did (checked directly against both files, not inferred from
+`BASELINE`'s pattern by analogy). Building (a) against this gap would mean either silently
+reaching into `ContainerJail`'s private root before it closes (fragile, couples this
+module to another owner's implementation detail rather than its public API) or modifying
+`workers/fuzzing/run.py`/`adapters/cpp/fuzzing.py` myself — exactly the "rewriting another
+task's signed-off module under this task's own deadline pressure" this role's operating
+rules and D-067 §3's own precedent (T5, flagging `VERIFY`'s unsandboxed execution rather
+than patching `verification.py`) both say not to do unilaterally. (b) is real, tested code
+that gives an honest, actionable answer instead of either faking a pass or leaving the
+`NotImplementedError` stub — `Finding.reproducible` correspondingly stays `False` for
+every `FUZZ`-discovered finding, which is the literal, honest reading of that field's own
+docstring ("True only when a *minimized* input replayed... from a clean build").
+
+**Cost implications** — (b) costs nothing now; closing the real gap costs a
+`workers/fuzzing/run.py` change (copy artifact bytes to a durable location before
+`ContainerJail.close()`, and give `run_fuzzing_stage` a `workspace_root` parameter to put
+them in) plus the actual `-minimize_crash=1` wiring — real work, not free, flagged as a
+fast-follow rather than done here.
+
+**Security implications** — none; `_minimize_executor` runs no untrusted code and touches
+no filesystem.
+
+**Scalability implications** — none.
+
+**Recommendation** — compiler-toolchain-engineer (owns `workers/fuzzing/`/
+`adapters/cpp/fuzzing.py`) decides whether to add the durable-copy-out step, mirroring
+`run_baseline_stage`'s own pattern; once that lands, `_minimize_executor` is a real,
+already-tested starting point to build the actual minimize+replay logic against, not a
+rewrite.
+
+**Final approval authority** — software-architect/CTO (whether this blocks anything past
+the demo — `MINIMIZE` is not on `JOB_BACKED_STATES`' dispatch path at all today, so
+nothing currently depends on it running); compiler-toolchain-engineer owns the fix itself.
+
+### 3. `record_finding` placement: a new `orchestrator/findings.py`, not appended to `orchestrator/candidates.py`
+
+**Decision** — `record_finding` lives in a new module, `orchestrator/findings.py`, not
+inside `orchestrator/candidates.py` alongside `record_patch_candidate`/
+`record_verification` even though the assignment named that file as the pattern to mirror.
+
+**Options considered** — (a) append `record_finding` to `orchestrator/candidates.py`,
+matching the assignment's literal wording; (b) a new module following the same
+discipline (locked-row read/write, schema validation before write, `events.emit` inside
+the same transaction) without changing what `candidates.py` is *about*.
+
+**Pros and cons** — (a) is the more literal reading, but `candidates.py`'s own module
+docstring states its scope precisely: "Recording patch candidates and verification runs —
+and freezing the set (D-046)." A `Finding` is not a candidate, is not part of the D-046
+freeze story, and needs no `Mission.verification_started_at`-shaped lifecycle write —
+appending it would make that docstring inaccurate the moment it landed, the same "a
+contract doc that lies is worse than none" standard this role's own operating rules apply
+to `04-api-plan.md`, applied here to a module docstring instead. (b) keeps `candidates.py`
+honestly scoped and gives `Finding` recording a home whose own docstring can be accurate,
+at the cost of one more file.
+
+**Cost implications** — none.
+
+**Security implications** — none; `record_finding` still takes the mission row lock
+before writing, matching `candidates.py`'s own discipline, so nothing about the locked-
+read/write guarantee the assignment asked for is weakened by the file split.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b), implemented, `record_finding` cross-referencing
+`candidates.py`'s two functions by name in its own module docstring so the mirrored
+pattern is traceable even though it is not literally in the same file.
+
+**Final approval authority** — CTO (technical); low stakes, recorded because it is a
+deviation from the assignment's literal wording, not because the call itself is close.
+
+### 4. `Finding` idempotency key: `(mission, fingerprint)` under the mission row lock, no database constraint to back it up
+
+**Decision** — `record_finding` deduplicates by `Finding.objects.filter(mission=...,
+fingerprint=...)` inside the same transaction that holds `Mission.objects.
+select_for_update()`, and does not add an `IntegrityError` fallback the way
+`workers.baseline.dispatch._persist_report` does for `BaselineReport`.
+
+**Options considered** — (a) mission-scoped existence check only ("does this mission have
+any Finding") — wrong, would silently drop the second and later distinct crashes a
+campaign captures; (b) `(mission, fingerprint)`-scoped, relying on the mission row lock
+for race-freedom, no database constraint; (c) same as (b) plus a proposed unique
+`(mission, fingerprint)` database constraint.
+
+**Pros and cons** — (a) is `BaselineReport`'s shape misapplied — `Finding` is not "one per
+mission," it is "one per mission per distinct defect," the same reasoning D-067 §1 already
+used to rule out a mission-scoped check for `VerificationRecord` (a third shape, not one
+of the two D-061 §3 rule 1 names by name). (c) would be the most defensible schema, but
+`Finding` is `missions/models.py`'s table, owned by database-engineer — this role's own
+scope explicitly defers schema/index changes to that seat ("you consume their schema,
+and request changes rather than making them"). (b) is what D-061 §3 rule 2 actually asks
+for — a pre-execution check before real work — implemented correctly given the schema as
+it stands: the mission row lock, already required for `events.emit`'s own precondition
+(see `orchestrator/events.py`'s docstring — it raises `RuntimeError` outside an atomic
+block holding that lock), makes the existence-check-then-create sequence race-free for
+every caller that goes through `record_finding`, without needing a database constraint as
+a second line of defence the way `BaselineReport`'s `OneToOneField` gives
+`workers.baseline.dispatch._persist_report` for free.
+
+**Cost implications** — none now.
+
+**Security implications** — none.
+
+**Scalability implications** — none at one mission at a time.
+
+**Recommendation / ruling** — (b), implemented and tested
+(`test_record_finding_dedupes_by_mission_and_fingerprint`,
+`test_record_finding_does_not_dedupe_across_missions`). Flagged for database-engineer as
+schema hardening worth considering (a unique `(mission, fingerprint)` constraint,
+mirroring `finding_fp_idx`'s existing non-unique index), not applied here.
+
+**Final approval authority** — CTO (technical) for the ruling; database-engineer for
+whether to add the constraint.
+
+### 5. `SANDBOX_FUZZ_IMAGE`: added as a new, empty-by-default setting; `FUZZ` cannot run for real until it is set
+
+**Decision** — Added `SANDBOX_FUZZ_IMAGE` (both `.env.example` files,
+`config/settings/base.py`), blank by default. `_fuzz_executor` refuses to start a
+campaign without it, reporting `infra_failure=True`/`ErrorCode.SANDBOX_UNAVAILABLE` rather
+than raising or silently no-op'ing.
+
+**Options considered** — (a) reuse an existing image reference from elsewhere in the repo;
+(b) add a new, unset-by-default setting and report its absence as an ordinary
+architecture-spec §6.1 "image missing" infra fault.
+
+**Pros and cons** — (a) is not available: grepped the whole repository (compose files,
+`.env.example`, `infrastructure/`) for a pinned fuzzing-toolchain image (cmake + clang +
+libFuzzer + compiler-rt) and found none — every `run_libfuzzer_campaign` test in this
+repo (`adapters/cpp/tests/test_fuzzing.py`, `workers/fuzzing/tests/test_run_fuzzing.py`)
+mocks `run_libfuzzer_campaign` itself rather than exercising a real container, and
+`docker images` on this build host has no candidate either. Building and pinning one is
+compiler-toolchain-engineer/devops-scoped work (an image, a Dockerfile, a CI pin step),
+not something this task should improvise under deadline pressure. (b) is honest about
+that gap and gives `FUZZ` a real, correctly-classified failure mode (the same bucket
+§6.1 already names, "podman absent, rootless not configured, image missing") the moment
+it is exercised in this environment, rather than an unhandled `ValueError` from deep
+inside `adapters.cpp.toolchain.require_pinned`.
+
+**Cost implications** — none now; a real fuzzing image is a real, separate cost
+(build time, registry storage, CI pull time) for whoever builds it.
+
+**Security implications** — none from this change; the eventual image still goes through
+`require_pinned` (digest-only, no floating tags) regardless of who builds it.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b), implemented. `FUZZ` is real, tested code with no real
+image to run it against in this environment — this is the single biggest gap in this
+task's own completeness, stated plainly rather than left to be discovered later: every
+test in `orchestrator/tests/test_fuzz_executor.py` mocks `run_fuzzing_stage` itself, the
+same shape the pre-existing `workers/fuzzing/tests/`/`adapters/cpp/tests/` suites already
+use, for the same reason.
+
+**Final approval authority** — devops-engineer/compiler-toolchain-engineer own building
+and pinning a real image; CTO owns whether shipping `FUZZ` without one blocks release.
+
+### 6. Container wall clock sized from the fuzz budget, not from `SandboxPolicy.max_seconds`
+
+**Decision** — `ContainerJailPolicy.wall_clock_seconds` is `budget_seconds +
+180` (`_CONTAINER_WALL_CLOCK_BUFFER_SECONDS`), not `SandboxPolicy.max_seconds` (default
+5400s) the way the rest of `ContainerJailPolicy`'s fields are read from `SANDBOX_POLICY`.
+
+**Options considered** — (a) reuse `sandbox.max_seconds` for the container's wall clock,
+matching the other `ContainerJailPolicy` fields; (b) size it from `budget_seconds`
+(`MissionPolicy.fuzz_seconds`, what libFuzzer's own `-max_total_time` is actually set to)
+plus a fixed buffer.
+
+**Pros and cons** — (a) is simpler but reuses a number sized for a different budget
+entirely (`BASELINE`'s configure+build+ctest cycle) and would leave a roughly 3600s gap
+(5400s default vs. `fuzz_seconds`' 1800s default) between the job's own `deadline_at`
+(`orchestrator.queue.default_deadline_seconds`, sized from `fuzz_seconds`) and the point
+the container itself would actually be killed — during which
+`orchestrator.queue.reap_missed_deadlines` (a separate orchestrator-process tick) could
+mark the `Job` row `TIMED_OUT` while this worker process is still genuinely blocked inside
+`run_fuzzing_stage`, unaware, since `run_fuzzing_stage` exposes no cancellation hook (the
+same class of gap `workers/baseline/dispatch.py` already flagged for `BASELINE`, just
+with `BASELINE`'s own job-deadline/jail-wall-clock gap being razor-thin by construction —
+both come from `sandbox.max_seconds` there — where reusing the same pattern for `FUZZ`
+would make the gap enormous instead of thin). (b) keeps the job-deadline/wall-clock
+coupling tight the same way `BASELINE`'s already is, just coupled to the right number
+(`fuzz_seconds`) instead of the wrong one (`max_seconds`).
+
+**Cost implications** — none.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b), implemented, documented in
+`workers/fuzzing/dispatch.py`'s own module docstring so the deliberate divergence from
+"read every `ContainerJailPolicy` field from `SANDBOX_POLICY`" is not mistaken for an
+oversight later.
+
+**Final approval authority** — CTO (technical); this is a load-bearing timing choice, not
+a cosmetic default.
+
+**Final approval authority (this whole entry)** — CTO (technical) for every ruling above;
+compiler-toolchain-engineer for §2's fix; devops-engineer for §5's image; database-engineer
+for §4's optional constraint — none of these four are decided unilaterally here, each is
+named as the owning seat per this role's own operating rules.

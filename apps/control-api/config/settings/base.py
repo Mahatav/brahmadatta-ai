@@ -237,8 +237,28 @@ SANDBOX_POLICY = {
     "network": env.get_str("SANDBOX_NETWORK", "deny"),
     "cpu_limit": env.get_int("SANDBOX_CPU_LIMIT", 4),
     "memory_mb": env.get_int("SANDBOX_MEMORY_MB", 8192),
+    # (#168, T2) `packages.sandbox.container.ContainerJailPolicy.memory_mb` is a
+    # cgroup `--memory` ceiling, not `packages.sandbox.jail.JailPolicy`'s
+    # `RLIMIT_AS` — the two do not share the "AddressSanitizer needs tens of TiB of
+    # *virtual* address space" problem `adapters/cpp/variants.py`'s
+    # `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS` exists to work around (a cgroup memory
+    # limit constrains resident/charged pages, not a reserved-but-untouched mmap).
+    # `FUZZ` always builds with `-DPKTCFG_SANITIZE=ON`
+    # (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`) but this same
+    # `SANDBOX_MEMORY_MB` default is correct for it unmodified — see
+    # `workers/fuzzing/dispatch.py`'s module docstring and `.project/decisions.md`
+    # for the verified reasoning, not repeated here.
     "max_seconds": env.get_int("SANDBOX_MAX_SECONDS", 5400),
 }
+
+# `ContainerJailPolicy.image` (#168, T2) has no safe default — "there is no safe
+# default image for running untrusted target code" (packages/sandbox/container.py's
+# own docstring). Blank by default; `workers/fuzzing/dispatch.py` refuses to start a
+# FUZZ campaign without it (reported as an ordinary `infra_failure` job result, per
+# architecture spec §6.1's "image missing" bucket — never an unhandled exception).
+# Must be a digest-pinned reference (`name@sha256:...`); an unpinned tag is refused
+# by `adapters.cpp.toolchain.require_pinned` regardless of what is set here.
+SANDBOX_FUZZ_IMAGE = env.get_str("SANDBOX_FUZZ_IMAGE", "")
 
 # --- Snapshot ingestion (#18) ---------------------------------------------------
 #
