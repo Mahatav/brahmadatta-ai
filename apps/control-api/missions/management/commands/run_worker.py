@@ -5,6 +5,36 @@ LOCKED`), materializes the mission's snapshot (`orchestrator.snapshot.
 materialize_snapshot`, T0b) into `ExecutorContext.source_dir`, runs the `JobKind`'s
 registered executor (`orchestrator.executors.executor_for`), and reports the result.
 
+## `--kinds` and the two worker fleets (D-073)
+
+`FUZZ`/`MINIMIZE` need `packages.sandbox.container.ContainerJail`, which shells out to
+a `docker` binary. The containerized `worker` service has no docker CLI, and D-036
+forbids ever mounting the host's Docker socket into it — so that container can never
+run those two kinds. D-073's answer is to split the worker *fleet* by `JobKind`, not
+by transport: this same command, invoked twice.
+
+    # the containerized `worker` service — unchanged, no flag needed
+    python manage.py run_worker
+
+    # `fuzz-worker` — bare-metal on the finale host (infrastructure/scripts/
+    # run-fuzz-worker.sh), the only process anywhere in this system given
+    # container-runtime access
+    python manage.py run_worker --kinds FUZZ,MINIMIZE
+
+**The fail-closed property this file is responsible for.** `--kinds` is resolved to a
+concrete `frozenset[JobKind]` once, in `handle()`, before the claim loop starts, and
+that set is what gets passed to `orchestrator.queue.claim_job` on *every* call —
+never `None`. Omitting `--kinds` therefore does not mean "no filter, claim anything"
+(`claim_job`'s own default, kept for other callers); it resolves to
+`orchestrator.queue.DEFAULT_WORKER_KINDS`, which excludes `FUZZ`/`MINIMIZE` by
+construction (see that constant's own docstring for why exclusion, not an
+inclusion list, is the safer default). A `worker` process started with no flags at
+all — the compose default — can therefore never claim a `FUZZ`/`MINIMIZE` job it has
+no way to run, and a `fuzz-worker` process is only ever given container-runtime access
+in the deployment that also passes it `--kinds FUZZ,MINIMIZE` explicitly. See
+`orchestrator/tests/test_queue_kind_filter.py` and `missions/tests/
+test_run_worker_kinds.py` for the tests proving both halves.
+
 **Never calls `orchestrator.transitions.transition()` and never writes
 `Mission.state`.** That is the orchestrator's job, reading this process's terminal
 `Job` rows (`orchestrator.queue.dispatch_terminal_jobs`) — see `orchestrator/
@@ -37,12 +67,12 @@ import uuid
 from importlib import import_module
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import connections
 
 from authorization.errors import UnreadableArchiveError
 from contracts.errors import ContractError
-from missions.models import Job, JobState, Mission
+from missions.models import Job, JobKind, JobState, Mission
 from orchestrator import queue, snapshot
 from orchestrator.executors import ExecutorContext, ExecutorResult, JobOutcome, executor_for
 
@@ -119,6 +149,46 @@ def _load_executor_modules(paths: tuple[str, ...]) -> None:
         import_module(dotted)
 
 
+def parse_kinds(raw: str | None) -> frozenset[JobKind]:
+    """`--kinds` (D-073) -> a concrete `frozenset[JobKind]`, never `None`.
+
+    `raw is None` (the flag was omitted) resolves to `orchestrator.queue.
+    DEFAULT_WORKER_KINDS` — every kind except `FUZZ`/`MINIMIZE` — which is the
+    fail-closed default this module's docstring describes. `raw` is otherwise a
+    comma-separated list of `JobKind` names (case-insensitive, whitespace-tolerant);
+    an empty or unparseable value is a startup error (`CommandError`), never a silent
+    fall-through to "claim everything" — an operator who typed `--kinds` clearly meant
+    to scope this worker, and a typo there must not quietly reopen `DEFAULT_WORKER_
+    KINDS`'s exclusion.
+    """
+    if raw is None:
+        return queue.DEFAULT_WORKER_KINDS
+
+    names = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
+    if not names:
+        raise CommandError(
+            "--kinds was passed but named no kinds. Omit the flag entirely for the "
+            "default set (every kind except FUZZ/MINIMIZE), or name at least one, "
+            "e.g. --kinds FUZZ,MINIMIZE."
+        )
+
+    valid = {member.value: member for member in JobKind}
+    resolved: set[JobKind] = set()
+    unknown: list[str] = []
+    for name in names:
+        member = valid.get(name.upper())
+        if member is None:
+            unknown.append(name)
+        else:
+            resolved.add(member)
+    if unknown:
+        raise CommandError(
+            f"--kinds: unrecognized JobKind value(s) {unknown!r}. "
+            f"Valid values: {', '.join(sorted(valid))}."
+        )
+    return frozenset(resolved)
+
+
 class Command(BaseCommand):
     help = "Run the worker claim loop: claim one job, materialize its snapshot, execute it, report the result."
 
@@ -130,6 +200,20 @@ class Command(BaseCommand):
         )
         parser.add_argument("--worker-id", default=None, help="Defaults to hostname-<random>.")
         parser.add_argument("--poll-interval", type=float, default=None)
+        parser.add_argument(
+            "--kinds",
+            default=None,
+            metavar="KIND[,KIND...]",
+            help=(
+                "Comma-separated JobKind names this worker claims, e.g. "
+                "FUZZ,MINIMIZE. Default (flag omitted): every JobKind except FUZZ "
+                "and MINIMIZE (D-073) — the containerized worker has no docker CLI "
+                "and D-036 forbids mounting the socket into it, so those two kinds "
+                "are excluded unless explicitly requested. Only the bare-metal "
+                "fuzz-worker deployment (infrastructure/scripts/run-fuzz-worker.sh) "
+                "should ever pass --kinds FUZZ,MINIMIZE."
+            ),
+        )
 
     def handle(self, *args, **options) -> None:
         _load_executor_modules(WORKER_EXECUTOR_MODULES)
@@ -141,9 +225,19 @@ class Command(BaseCommand):
         lease_seconds = int(getattr(settings, "WORKER_JOB_LEASE_SECONDS", 60))
         heartbeat_interval = int(getattr(settings, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 10))
 
+        # Resolved once, here, and passed explicitly on every claim — never `None` —
+        # so the fail-closed default lives in this command, not by chance in
+        # `queue.claim_job`'s own (deliberately permissive, for other callers)
+        # default. See `parse_kinds` and this module's docstring.
+        kinds = parse_kinds(options["kinds"])
+        self.stdout.write(
+            f"worker {worker_id}: claiming kinds "
+            f"{{{', '.join(sorted(k.value for k in kinds))}}}"
+        )
+
         if options["once"]:
             ran = self._claim_and_run(
-                worker_id, lease_seconds=lease_seconds, heartbeat_interval=heartbeat_interval
+                worker_id, lease_seconds=lease_seconds, heartbeat_interval=heartbeat_interval, kinds=kinds
             )
             self.stdout.write(
                 self.style.SUCCESS(f"worker {worker_id}: ran one job" if ran else "worker: nothing queued")
@@ -163,7 +257,7 @@ class Command(BaseCommand):
         )
         while not stop["requested"]:
             ran = self._claim_and_run(
-                worker_id, lease_seconds=lease_seconds, heartbeat_interval=heartbeat_interval
+                worker_id, lease_seconds=lease_seconds, heartbeat_interval=heartbeat_interval, kinds=kinds
             )
             if not ran:
                 time.sleep(poll_interval)
@@ -171,8 +265,15 @@ class Command(BaseCommand):
 
     # -- one claim-execute-report cycle ---------------------------------------------
 
-    def _claim_and_run(self, worker_id: str, *, lease_seconds: int, heartbeat_interval: int) -> bool:
-        job = queue.claim_job(worker_id, lease_seconds=lease_seconds)
+    def _claim_and_run(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+        heartbeat_interval: int,
+        kinds: frozenset[JobKind],
+    ) -> bool:
+        job = queue.claim_job(worker_id, lease_seconds=lease_seconds, kinds=kinds)
         if job is None:
             return False
 

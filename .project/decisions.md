@@ -5507,3 +5507,189 @@ BASELINE and replay.
 **Final approval authority** — engineering-manager (to confirm this closes the specific
 finding raised) / CTO (technical).
 
+---
+
+## D-077 — Implementing D-073: kind-scoped `claim_job`, `run_worker --kinds`, the
+fuzz-worker bare-metal entrypoint, and the loopback Postgres port this needed to actually
+work · 2026-08-17 · `backend-developer`/`devops-engineer` seat
+
+**Decision** — Implemented D-073's task-breakdown items 1, 2 and 4 (the CTO's own sizing:
+backend-developer ~1-2 hrs for the kind filter, devops-engineer ~half day for the
+bare-metal entrypoint, backend-developer/cybersecurity ~1-2 hrs for the import-boundary
+test) in one PR, against issue #189, on `feat/189-fuzz-worker-topology`:
+
+1. `orchestrator.queue.claim_job` takes an optional `kinds: Iterable[JobKind] | None`
+   parameter, applied as `.filter(kind__in=...)` inside the existing `SELECT ... FOR
+   UPDATE SKIP LOCKED` query — the filter is in the same locking query, not a
+   post-hoc check, so there is no window where an unfiltered claim could race a
+   filtered one. Two new module constants: `FUZZ_ONLY_KINDS = {FUZZ, MINIMIZE}` and
+   `DEFAULT_WORKER_KINDS = frozenset(JobKind) - FUZZ_ONLY_KINDS`.
+2. `manage.py run_worker` gained `--kinds KIND[,KIND...]`, parsed by a new
+   `parse_kinds()` function: `None` (flag omitted) resolves to `DEFAULT_WORKER_KINDS`;
+   an explicit value resolves to that exact set or raises `CommandError` on anything
+   empty or unrecognized. The resolved set is computed once in `handle()` and passed
+   explicitly to `queue.claim_job` on every claim — `claim_job`'s own `kinds=None`
+   default (kept for backward compatibility with any other caller) is never reached
+   from this command, by construction.
+3. `infrastructure/scripts/run-fuzz-worker.sh` — the bare-metal entrypoint, preflight-
+   checking Docker reachability, the control-api venv/interpreter, and `DATABASE_URL`,
+   then `exec`ing `python manage.py run_worker --kinds FUZZ,MINIMIZE "$@"`.
+4. `tests/architecture/test_fuzz_worker_isolation.py` — the import-boundary gate D-073
+   §5 item 1 asks for: a static AST scan of `workers/fuzzing/` for `gateway`/HTTP-
+   client imports, plus a runtime subprocess check that `django.setup()` + loading
+   `WORKER_EXECUTOR_MODULES` (exactly what starting `fuzz-worker` does before its
+   claim loop begins) never puts `gateway` into `sys.modules`.
+5. Both compose files' `worker` service gained a comment block stating the FUZZ/
+   MINIMIZE exclusion is deliberate (D-036/D-073), so it is not "fixed" later as a
+   bug — task item 5.
+6. **Not in D-073's original four-item list, but required to make item 3 actually
+   runnable**: `docker-compose.yml`'s dev-profile `db` service now also publishes on
+   `127.0.0.1:${POSTGRES_PORT:-5432}` — see the "Postgres reachability" sub-decision
+   below.
+
+### The default-exclusion vs. default-inclusion call (task item 1)
+
+D-073's own task breakdown left this as a two-line filter without specifying its
+shape; the assignment asked for a documented choice. **Chose default-EXCLUSION**
+(`DEFAULT_WORKER_KINDS = frozenset(JobKind) - FUZZ_ONLY_KINDS`) over a hand-maintained
+default-INCLUSION list of every other kind named explicitly.
+
+**Options considered** — (a) default-inclusion: `DEFAULT_WORKER_KINDS = frozenset({
+BASELINE, SANITIZER_BUILD, CORRELATE, PATCH_GENERATE, VERIFY, EXPORT, TEARDOWN})`,
+named by hand; (b) default-exclusion, as implemented.
+
+**Pros and cons.** (a) reads slightly more explicitly at the call site — the exact
+set the general worker claims is spelled out in one place — but has the opposite
+failure mode from what this task exists to prevent: a `JobKind` added later (a T8, or
+a split of `PATCH_GENERATE`, say) is claimable by *nothing* until someone remembers to
+add it to this hand-written list, and the failure is silent — the job sits `QUEUED`
+forever, no error, no log line, discovered only when a mission visibly stalls. (b)'s
+failure mode is the opposite and much louder: a new kind is claimable by the general
+worker automatically unless someone deliberately adds it to the two-member
+`FUZZ_ONLY_KINDS`, and getting that wrong (a new kind that genuinely needs a container
+runtime, not added to `FUZZ_ONLY_KINDS`) fails exactly the way an unregistered
+executor already fails today — `orchestrator/executors.py`'s stub raises
+`NotImplementedError`, which `run_worker._run_executor` catches and reports as a
+visible `FAILED` job with a message naming the missing owner, not a silent stall. (b)
+also reduces "can the containerized worker ever claim FUZZ/MINIMIZE" to one fact to
+audit (`FUZZ_ONLY_KINDS`'s contents, checked directly against `packages.sandbox`'s own
+dependency) instead of two facts that must independently agree (an inclusion list
+that omits both, checked against an exclusion fact stated nowhere else).
+
+**Cost implications** — none; both are two lines.
+
+**Security implications** — favors (b), which is the actual reason for the choice:
+D-073's own required property is "fails closed, not open" for the two kinds that need
+a container runtime specifically, not "fails closed for every kind" — a stalled
+`PATCH_GENERATE` job from a forgotten inclusion-list entry is a availability bug, not a
+container-runtime-access leak, but it is exactly the kind of quiet failure a
+seven-day-old test suite would not catch before the finale. (b) converts that
+specific failure mode into a loud one.
+
+**Scalability implications** — none.
+
+**Final approval authority** — backend-developer's own call per D-073 task item 1's
+explicit "your call, document reasoning" instruction; CTO retains override.
+
+### Postgres reachability for the bare-metal entrypoint — dev profile fixed now,
+finale profile left as an open, unreviewed decision (task item 4, D-073 §6 task 2)
+
+**Trigger.** D-073 §6 task 2 named this directly: "needs a reachable connection
+string from the host — check whether the finale profile already publishes Postgres's
+port or needs one added." Checked directly: **neither** `docker-compose.yml` nor
+`docker-compose.finale.yml` publishes any port for `db`, in either profile, as of this
+session. `apps/control-api/.env.example`'s own `DATABASE_URL` default
+(`...@localhost:5432/...`) already assumed a bare-metal Django process could reach
+Postgres at `localhost` — that assumption predates this task and was already false for
+the dev profile; this closes a pre-existing gap rather than opening a new one there.
+`infrastructure/scripts/gen-postgres-cert.sh`'s TLS certificate already carries
+`localhost`/`127.0.0.1` in its `subjectAltName`, alongside `db` — independent evidence
+that a host-loopback Postgres connection was anticipated by whoever wrote that script,
+even though nothing wired it up.
+
+**Decision, split by profile:**
+
+- **`docker-compose.yml` (dev): fixed.** `db` now publishes
+  `127.0.0.1:${POSTGRES_PORT:-5432}:5432` — loopback only, same pattern nginx already
+  uses for its own published ports in this exact file family, and gated by nothing
+  the dev profile did not already expose (any process on the operator's own laptop
+  could already reach the API through nginx's own loopback publish). This is what
+  `infrastructure/scripts/run-fuzz-worker.sh` and `apps/control-api/.env.example`'s
+  documentation now assume for local testing/rehearsal of the fuzz-worker mechanism.
+- **`docker-compose.finale.yml`: deliberately NOT changed.** That file states, as an
+  explicit, load-bearing invariant in its own header comment, "no port is published
+  except through nginx" (item 6 of its documented differences from the dev profile).
+  Breaking that invariant for the finale host — the machine actually used on stage —
+  is a real security-posture change, not a documentation fix, and this seat's charter
+  explicitly excludes security posture sign-off (`cybersecurity` owns that). Left as
+  an open question, with `run-fuzz-worker.sh`'s own preflight refusing to guess at a
+  `DATABASE_URL` and explaining why, rather than silently defaulting to something
+  that was never decided.
+
+**Options considered for the finale profile specifically** (not decided here — listed
+for whoever picks this up): (a) publish `db` on `127.0.0.1` in the finale profile too,
+mirroring the dev fix exactly — cheapest, matches an already-anticipated TLS SAN, but
+is the first exception to a stated invariant on the one machine judges are in the room
+for; (b) run `fuzz-worker` itself with `docker network connect backend <container>`-
+style access to the compose network from the host's own network namespace — avoids
+publishing a port at all, but blurs D-073's own "bare-metal, not containerized" framing
+and has not been tried; (c) an SSH/socat loopback tunnel set up by the operator by hand
+on the finale host, published nowhere in compose at all — smallest blast radius,
+costs an extra manual step in an already-tight finale runbook, and is easy to forget
+under stage pressure; (d) leave it broken and accept that `fuzz-worker` cannot reach
+the finale database at all, i.e., D-073's whole mechanism does not actually run on the
+finale host — clearly wrong, listed only for completeness.
+
+**Cost implications** — the dev fix: none. The finale question: unresolved, so unknown
+until decided.
+
+**Security implications** — the dev fix is judged low-risk (loopback-only, dev
+machine, mirrors an existing pattern in the same file) but is still a network-topology
+change and is called out here rather than folded silently into "documentation," so
+`cybersecurity` can review it on the same PR as everything else in this change. The
+finale question is explicitly unresolved and is the single most important open item
+in this whole change — see Open Questions in the PR description.
+
+**Scalability implications** — none.
+
+**Recommendation** — ship the dev fix now; escalate the finale question to
+CTO/devops-engineer for a decision and to `cybersecurity` for review before
+`infrastructure/scripts/run-fuzz-worker.sh` is ever run against the finale host's own
+compose stack. Recommend option (a) above as the same-day answer if a decision is
+needed before 2026-08-20 — it is the smallest diff and the TLS material already
+anticipates it — but that recommendation is not a decision.
+
+**Final approval authority** — devops-engineer/CTO for the finale-profile compose
+change itself; `cybersecurity` holds the review gate on it per CLAUDE.md's standing
+rule for isolation-relevant changes, same as the rest of D-073's implementation.
+
+### What is still open after this PR
+
+1. The finale-profile Postgres reachability question above — unresolved by design.
+2. D-073 §5 item 2 (bare-metal `fuzz-worker` genuinely has no route to `model-host`,
+   not just "isn't configured to") needs a live connectivity check on the actual
+   finale host, in the shape `infrastructure/scripts/egress-test.sh` already
+   establishes for the containerized services — not attempted here; there is no
+   bare-metal-host equivalent of that script yet.
+3. D-073 §5 item 4 (the finale host's own hardening — not running as root, a
+   dedicated operator account, `docker` version/storage-driver parity with D-072's own
+   verification) is an operational checklist item for whoever runs the finale
+   rehearsal, not something a PR can close.
+4. The stale `D-024` citations in `packages/sandbox/container.py`'s own module
+   docstring (D-073's numbering note already flagged this) are untouched here —
+   that file is owned by the sandbox/container-jail work, not this PR, per this
+   seat's standing instruction not to edit another role's code opportunistically.
+   `apps/control-api/.env.example`'s own near-identical stale citation, immediately
+   adjacent to the `SANDBOX_RUNTIME` documentation this PR was already touching, was
+   corrected in passing (D-036, not D-024) since it is this seat's own file.
+5. `docker-compose.finale.yml`'s/`docker-compose.yml`'s stale `CONTROL_API_WORKER_CMD`
+   default (`python manage.py rqworker default`, no `django_rq` installed — D-070's
+   own note) is unrelated to this change and left as-is; it does not block
+   `run_worker --kinds`, since the compose `command:` line for the containerized
+   `worker` service is not what this PR changes.
+
+**Final approval authority (whole record)** — CTO (technical) for the topology
+implementation, following D-073's own ruling; `cybersecurity` holds the review gate
+required before any of this runs against the finale host, per D-073 §5/§6.5 and
+CLAUDE.md's standing rule for isolation-relevant changes. Not yet reviewed as of this
+entry — PR opened as draft for that reason.

@@ -219,13 +219,19 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # #189 / D-072: mirrors docker-compose.yml's identical note — this service cannot run
-  # FUZZ jobs (`packages.sandbox.container.ContainerJail`) as built today. `ContainerJail`
-  # shells out to a `docker` binary against a reachable daemon; this image has neither,
-  # and D-024 condition 4 forbids bind-mounting /var/run/docker.sock in as the fix. See
-  # docker-compose.yml's `worker:` comment for the full reasoning. SANDBOX_FUZZ_IMAGE is
-  # still threaded through below so it is visible rather than silently absent, not because
-  # this service can act on it yet.
+  # D-073 — this container claims every JobKind EXCEPT FUZZ/MINIMIZE, BY DESIGN. It has
+  # no `docker` CLI and D-036 forbids ever mounting the host's Docker socket into it, so
+  # it structurally cannot run `packages.sandbox.container.ContainerJail` — what FUZZ/
+  # MINIMIZE need. FUZZ/MINIMIZE run instead on `fuzz-worker`, a bare-metal process on
+  # the finale host (infrastructure/scripts/run-fuzz-worker.sh), NOT a service in this
+  # file — `python manage.py run_worker --kinds FUZZ,MINIMIZE`, the only process in this
+  # system ever given container-runtime access, deliberately given no model-gateway
+  # client and no route to model-host. Do not "fix" this by mounting the socket here or
+  # by widening this service's claimed kinds — see D-036/D-073 in .project/decisions.md.
+  # `fuzz-worker`'s Postgres reachability from the bare-metal host is an OPEN, UNRESOLVED
+  # question for this file specifically — see the D-073 follow-up entry in that log for
+  # why it is not silently resolved here the way it was for docker-compose.yml's dev
+  # profile.
   worker:
     profiles: ["worker"]
     build:
