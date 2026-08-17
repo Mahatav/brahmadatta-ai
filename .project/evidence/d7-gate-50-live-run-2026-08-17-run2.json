@@ -1,0 +1,114 @@
+{
+  "kind": "d7-gate-50-live-run",
+  "schema_version": "d7-gate-50-live-run/1",
+  "generated_at": "2026-08-17T17:55:00Z",
+  "issue": 50,
+  "context": "Second live attempt at the #50 D7 gate, same day as the first (.project/evidence/d7-gate-50-live-run-2026-08-17.{json,md}), run immediately after #168 (all 7 mission-stage executors T1-T7), #189 (fuzz-worker topology + pinned fuzzing image), and #201 (model-host bearer-token auth) were merged to main in this session. Purpose: find out whether #168 actually closed the 'nothing advances a mission past VALIDATING' blocker the first attempt reported. Run against main @ 33c36aa, dev compose profile (not finale -- finale does not publish the Postgres port fuzz-worker needs per D-073, and requires an Astro build; dev profile's apps/command-center/dist existed but dev was chosen per this task's own guidance to prioritize a working mission pipeline over profile fidelity).",
+  "environment_checks": [
+    {
+      "id": "env-file",
+      "description": "Fresh .env generated for this run (dev profile), no REPLACE_ME placeholders, mode 600",
+      "status": "pass",
+      "detail": "Prior .env on disk was left over from the first rehearsal's finale-profile run (sslmode=require DATABASE_URL, dead CONTROL_API_WORKER_CMD default) and was not safe to reuse as-is; backed up to .env.bak-prior-rehearsal-2026-08-17 and regenerated from .env.example with fresh secrets, POSTGRES_PORT=15432 (avoiding the known infra-postgres-1 conflict on 5432), CONTROL_API_WORKER_CMD=run_worker, SANDBOX_FUZZ_IMAGE pinned to the #189 image digest, MODEL_HOST_BEARER_TOKEN generated, MODEL_SERVICE_NAMES=model-host."
+    },
+    {
+      "id": "compose-config",
+      "description": "docker compose config validates for the dev stack",
+      "status": "pass",
+      "detail": "docker compose --env-file .env -f infrastructure/compose/docker-compose.yml config --quiet: clean."
+    },
+    {
+      "id": "command-center-node-modules-volume-ownership",
+      "description": "NEW BUG (found and fixed this run): command-center-deps failed EACCES on a fresh named volume",
+      "status": "fixed",
+      "detail": "brahmadatta_command-center-node-modules is created root-owned by Docker on first use; command-center-deps runs as user 1000:1000 (the node image's non-root user) and cannot mkdir into it -- npm ci failed with EACCES. Fixed live by chowning the volume with a one-off root container (docker run --rm -v brahmadatta_command-center-node-modules:/app/node_modules alpine:3 chown -R 1000:1000 /app/node_modules) before retrying dev-up.sh. Same root-cause shape as the ARTIFACT_ROOT/evidence-volume bug fixed in the first rehearsal (named volume defaults to root ownership; non-root container can't write). Not yet fixed at the compose/Dockerfile level -- the durable fix (matching control-api.Dockerfile's own established pattern) is a follow-up, not done here for time."
+    },
+    {
+      "id": "manage-check-model-service-names",
+      "description": "manage.py check failed brahmadatta.E001 on SMALL_MODEL_BASE_URL=http://model-host:11434 until MODEL_SERVICE_NAMES declared it",
+      "status": "fixed",
+      "detail": "Not a bug -- working as designed (D-051): a compose service name must be explicitly trusted. Added MODEL_SERVICE_NAMES=model-host to .env and recreated control-api; check passed clean after."
+    },
+    {
+      "id": "migrations",
+      "description": "manage.py migrate --no-input applies cleanly on a fresh database",
+      "status": "pass",
+      "detail": "All migrations including missions.0003_mission_idempotency_key applied with no errors."
+    },
+    {
+      "id": "model-host-egress",
+      "description": "NEW FINDING: model-host's backend network is internal:true by design (C4) -- it cannot pull a model from inside the running stack",
+      "status": "worked-around",
+      "detail": "docker exec brahmadatta-model-host ollama pull codellama:7b-instruct failed: 'dial tcp: lookup registry.ollama.ai ... server misbehaving' -- expected and correct per the network's own invariant, matching the compose file's own comment ('model pulls happen explicitly on a prepared volume before the judged run'). Worked around by running a temporary, normally-networked container (brahmadatta-model-prep) mounting the SAME named volume (brahmadatta_ollama-models) to pull codellama:7b-instruct (93-98 MB/s, ~40s for 3.8GB) before handing the populated volume to the real model-host service. Not a bug -- this is the intended pre-staging workflow, but it was not written down anywhere as an operational step before this run exercised it live; worth a line in the finale runbook."
+    },
+    {
+      "id": "db-port-publish-on-internal-only-network",
+      "description": "NEW FINDING: on this Docker Desktop host, a container whose ONLY network is internal:true never gets its published host port actually forwarded",
+      "status": "worked-around, not fixed in tracked files",
+      "detail": "docker-compose.yml's db service publishes 127.0.0.1:${POSTGRES_PORT}:5432 (D-073's mechanism for bare-metal fuzz-worker to reach Postgres) but is ONLY on the internal:true 'backend' network. HostConfig.PortBindings showed the mapping; NetworkSettings.Ports and the actual host listener stayed empty -- connection refused. Reproduced independently with a bare nginx test container on a fresh internal-only network (same failure) and a control test on a fresh non-internal network (worked). nginx's own identical-looking port publish works only because nginx also sits on the non-internal 'external' network; db has no such second network. Root cause is plausibly Docker Desktop's VM-based networking/vpnkit layer handling internal networks differently from a plain Linux dockerd (where iptables DNAT for a published port is independent of the internal flag) -- not confirmed against a real Linux finale host in this session. Workaround used for this run only, not persisted to any tracked file: `docker network connect bridge brahmadatta-db` then restart. Flagged for devops follow-up: verify on the actual finale host OS before trusting D-073's fuzz-worker-reaches-db-on-loopback assumption there."
+    },
+    {
+      "id": "docker-ps-a-before-run",
+      "description": "Pre-existing, unrelated containers on this host noted before starting, to distinguish them from any stray this run might leave",
+      "status": "informational",
+      "detail": "infra-postgres-1 (a different project, bound to 127.0.0.1:5432, the documented known conflict this run avoided via POSTGRES_PORT=15432) and four stopped/exited good_marketer_web-*/ollama containers, all predating this session and unrelated to brahmadatta-ai."
+    }
+  ],
+  "new_bugs_found_and_fixed_this_session": [
+    "command-center-node-modules named volume created root-owned; non-root command-center-deps container could not write into it (workaround applied live; durable Dockerfile/compose fix not yet landed)."
+  ],
+  "closed_since_first_rehearsal": {
+    "issue": 168,
+    "finding": "CONFIRMED CLOSED, empirically, not just by reading code. The first rehearsal's blocker -- 'nothing in the real HTTP API, and nothing running automatically in the background, ever advances a mission past VALIDATING' -- no longer holds. With manage.py run_orchestrator running as a tick loop and manage.py run_worker (compose worker profile, kinds={BASELINE,CORRELATE,EXPORT,PATCH_GENERATE,SANITIZER_BUILD,TEARDOWN,VERIFY}) polling, a mission driven through create -> authorize -> snapshot -> preflight -> start advanced UNATTENDED and AUTOMATICALLY: VALIDATING -> BASELINE (orchestrator event: 'preflight satisfied, entering the pipeline') within one tick (~1s), the BASELINE job was claimed and actually executed by the worker (not stubbed -- it ran adapters.cpp.pipeline against the real pktcfg snapshot and produced a real, structured BASELINE_BUILD_FAILED result), and on the job's terminal FAILED result the orchestrator correctly drove BASELINE -> FAILED and ran teardown, all with zero HTTP calls after 'start'. allowed_transitions correctly went from listing BASELINE to being empty once terminal. This is real, automatic, caller-driven stage execution -- the exact gap #168 was scoped to close -- and it is closed."
+  },
+  "unresolved_blocker_reported_not_fixed": {
+    "finding": "A NEW blocker, exposed only now that #168's caller-wiring gap is closed (the first rehearsal never got far enough to hit this). workers/baseline/run.py uses packages.sandbox.Jail, NOT ContainerJail, for BASELINE/SANITIZER_BUILD -- by design, per the evidence bundle's own 'isolation_mode: SUBPROCESS_JAIL' / D-049 substitution note ('The rootless-container sandbox backend (#15) is not built in this checkout'). Jail runs cmake/make/ctest as a direct subprocess of the worker PROCESS, not inside a Docker sandbox -- so the compose worker service's own image needs the C/C++ toolchain installed. It does not: brahmadatta-worker is built from control-api.Dockerfile, a Python/uvicorn-only image (confirmed directly: `cmake: not found` inside the running container). The BASELINE job for this run's mission failed in 0.034s with configure_ok=false, build_ok=false, error_code=BASELINE_BUILD_FAILED -- immediate failure consistent with a missing binary, not a real build attempt. Attempted a live workaround (apt-get install cmake build-essential inside the running worker container) and it correctly failed too: the worker container has no route off the host at all (backend network is internal:true, C4's own invariant) -- apt-get could not resolve deb.debian.org. This is the intended isolation working correctly; the fix has to be baked into the image at build time (mirroring control-api.Dockerfile's own existing runtime-stage precedent for ARTIFACT_ROOT), not patched live. This blocks every real demo scenario, including both verdicts required by this issue's acceptance criteria -- with BASELINE never producing a real pass, nothing downstream (FUZZ, PATCH_GENERATE, VERIFY, either verdict) is reachable through this compose stack as it exists today. Scoped fix: add a C/C++ toolchain (cmake, make/ninja, gcc or clang -- adapters/cpp/toolchain.py names the exact requirement) to the dev/finale target(s) of infrastructure/compose/images/control-api.Dockerfile that the compose worker service builds from, then rebuild and re-run this exact mission to confirm BASELINE passes and the pipeline reaches STRESS_TEST/FUZZ. Devops-scoped, but sized more like a real task than the small on-sight fixes in this same run -- reporting for staffing rather than attempting under this run's time budget."
+  },
+  "nine_step_flow_attempted": {
+    "target": "demo/repositories/pktcfg",
+    "mission_id": "ab0a858a-d078-4d66-81ce-8438edeb7870",
+    "run_started_utc": "2026-08-17T17:47:09Z",
+    "run_ended_utc": "2026-08-17T17:50:51Z",
+    "wall_clock_environment_setup_and_debugging_minutes_approx": 70,
+    "steps": [
+      {"n": 1, "name": "Target + create mission", "endpoint": "POST /api/v1/missions", "http_status": 201, "result": "PASS", "detail": "adapter=C_CMAKE_CTEST, repository_ref=pktcfg (the only demo target/fixture present under demo/repositories/ -- see 'second-target finding' below)."},
+      {"n": 2, "name": "Authorize", "endpoint": "POST /api/v1/missions/{id}/authorize", "http_status": 201, "result": "PASS", "detail": "AuthorizationRecord created, state=AUTHORIZED."},
+      {"n": 3, "name": "Snapshot", "endpoint": "POST /api/v1/missions/{id}/snapshot", "http_status": 201, "result": "PASS", "detail": "Placeholder digest 409'd as designed (SnapshotDigestMismatchError, server never trusts a client-supplied digest); real digest b7a82f9fcd03bcef24ff3b275b51e6fd916ef2d9b78357975796256fec4b5fe3 discovered from the error and resubmitted. 33 files, 58131 bytes -- identical to the first rehearsal's snapshot, confirming the fixture is unchanged."},
+      {"n": 4, "name": "Baseline (preflight gate)", "endpoint": "POST /api/v1/missions/{id}/preflight", "http_status": 200, "result": "PASS", "detail": "passed=true, all 4 checks true, blocking_codes=[]."},
+      {"n": 5, "name": "Start (\"the autonomous workflow\")", "endpoint": "POST /api/v1/missions/{id}/start", "http_status": 202, "result": "PASS", "detail": "SNAPSHOTTED -> VALIDATING accepted at 17:47:40.583Z."},
+      {"n": "5b", "name": "Unattended observation window -- THIS IS THE #168 CONFIRMATION", "endpoint": "GET /api/v1/missions/{id} x6, 5s apart, plus full event replay", "http_status": 200, "result": "PASS -- mission advanced automatically, unattended, with zero further HTTP calls", "detail": "Event log (all trace_id=orchestrator-tick, i.e. driven by the tick loop, not any HTTP call): VALIDATING -> BASELINE at 17:47:40.754Z ('orchestrator: preflight satisfied, entering the pipeline'); BASELINE job ab00bee0-bd55-4e92-b4d9-a65ecf7033a0 claimed and run by the compose worker; BASELINE -> FAILED at 17:47:41.784Z ('BASELINE job ab00bee0... -> FAILED'); TEARDOWN_CONFIRMED same timestamp. The full VALIDATING->FAILED arc took about 1.2 seconds, unattended -- proving the caller now exists and works; the underlying BASELINE result was a real, structured build failure (see unresolved_blocker_reported_not_fixed), not a stub."},
+      {"n": "6-9", "name": "Finding / Patch / Verdicts A+B / Evidence / Teardown", "endpoint": "n/a for 6-7; GET /api/v1/missions/{id}/evidence attempted for 8", "http_status": 200, "result": "6-7 NOT REACHED; 8 PARTIALLY EXERCISED; 9 exercised via the orchestrator's own FAILED-path teardown", "detail": "Steps 6 (finding) and 7 (both verdicts) are unreachable because BASELINE never passes (see blocker above) -- FUZZ/PATCH_GENERATE/VERIFY jobs are never enqueued for a mission that fails at BASELINE. Step 8 (evidence) WAS exercised: GET .../evidence returned 200 with a real, coherent, readable bundle -- baseline result, empty findings/reproducers/patches/verifications as correctly reflects this mission's real state, and an honest 'substitutions' entry recording SUBPROCESS_JAIL_ISOLATION per D-049 (no fake data, no redaction failure observed). This demonstrates the evidence-export machinery works even though this specific run has nothing to show beyond a failed baseline. Step 9: the orchestrator's own FAILED-path teardown fired automatically (TEARDOWN_CONFIRMED, released=true, 'no mission-scoped compute was running' -- correct, since BASELINE's subprocess jail never spawned a Docker sandbox)."}
+    ],
+    "both_verdicts_in_one_run": {
+      "achieved": false,
+      "reason": "Neither verdict was reached -- the mission never got past BASELINE (see unresolved_blocker_reported_not_fixed). This is a strictly earlier blocker than 'both verdicts,' so the both-verdicts question could not be tested this run.",
+      "second_target_finding": "demo/repositories/ contains exactly one fixture (pktcfg). It is designed to produce BOTH the Verified and Rejected verdicts required by this gate from a SINGLE target: pktcfg/patches/ ships four benchmark candidate patches -- candidate-a-correct-bounds-fix.patch (intended Verified outcome), candidate-b-rejected-crash-only-fix.patch (intended Rejected outcome, crash eliminated but test_tab_expansion regresses), plus candidate-c-compile-failure.patch and candidate-p-policy-rejected-out-of-scope.patch for the compile-gate and policy-gate paths. There is no HTTP-reachable 'operator-supplied candidate' endpoint in api/routers/ today (grepped -- none exists), so it is not yet possible to inject these fixture patches directly; PATCH_GENERATE (orchestrator/patch_generate_executor.py) only ever calls the live self-hosted model (MODEL_GATEWAY_MODE=live, no operator-supplied path wired to the API surface). This was not reachable this run regardless, since BASELINE never passed."
+    }
+  },
+  "model_host_readiness": {
+    "note": "Brought up and populated as part of this run in case BASELINE passed and the pipeline reached PATCH_GENERATE -- it did not get used.",
+    "model": "codellama:7b-instruct",
+    "pulled_successfully": true,
+    "pull_duration_approx_seconds": 45,
+    "auth": "MODEL_HOST_BEARER_TOKEN generated and set; model-host-auth (D-075/SEC-50) up and healthy; manage.py check passed with SMALL_MODEL_BASE_URL=http://model-host:11434 once MODEL_SERVICE_NAMES=model-host was declared.",
+    "never_exercised": "PATCH_GENERATE was never enqueued (mission failed at BASELINE first), so the live model path itself was never actually called this run -- readiness only, not a live generation."
+  },
+  "docker_ps_a_final": "CONTAINER ID   IMAGE                        COMMAND                  CREATED       STATUS                     PORTS                            NAMES\nc41f0cb8c588   postgres:16                  \"docker-entrypoint.s…\"   3 weeks ago   Up 3 weeks                 127.0.0.1:5432->5432/tcp         infra-postgres-1\n6c11fb3477d0   good_marketer_web-frontend   \"/docker-entrypoint.…\"   4 weeks ago   Exited (255) 3 weeks ago   80/tcp, 0.0.0.0:4321->4321/tcp   good_marketer_web-frontend-1\n9840853ce366   good_marketer_web-backend    \"sh -c 'python manag…\"   4 weeks ago   Exited (255) 3 weeks ago   0.0.0.0:8000->8000/tcp           good_marketer_web-backend-1\nc6cef41a12b7   ollama/ollama:latest         \"/bin/ollama pull ll…\"   5 weeks ago   Exited (0) 4 weeks ago                                      good_marketer_web-ollama-pull-1\n8978144d0295   ollama/ollama:latest         \"/bin/ollama serve\"      5 weeks ago   Exited (255) 3 weeks ago   0.0.0.0:11434->11434/tcp         good_marketer_web-ollama-1",
+  "strays_check": {
+    "brahmadatta_containers_remaining": 0,
+    "bare_metal_fuzz_worker_process_remaining": false,
+    "orchestrator_process_remaining": false,
+    "detail": "docker ps -a after teardown shows exactly the same five pre-existing, unrelated containers present before this run started (infra-postgres-1 and four stopped good_marketer_web-*/ollama containers) and zero brahmadatta-* containers. ps aux confirms no run_worker/run_orchestrator process survives. Zero strays from this run."
+  },
+  "stack_left_running": false,
+  "stack_left_running_reason": "Full docker compose down (worker + model profiles included) executed after evidence capture; nothing left running deliberately, unlike the first rehearsal which left the finale stack up for reconstruction convenience.",
+  "files_changed_this_session": [
+    ".env (regenerated, not tracked, gitignored)",
+    ".env.bak-prior-rehearsal-2026-08-17 (backup of the prior session's .env, not tracked)",
+    "apps/control-api/.env (created for the bare-metal fuzz-worker, not tracked, gitignored)",
+    ".project/evidence/d7-gate-50-live-run-2026-08-17-run2.json (this file)",
+    ".project/evidence/d7-gate-50-live-run-2026-08-17-run2.md",
+    ".project/evidence/d7-gate-50-live-run-2026-08-17-run2-transcript.log (full raw terminal transcript)",
+    ".project/decisions.md (new dated entry)"
+  ]
+}

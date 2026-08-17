@@ -6685,3 +6685,140 @@ a cosmetic default.
 compiler-toolchain-engineer for §2's fix; devops-engineer for §5's image; database-engineer
 for §4's optional constraint — none of these four are decided unilaterally here, each is
 named as the owning seat per this role's own operating rules.
+
+## D-084 — #50 live rehearsal, run 2 (2026-08-17) — #168's blocker confirmed closed; a new
+BASELINE-toolchain gap found and reported, one small volume-ownership bug fixed on the spot
+· 2026-08-17 · devops-engineer
+
+**Context.** Second live attempt at the #50 D7 gate today, run immediately after #168 (all
+7 mission-stage executors, T1–T7), #189 (fuzz-worker topology + pinned fuzzing image), and
+#201 (model-host bearer-token auth) merged in this session. Purpose: find out whether #168
+actually closed the "nothing advances a mission past `VALIDATING`" blocker the first
+rehearsal (§4 above, `.project/evidence/d7-gate-50-live-run-2026-08-17.{json,md}`) reported.
+Full detail in `.project/evidence/d7-gate-50-live-run-2026-08-17-run2.{json,md}` and the
+full raw terminal transcript, `.project/evidence/d7-gate-50-live-run-2026-08-17-run2-
+transcript.log`.
+
+**The headline result — real, empirically confirmed.** #168's blocker is closed. With
+`manage.py run_orchestrator` ticking and `manage.py run_worker` polling (compose `worker`
+profile), a mission driven through `create → authorize → snapshot → preflight → start`
+advanced automatically and unattended: `VALIDATING → BASELINE` within one orchestrator
+tick, a real `BASELINE` job was claimed and executed by the worker against the actual
+`pktcfg` snapshot, and on that job's terminal result the orchestrator correctly drove
+`BASELINE → FAILED` and ran teardown — all with zero HTTP calls after `start`. Confirmed
+by the event log (every post-`start` event's `trace_id` is `orchestrator-tick`, not an
+operator call), not just by reading code.
+
+**Decision (devops-engineer authority — environment setup) — one small bug fixed on the
+spot, same pattern as the first rehearsal's two.** `command-center-node-modules` (a fresh
+named Docker volume) is created root-owned by Docker on first use; `command-center-deps`
+runs as uid 1000 (the node image's own non-root user) and cannot `npm ci` into it —
+`EACCES`. Fixed live with a one-off root container (`docker run --rm -v
+brahmadatta_command-center-node-modules:/app/node_modules alpine:3 chown -R 1000:1000
+/app/node_modules`) before retrying `dev-up.sh`. Identical root-cause shape to the
+`ARTIFACT_ROOT`/`evidence`-volume bug the first rehearsal fixed (a named volume defaults to
+root ownership; a non-root container can't write into it) — not yet fixed at the
+compose/Dockerfile level (the durable fix mirrors `control-api.Dockerfile`'s own existing
+build-time `mkdir`+`chown` precedent); flagged as a follow-up, not landed here for time.
+**Options / pros-cons / cost / security / scalability** — identical shape and reasoning to
+§4's bug 2 above; not repeated. **Final approval authority** — CTO (technical), same basis
+as §4.
+
+**Two environment findings, worked around live for this run only, neither persisted to any
+tracked file, both flagged for follow-up rather than decided here.**
+
+1. `model-host`'s `backend` network is `internal: true` by design (C4) — it cannot pull its
+   own model from inside the running stack (`ollama pull` failed DNS resolution, which is
+   the isolation working correctly). Worked around with a temporary, normally-networked
+   container mounting the same named `ollama-models` volume to pre-stage
+   `codellama:7b-instruct` (~3.8GB, ~45s at 90+ MB/s) before handing the populated volume to
+   the real `model-host` service — matching the compose file's own comment that model pulls
+   happen "explicitly on a prepared volume before the judged run." This is the intended
+   workflow, just never previously exercised or written down as an operational step; worth
+   a line in the finale runbook, not a compose change.
+2. **A container whose only network is `internal: true` never actually gets its published
+   host port forwarded, on this Docker Desktop host.** `db`'s `127.0.0.1:${POSTGRES_PORT}`
+   publish — the exact mechanism D-073 relies on for bare-metal `fuzz-worker` to reach
+   Postgres — showed the mapping in `HostConfig.PortBindings` but bound no real listener
+   (`connection refused`), reproduced independently with a bare test container on a fresh
+   internal-only network (fails) versus a fresh non-internal network (works).
+   `nginx`'s otherwise-identical port publish works only because `nginx` also sits on the
+   non-internal `external` network; `db` has no second network. D-073's own text assumed
+   `fuzz-worker` could reach `db` "the same way nginx already is" — that assumption was
+   never actually exercised end to end until this run, and it does not hold on this host.
+   Worked around for this run only via `docker network connect bridge brahmadatta-db` (a
+   live CLI action, not a tracked-file change) — deliberately not made permanent, since
+   changing `db`'s network membership is exactly the kind of isolation-relevant change
+   CLAUDE.md reserves for cybersecurity review, and it is not yet known whether this
+   Docker-Desktop-specific behavior even reproduces on the actual Linux finale host.
+   **Flagged for follow-up, not decided here**: devops + cybersecurity should confirm
+   whether the finale host's dockerd (presumably plain Linux, not Docker Desktop) exhibits
+   the same gap before trusting D-073's assumption there; if it does, the fix needs a
+   documented decision (a narrow non-internal side-channel for `db`'s publish, or dropping
+   the loopback-publish mechanism in favor of something D-073 didn't originally consider),
+   not another live workaround.
+
+**The actual blocker this run — not fixed, reported. A new gap, only exposed now that
+#168's caller-wiring gap is closed** (the first rehearsal never got far enough to hit it).
+`workers/baseline/run.py` uses `packages.sandbox.Jail`, not `ContainerJail`, for
+`BASELINE`/`SANITIZER_BUILD` — by design, per the evidence bundle's own honest
+`isolation_mode: SUBPROCESS_JAIL` / D-049 substitution note ("the rootless-container
+sandbox backend (#15) is not built in this checkout"). `Jail` runs `cmake`/`make`/`ctest`
+as a direct subprocess of the worker *process itself*, not inside a Docker sandbox — so the
+compose `worker` service's own image needs a C/C++ toolchain installed. It does not:
+`brahmadatta-worker` is built from `control-api.Dockerfile`, a pure Python/uvicorn image
+(confirmed directly — `cmake: not found` inside the running container). This run's
+`BASELINE` job failed in 0.034 seconds, `configure_ok=false`, `build_ok=false`,
+`error_code=BASELINE_BUILD_FAILED` — immediate failure consistent with a missing binary,
+not a real build attempt. Confirmed, not guessed: a live `apt-get install cmake
+build-essential` inside the running worker container was attempted as a diagnostic and
+correctly failed too, because the worker container has no route off the host at all
+(`backend` is `internal: true`, the same C4 invariant that keeps repository content off any
+external inference API) — the isolation is working exactly as designed; the fix has to be
+baked into the image at build time, mirroring `control-api.Dockerfile`'s own existing
+`ARTIFACT_ROOT` precedent. This blocks every real demo scenario, including both verdicts
+this issue's acceptance criteria require: with `BASELINE` never producing a real pass,
+`FUZZ`/`PATCH_GENERATE`/`VERIFY` are never enqueued, so neither `Verified` nor `Rejected`
+is reachable through this compose stack as it exists today.
+
+**Also newly confirmed, not previously known**: `demo/repositories/` has exactly one
+fixture (`pktcfg`), and it is *already* designed to produce both verdicts this gate needs
+from a single target — `patches/candidate-a-correct-bounds-fix.patch` (intended `Verified`)
+and `patches/candidate-b-rejected-crash-only-fix.patch` (intended `Rejected`, crash
+eliminated but `test_tab_expansion` regresses), plus `candidate-c-compile-failure.patch`
+and `candidate-p-policy-rejected-out-of-scope.patch` for the compile- and policy-gate
+paths. There is no HTTP-reachable "operator-supplied candidate" endpoint anywhere in
+`api/routers/` today (grepped directly — none exists); `orchestrator/
+patch_generate_executor.py` only ever calls the live self-hosted model
+(`MODEL_GATEWAY_MODE=live`). Moot for this run regardless, since `BASELINE` never passed —
+flagged here so the eventual both-verdicts attempt does not discover this gap again from
+scratch.
+
+**Recommendation / ruling** — file a scoped follow-up: add a C/C++ toolchain (`cmake`,
+`make`/`ninja`, `gcc` or `clang` — `adapters/cpp/toolchain.py` names the exact requirement)
+to whichever target(s) of `infrastructure/compose/images/control-api.Dockerfile` the
+compose `worker` service builds from, rebuild, and re-run this exact mission
+(`repository_ref=pktcfg`, `adapter=C_CMAKE_CTEST`) to confirm `BASELINE` passes and the
+pipeline reaches `STRESS_TEST`/`FUZZ`. Devops-scoped (same authority as the on-sight fixes
+above), but sized as a real task rather than a same-session fix — not attempted here given
+this run's time budget (environment setup and debugging already ran to roughly 70 minutes
+wall-clock, over this task's own ~45-minute container/fuzzing guidance, almost entirely
+spent on the two Docker-Desktop-networking findings above, not product code). Once
+`BASELINE` passes, the immediate next question is the operator-supplied-candidate gap named
+above — CTO/product call on whether to rely on the live model producing a spontaneously bad
+candidate (D-008 already permits this) or to add a small, explicitly scoped
+operator-supplied-candidate endpoint — not decided here.
+
+**Fallback recording** — not attempted and not claimed this run either; this session has no
+screen-recording/GUI capability. The full raw terminal transcript is the closest available
+artifact. The acceptance criterion is not satisfiable by any coding-agent session and needs
+a human with screen-recording tooling.
+
+**Explicit gate verdict, posted to issue #50** — FAIL. #168's blocker is closed (real
+progress, not nothing); a new, different, devops-scoped blocker (BASELINE toolchain
+missing from the worker image) now sits in the same critical path and was reported, not
+fixed, per this run's time budget. Zero strays confirmed on teardown (`docker ps -a`
+before/after identical modulo this run's own now-removed containers).
+
+**Final approval authority (staffing the fix)** — CTO / engineering-manager, per this
+project's normal issue-staffing process; not decided here.
