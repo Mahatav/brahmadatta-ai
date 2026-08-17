@@ -4033,3 +4033,94 @@ contract (dev/finale parity, `apps/control-api`'s stated build-context boundary)
 owns per its charter, not a new architectural call — flagged here at the same level of
 formality as D-032/D-066 since it blocks/unblocks already-landed T0/T0b/T1 work and the
 upcoming T5/T7 stages.
+
+## D-071b — PR #187 (#168 T6, evidence-bundle export) security review: SEC-48 (CRITICAL) / SEC-49 (MEDIUM) filed, verdict BLOCKED · 2026-08-17 · `cybersecurity` seat
+
+**Trigger** — assigned review of PR #187 (`feat/168-t6-export`), the `JobKind.EXPORT`
+executor and evidence-bundle assembly, ahead of merge. Full findings posted as a PR
+comment (`gh pr comment 187`); this entry records the binding severity call and the
+reasoning per this seat's standing decision-record rule.
+
+**Decision** — **BLOCKED (Critical).** SEC-48 (raw subprocess output, including
+whatever secrets a verification subprocess's environment holds, reaches every one of
+`report.md`/`report.json`/`gate-matrix.json` inside the tarball a judge downloads,
+with zero redaction added at the export boundary) is a documented critical finding
+and stands as this seat's veto until fixed. SEC-49 (write-side size-cap enforced too
+late, and its own failure path orphans the oversized tarball on disk instead of
+cleaning it up) is filed alongside as MEDIUM, non-blocking on its own.
+
+**Why this is CRITICAL and not HIGH/MEDIUM** — the standing project rule this repo
+already lives by (`GateResult.detail`'s own schema docstring: "User-safe summary.
+Never raw target output, never secrets," `contracts/verdict.py:61-64`; and today's
+earlier SEC-44/SEC-45 findings on PR #175, rated CRITICAL/HIGH for an *in-system*
+exposure) already established that raw subprocess output reaching any consumer is
+unacceptable. PR #187 takes that same still-open leak (SEC-44/SEC-45 are fixed only
+on the unmerged `feat/168-t5-verify-executor` branch, commit `9ba17ec` — **not** in
+`main`, and therefore not in this PR's own history) and, for the first time, routes
+it to an external party outside the deployment entirely: a competition judge who
+downloads the exported bundle. Widening a same-system leak into an
+exfiltration-to-an-external-human channel is a strict severity increase, not a
+lateral one — this seat's authority to set severity (per its charter) is exercised
+here to hold the line at CRITICAL rather than let the T6 PR's own scope ("just
+assembly, not the leak's root cause") argue it down.
+
+**Proof, not argument** — three adversarial tests written and run against the PR's
+own worktree (`brahmadatta-ai-worktrees/driver-t6` @ `9961250`), not committed to
+the branch (scratch, deleted after the session): (1) confirmed `DATABASE_URL`
+inheritance into a verification subprocess is still live on this PR's base; (2)
+confirmed a fabricated `DATABASE_URL=...` line embedded in fake `cmake configure`
+stdout still lands verbatim in `GateMatrix.compile.detail` via the real
+`run_verification` code path; (3) confirmed that same poisoned `detail` string,
+carried through a real `record_verification` → `assemble_evidence_bundle` →
+`render_markdown`/`render_gate_matrix`/`EvidenceBundle.model_dump_json()`
+round-trip, lands verbatim in all three exported files. All three passed (i.e.
+reproduced the leak). SEC-49 proven the same way: forced
+`EVIDENCE_BUNDLE_MAX_BYTES=10`, confirmed `UnreadableArchiveError` and a full-size
+orphaned `.tar.gz` left in `EXPORT_WORKSPACE_ROOT` afterward. Full existing PR test
+suite independently re-run and confirmed green (502 passed / 9 skipped control-api,
+74 passed root, 19/19 T6-specific) — the leak is real precisely because none of the
+PR's own tests construct a `GateResult` with a realistic `detail` value
+(`orchestrator/tests/conftest.py::gate_matrix` only ever uses empty/literal
+strings). `pip-audit -r requirements.txt`: no known vulnerabilities (this PR adds no
+new dependency).
+
+**Options considered** — (a) BLOCKED, full stop, until both PR #175 merges/rebases
+under #187 *and* #187 adds its own redaction layer at the export boundary; (b)
+BLOCKED only until #175 merges, treating T6's lack of independent redaction as a
+non-blocking architectural note since the root cause is being fixed elsewhere; (c)
+CLEARED with conditions, on the theory that T6's own code is a faithful "read what's
+already there" assembly stage and the leak is entirely T5's to own.
+
+**Pros and cons** — (c) is wrong on its own terms: T6 is the stage that turns an
+in-system field into an artifact an external party receives, so it inherits the
+exposure regardless of which stage generated the unsafe value — "I only read what
+was already unsafe" does not change who ships it externally. (b) fixes the
+immediate reproduced leak but leaves the export boundary with no independent check
+against the *next* upstream stage (or gate, or future contributor) that violates
+`GateResult.detail`'s own documented contract — given this is the last code that
+runs before content leaves the system for a human outside it, trusting a docstring
+alone here is the single point of failure this review exists to catch. (a) costs
+one redaction pass at the export boundary, a small, contained change, in exchange
+for closing that single point of failure permanently rather than only for the one
+leak this session happened to find.
+
+**Cost implications** — none beyond developer time for the two fixes; no new
+dependency, no infrastructure change.
+
+**Security implications** — this decision *is* the security implication; no further
+downstream call to record.
+
+**Scalability implications** — none; both findings are about correctness/leakage on
+a fixed code path, not about load.
+
+**Recommendation / ruling** — BLOCKED (Critical) stands. Findings route back through
+`engineering-manager` to whichever developer owns #187 for the fix (sequencing onto
+#175 plus an export-boundary redaction check for SEC-48; a `finally`-block fix for
+SEC-49's orphaned tarball); re-review required before merge, per this project's own
+review-chain rule that a critical finding is waived only by written CEO risk
+acceptance recorded here — no such acceptance was sought or given.
+
+**Final approval authority** — `cybersecurity` (severity rating, per this seat's own
+charter); CTO may arbitrate a dispute over the severity call above but cannot waive
+SEC-48 unilaterally; only a written CEO risk acceptance recorded in this file can
+override the block.
