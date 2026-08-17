@@ -51,6 +51,7 @@ from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 
 from contracts.enums import (
     AnalyzerTool,
@@ -154,6 +155,14 @@ class Mission(TimestampedModel):
         default=dict, help_text="MissionPolicy, serialized from the frozen schema."
     )
 
+    # #154. Schema-only before this: `MissionCreateRequest.idempotency_key` had no
+    # backing column and nothing consumed it (D-060 §2). Nullable because most rows
+    # will never set it — an operator that does not care about replay safety pays no
+    # cost. The uniqueness that makes replay-safety real is on `Meta.constraints`
+    # below, not here: a plain `unique=True` would refuse a second *empty* value,
+    # which every mission created without a key would produce.
+    idempotency_key = models.CharField(max_length=200, null=True, blank=True)
+
     state = models.CharField(
         max_length=ENUM_MAX_LENGTH,
         choices=_choices(MissionState),
@@ -196,6 +205,19 @@ class Mission(TimestampedModel):
     class Meta:
         db_table = "mission"
         ordering = ["-created_at"]
+        constraints = [
+            # Conditional, not a plain unique=True (#154, D-060 §2): most missions
+            # have no idempotency_key at all, and a bare unique index would let only
+            # one NULL-key mission ever be created. Two concurrent creates that both
+            # supply the *same* key are the actual race this closes — see
+            # `missions.service.create_mission` for the savepoint that catches the
+            # resulting IntegrityError instead of racing a check against an insert.
+            models.UniqueConstraint(
+                fields=["idempotency_key"],
+                condition=Q(idempotency_key__isnull=False),
+                name="mission_idempotency_key_unique",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover - admin/debug convenience
         return f"{self.name} ({self.state})"
