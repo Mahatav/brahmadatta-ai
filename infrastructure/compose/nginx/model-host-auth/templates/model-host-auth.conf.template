@@ -1,0 +1,82 @@
+# model-host-auth — bearer-token gate in front of Ollama (D-075 / SEC-50).
+#
+# This is the ONLY listener inside model-host's own network namespace
+# (docker-compose*.yml: `network_mode: "service:model-host"` — same IP, same loopback,
+# same interfaces as `model-host`, not a second independent member of `backend`).
+# `model-host` binds Ollama to `127.0.0.1:11435` only (its own `OLLAMA_HOST`), so
+# nothing outside this shared namespace can reach Ollama directly any more — and this
+# server block is the only other process running inside that namespace.
+#
+# Port 11435 for Ollama, not 11434: this server block binds `11434` itself, wildcard,
+# on the shared namespace's `backend`-visible interface, and a wildcard bind there
+# collides with an exact `127.0.0.1:11434` bind in the SAME namespace at the kernel
+# level (EADDRINUSE) — verified by actually bringing this pair up. Ollama's own
+# internal port is not part of any external contract, so moving it, not nginx's
+# externally-visible one, is what keeps every OTHER container's `model-host:11434`
+# unchanged.
+#
+# Every other container on `backend` still resolves and calls `model-host:11434`
+# exactly as before this change; this server block is simply what now answers there
+# instead of Ollama answering directly. It checks `Authorization: Bearer <token>`
+# and, on a match, `proxy_pass`es to Ollama's real loopback address; on a mismatch (or
+# no header at all) it returns 401 without ever reaching Ollama.
+#
+# The MODEL_HOST_BEARER_TOKEN placeholder in the `server` block below is interpolated
+# by the nginx image's own envsubst entrypoint step
+# (docker-entrypoint.d/20-envsubst-on-templates.sh, ships in nginxinc/nginx-unprivileged,
+# no extra tooling — see ../nginx.conf's header comment) before nginx starts.
+# NGINX_ENVSUBST_OUTPUT_DIR is left at its default (/etc/nginx/conf.d), which the
+# owning compose service tmpfs-mounts specifically so the rendered file can be written
+# under an otherwise `read_only: true` root filesystem.
+#
+# NOTE for anyone editing this file: write the actual variable reference (the `$`,
+# braces, and name) EXACTLY ONCE, in the `if` condition below, and nowhere else —
+# envsubst matches it anywhere in this file, comments included, so a second mention
+# up here would get silently replaced with the real secret in the rendered output too.
+#
+# Fails closed, UNCONDITIONALLY, in every environment this file is mounted into (dev
+# and finale both — this is the same file for both, there is no profile-switch variant
+# of this specific check). docker-compose.finale.yml requires the variable (`:?`);
+# `.env.example` defaults it blank for dev on the same "unset = that credential cannot
+# authenticate at all" convention CONTROL_API_REVIEWER_TOKEN/CONTROL_API_ADMIN_TOKEN
+# already use — deliberately NOT the redis-dev "no auth mechanism active" convention,
+# because SEC-50's gate has to hold in dev too, the moment `model-host` is reachable,
+# not only in the finale deployment. An operator who wants `--profile model` in dev
+# generates a token like every other secret in .env.example and sets it first.
+
+server {
+    listen 11434;
+    listen [::]:11434;
+    server_name _;
+
+    # A chat/generate JSON payload plus a prompt is comfortably inside this; Ollama
+    # itself is the one enforcing anything larger is unreasonable.
+    client_max_body_size 16m;
+
+    location / {
+        if ($http_authorization != "Bearer ${MODEL_HOST_BEARER_TOKEN}") {
+            return 401;
+        }
+
+        proxy_pass http://127.0.0.1:11435;
+        # Ollama enforces its own Host-header allowlist (OLLAMA_ORIGINS is a DIFFERENT,
+        # Origin-header CORS check — D-075's own text on this) and refuses anything
+        # other than localhost/127.0.0.1/0.0.0.0 with a 403, regardless of
+        # authentication — verified by actually sending a request through with the
+        # caller's real Host header (`model-host:11434`, the compose service name) and
+        # watching Ollama itself reject it even though this proxy had already accepted
+        # the bearer token. Rewritten to loopback here so Ollama sees exactly the Host
+        # it already trusts.
+        proxy_set_header Host 127.0.0.1;
+        proxy_http_version 1.1;
+        # Local CPU generation can run for minutes. Mirrors
+        # gateway.ollama.OllamaCodeLlamaBackend's own 300s default timeout rather than
+        # nginx's much shorter one.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        # Ollama's /api/generate and /api/chat can stream NDJSON; do not let nginx
+        # buffer the whole thing before the first byte reaches the caller.
+        proxy_buffering off;
+    }
+}

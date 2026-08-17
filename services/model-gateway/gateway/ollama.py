@@ -27,13 +27,25 @@ CODELLAMA_REVISION = "ollama-library/codellama"
 
 @dataclass(frozen=True)
 class OllamaCodeLlamaBackend:
-    """Live backend for a local Ollama CodeLlama server."""
+    """Live backend for a local Ollama CodeLlama server.
+
+    `bearer_token` is D-075 / SEC-50: when the compose `model-host` profile is in use,
+    Ollama itself is bound to loopback only inside its own container, and a bearer-
+    token-checking nginx sidecar (`model-host-auth`, `network_mode:
+    "service:model-host"`) is the only thing that can still reach it — so requests
+    through `backend` (the compose network, e.g. `endpoint="http://model-host:11434"`)
+    now need this header or the sidecar returns 401 before Ollama ever sees the
+    request. Blank by default: a bare `ollama serve` on loopback (this class's own
+    default `endpoint`) has no auth of any kind to send, and sending no header rather
+    than an empty one is what `gateway.client._auth_headers` does with it.
+    """
 
     endpoint: str = DEFAULT_OLLAMA_ENDPOINT
     model_name: str = DEFAULT_CODELLAMA_MODEL
     model_revision: str = CODELLAMA_REVISION
     model_artifact_sha256: str = ""
     timeout_sec: float = 300.0
+    bearer_token: str = ""
 
     @property
     def served_from(self) -> str:
@@ -63,7 +75,12 @@ class OllamaCodeLlamaBackend:
         if request.seed is not None:
             payload["options"]["seed"] = request.seed
 
-        response = post_json(_endpoint_url(self.endpoint, "chat"), payload, self.timeout_sec)
+        response = post_json(
+            _endpoint_url(self.endpoint, "chat"),
+            payload,
+            self.timeout_sec,
+            bearer_token=self.bearer_token,
+        )
         wall_time_ms = int((time.perf_counter_ns() - started) / 1_000_000)
         content = _ollama_message_content(response)
         output_tokens = response.get("eval_count")

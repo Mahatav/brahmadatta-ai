@@ -286,7 +286,16 @@ services:
     <<: *hardening
     mem_limit: ${MODEL_HOST_MEM_LIMIT:-8g}
     environment:
-      OLLAMA_HOST: 0.0.0.0:11434
+      # D-075 / SEC-50: loopback-only inside this container's own network namespace.
+      # See docker-compose.yml's matching comment for the full reasoning — this is the
+      # HIGH/CRITICAL-rated fix for the finale deployment specifically (cybersecurity's
+      # SEC-50 finding on PR #197). `model-host-auth` below is the only thing that can
+      # still reach it.
+      #
+      # Port 11435, not 11434: see docker-compose.yml's matching comment — nginx binds
+      # `11434` itself, wildcard, and a wildcard bind there collides with an exact
+      # `127.0.0.1:11434` bind in the same namespace at the kernel level.
+      OLLAMA_HOST: 127.0.0.1:11435
     volumes:
       - ollama-models:/root/.ollama
     networks:
@@ -297,6 +306,35 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    restart: "no"
+
+  # model-host-auth — D-075 / SEC-50. See docker-compose.yml's matching service for the
+  # full reasoning. MODEL_HOST_BEARER_TOKEN is REQUIRED here (`:?`), the same way
+  # POSTGRES_PASSWORD/REDIS_PASSWORD already are for this file — the finale stack does
+  # not start with `--profile model` unless a real token is set.
+  model-host-auth:
+    profiles: ["model"]
+    image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+    container_name: brahmadatta-finale-model-host-auth
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+      # mode=1777: see docker-compose.yml's matching, longer comment — a bare tmpfs
+      # mount here comes back root:root 0775, unwritable by this image's uid 101.
+      - /etc/nginx/conf.d:mode=1777
+    cap_drop: ["ALL"]
+    environment:
+      MODEL_HOST_BEARER_TOKEN: ${MODEL_HOST_BEARER_TOKEN:?MODEL_HOST_BEARER_TOKEN must be set for the finale stack}
+    volumes:
+      - ./nginx/model-host-auth/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/model-host-auth/templates:/etc/nginx/templates:ro
+    network_mode: "service:model-host"
+    depends_on:
+      model-host:
+        condition: service_healthy
     restart: "no"
 
 networks:
