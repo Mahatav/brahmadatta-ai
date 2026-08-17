@@ -12,7 +12,16 @@ function" (the class of gap PR #173's review found for `TEARDOWN`):
    context-reduction retry, before an attempt is recorded as failed.
 4. Transition-policy unit tests: `infra_failure` -> `FAILED`, a `CANCELLED` job ->
    `None`, cross-checked against the real state machine.
-5. End to end through `orchestrator.queue.dispatch_terminal_jobs` — real `claim_job`/
+5. Gateway misconfiguration: the real `_build_gateway_settings`/`_build_gateway` path
+   (not the `_patch_gateway` scripted stand-in), against a real
+   `ExternalInferenceBlockedError` (an out-of-boundary `MODEL_ENDPOINT`) and a real
+   `GatewayConfigurationError` (an unset `MODEL_GATEWAY_MODE`) — the fail-closed
+   behaviour cybersecurity's PR #196 review reproduced by hand (LOW finding: "no unit
+   test exercises the gateway-misconfiguration/`infra_failure` path"). Confirms
+   `infra_failure`/`gateway_misconfigured` is set, the job fails closed, and no
+   repository content is ever built for the model (`_context_finding` must not be
+   called).
+6. End to end through `orchestrator.queue.dispatch_terminal_jobs` — real `claim_job`/
    `mark_running`/`complete_job`, the real executor, the real dispatcher — for both the
    success path (`PATCH -> VERIFY`) and the all-attempts-exhausted path
    (`PATCH -> HUMAN_REVIEW`).
@@ -319,7 +328,82 @@ def test_cancel_requested_before_start_short_circuits(mission: Mission, finding,
 
 
 # --------------------------------------------------------------------------------
-# 4. Transition-policy unit tests
+# 4. Gateway misconfiguration: fails closed, before any repository content is built.
+#
+# Unlike every test above, these two do NOT use `_patch_gateway` — that helper
+# replaces `_build_gateway_settings`/`_build_gateway` with a scripted stand-in
+# precisely so tests don't hit the real settings-validation path. Here that path is
+# the thing under test: the real `gateway.settings.from_environment` /
+# `gateway.endpoint_policy.classify` boundary check, exercised end to end through
+# the executor's own `except GatewayError` branch.
+# --------------------------------------------------------------------------------
+
+
+def test_endpoint_outside_the_boundary_fails_closed_before_any_content_is_sent(
+    mission: Mission, finding, monkeypatch
+):
+    """`MODEL_ENDPOINT` pointed at a known hosted inference provider must raise
+    `ExternalInferenceBlockedError` (a `GatewayError`) out of the real
+    `gateway.settings.from_environment` -> `gateway.endpoint_policy.classify` path,
+    and the executor must catch it, record `infra_failure`/`gateway_misconfigured`,
+    and never build repository content for the model. This is the exact scenario
+    cybersecurity's PR #196 review reproduced by hand (LOW finding: no unit test
+    covered it) — see `gateway/endpoint_policy.py::_KNOWN_HOSTED_INFERENCE_HOSTS`.
+    """
+    walk_to(mission, MissionState.PATCH)
+    monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")
+    monkeypatch.setenv("MODEL_ENDPOINT", "https://api.openai.com/v1")
+    monkeypatch.delenv("SMALL_MODEL_BASE_URL", raising=False)
+
+    def _must_not_be_called(*_a, **_kw):  # pragma: no cover - assertion by side effect
+        raise AssertionError(
+            "no repository content may be built once the gateway is misconfigured"
+        )
+
+    monkeypatch.setattr(pge, "_context_finding", _must_not_be_called)
+
+    job = _job(mission)
+    result = pge._patch_generate_executor(_ctx(mission, job))
+
+    assert result.outcome is JobOutcome.FAILED
+    assert result.error_code is ErrorCode.MODEL_CAPACITY_UNAVAILABLE
+    assert result.result["infra_failure"] is True
+    assert result.result["reason"] == "gateway_misconfigured"
+    assert "api.openai.com" in result.detail
+    assert PatchCandidate.objects.filter(mission=mission).count() == 0
+
+
+def test_unset_gateway_mode_fails_closed_before_any_content_is_sent(
+    mission: Mission, finding, monkeypatch
+):
+    """`MODEL_GATEWAY_MODE` unset is a `GatewayConfigurationError` (also a
+    `GatewayError`, per `gateway/settings.py::from_environment`'s own docstring), not
+    a live/replay ambiguity resolved silently. Same fail-closed contract as the
+    boundary-violation case above, different exception type."""
+    walk_to(mission, MissionState.PATCH)
+    monkeypatch.delenv("MODEL_GATEWAY_MODE", raising=False)
+    monkeypatch.delenv("MODEL_ENDPOINT", raising=False)
+    monkeypatch.delenv("SMALL_MODEL_BASE_URL", raising=False)
+
+    def _must_not_be_called(*_a, **_kw):  # pragma: no cover - assertion by side effect
+        raise AssertionError(
+            "no repository content may be built once the gateway is misconfigured"
+        )
+
+    monkeypatch.setattr(pge, "_context_finding", _must_not_be_called)
+
+    job = _job(mission)
+    result = pge._patch_generate_executor(_ctx(mission, job))
+
+    assert result.outcome is JobOutcome.FAILED
+    assert result.error_code is ErrorCode.MODEL_CAPACITY_UNAVAILABLE
+    assert result.result["infra_failure"] is True
+    assert result.result["reason"] == "gateway_misconfigured"
+    assert PatchCandidate.objects.filter(mission=mission).count() == 0
+
+
+# --------------------------------------------------------------------------------
+# 5. Transition-policy unit tests
 # --------------------------------------------------------------------------------
 
 
@@ -355,7 +439,7 @@ def test_transition_policy_defers_on_a_cancelled_job(mission: Mission):
 
 
 # --------------------------------------------------------------------------------
-# 5. End to end through the real dispatcher
+# 6. End to end through the real dispatcher
 # --------------------------------------------------------------------------------
 
 
