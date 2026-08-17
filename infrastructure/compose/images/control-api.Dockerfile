@@ -32,6 +32,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --gid 10001 app \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin app
 
+# BASELINE/SANITIZER_BUILD (workers/baseline/run.py) run cmake/make/ctest as a direct
+# subprocess of THIS process via packages.sandbox.Jail, not inside ContainerJail — the
+# rootless-container sandbox backend (#15) is not built in this checkout, so this image's
+# own toolchain is what BASELINE actually builds the target with. CI's cpp-adapter job
+# gets this for free from ubuntu-24.04's default image (cmake, make, gcc/g++ with
+# libasan/libubsan, patch — see .github/workflows/ci.yml's own comment); this Dockerfile
+# has to install the equivalent explicitly since python:3.12-slim-bookworm ships none of
+# it. Missing entirely until found live: the #50 D7 gate rehearsal, 2026-08-17 (run 2) —
+# BASELINE failed in 0.034s, `cmake: not found`, before this fix.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      patch \
+      libasan8 \
+      libubsan1 \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 RUN python -m venv /opt/venv
