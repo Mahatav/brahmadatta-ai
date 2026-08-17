@@ -1,21 +1,21 @@
 {
   "kind": "finale-closure-readiness",
   "schema_version": "finale-closure-readiness/1",
-  "generated_at": "2026-08-15T05:18:38.216Z",
+  "generated_at": "2026-08-17T02:49:28.922Z",
   "issues": [
     50,
     57,
     59,
     60
   ],
-  "status": "blocked",
-  "summary": "Finale closure is not claimable yet; blocked or failed checks remain.",
+  "status": "pass",
+  "summary": "Finale closure preflight has no blockers in this run.",
   "checks": [
     {
       "id": "env",
       "description": "Finale .env exists with host-local secrets",
-      "status": "blocked",
-      "detail": ".env is missing; finale-up.sh correctly refuses to boot without it.",
+      "status": "pass",
+      "detail": ".env present, mode 644.",
       "evidence": []
     },
     {
@@ -38,8 +38,8 @@
     {
       "id": "docker",
       "description": "Docker daemon is reachable for finale rehearsal",
-      "status": "blocked",
-      "detail": "docker info failed; finale stack and zero-stray checks cannot run on this host session.",
+      "status": "pass",
+      "detail": "docker info succeeded.",
       "evidence": []
     },
     {
@@ -52,32 +52,32 @@
     {
       "id": "nginx-static",
       "description": "Finale nginx profile validates statically",
-      "status": "blocked",
-      "detail": "Skipped because nginx validation runs in Docker and Docker is unavailable.",
+      "status": "pass",
+      "detail": "nginx-validate.sh finale passed.",
       "evidence": []
     },
     {
       "id": "compose-config",
       "description": "Finale compose config validates with the host .env",
-      "status": "blocked",
-      "detail": "Skipped because .env is missing.",
+      "status": "pass",
+      "detail": "docker compose config --quiet passed.",
       "evidence": []
     },
     {
       "id": "docker-strays",
       "description": "Docker container list captured for stray-process review",
-      "status": "blocked",
-      "detail": "Skipped because Docker is unavailable.",
+      "status": "pass",
+      "detail": "infra-postgres-1 Up 3 weeks\ngood_marketer_web-frontend-1 Exited (255) 3 weeks ago\ngood_marketer_web-backend-1 Exited (255) 3 weeks ago\ngood_marketer_web-ollama-pull-1 Exited (0) 4 weeks ago\ngood_marketer_web-ollama-1 Exited (255) 3 weeks ago",
       "evidence": []
     }
   ],
   "commands": [
     {
       "command": "docker info",
-      "status": 1,
+      "status": 0,
       "signal": null,
-      "stdout": "Client:\n Version:    29.6.1\n Context:    desktop-linux\n Debug Mode: false\n Plugins:\n  agent: Docker AI Agent Runner (Docker Inc.)\n    Version:  v1.88.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-agent\n  ai: Docker AI Agent - Ask Gordon (Docker Inc.)\n    Version:  v1.27.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-ai\n  buildx: Docker Buildx (Docker Inc.)\n    Version:  v0.35.0-desktop.2\n    Path:     /Users/manu/.docker/cli-plugins/docker-buildx\n  compose: Docker Compose (Docker Inc.)\n    Version:  v5.2.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-compose\n  debug: Get a shell into any image or container (Docker Inc.)\n    Version:  0.0.47\n    Path:     /Users/manu/.docker/cli-plugins/docker-debug\n  desktop: Docker Desktop commands (Docker Inc.)\n    Version:  v0.4.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-desktop\n  dhi: CLI for managing Docker Hardened Images (Docker Inc.)\n    Version:  v0.0.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-dhi\n  extension: Manages Docker extensions (Docker Inc.)\n    Version:  v0.2.31\n    Path:     /Users/manu/.docker/cli-plugins/docker-extension\n  init: Creates Docker-related starter files for your project (Docker Inc.)\n    Version:  v1.4.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-init\n  mcp: Docker MCP Plugin (Docker Inc.)\n    Version:  v0.43.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-mcp\n  model: Docker Model Runner (Docker Inc.)\n    Version:  v1.2.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-model\n  offload: Docker Offload (Docker Inc.)\n    Version:  v0.6.7\n    Path:     /Users/manu/.docker/cli-plugins/docker-offload\n  pass: Docker Pass Secrets Manager Plugin (beta) (Docker Inc.)\n    Version:  v0.1.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-pass\n  sandbox: \"docker sandbox\" is deprecated, use Docker Sandboxes instead (Docker Inc.)\n    Version:  v0.13.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-sandbox\n  scout: Docker Scout (Docker Inc.)\n    Version:  v1.22.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-scout\n\nServer:",
-      "stderr": "permission denied while trying to connect to the docker API at unix:///Users/manu/.docker/run/docker.sock",
+      "stdout": "Client:\n Version:    29.6.1\n Context:    desktop-linux\n Debug Mode: false\n Plugins:\n  agent: Docker AI Agent Runner (Docker Inc.)\n    Version:  v1.88.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-agent\n  ai: Docker AI Agent - Ask Gordon (Docker Inc.)\n    Version:  v1.27.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-ai\n  buildx: Docker Buildx (Docker Inc.)\n    Version:  v0.35.0-desktop.2\n    Path:     /Users/manu/.docker/cli-plugins/docker-buildx\n  compose: Docker Compose (Docker Inc.)\n    Version:  v5.2.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-compose\n  debug: Get a shell into any image or container (Docker Inc.)\n    Version:  0.0.47\n    Path:     /Users/manu/.docker/cli-plugins/docker-debug\n  desktop: Docker Desktop commands (Docker Inc.)\n    Version:  v0.4.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-desktop\n  dhi: CLI for managing Docker Hardened Images (Docker Inc.)\n    Version:  v0.0.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-dhi\n  extension: Manages Docker extensions (Docker Inc.)\n    Version:  v0.2.31\n    Path:     /Users/manu/.docker/cli-plugins/docker-extension\n  init: Creates Docker-related starter files for your project (Docker Inc.)\n    Version:  v1.4.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-init\n  mcp: Docker MCP Plugin (Docker Inc.)\n    Version:  v0.43.1\n    Path:     /Users/manu/.docker/cli-plugins/docker-mcp\n  model: Docker Model Runner (Docker Inc.)\n    Version:  v1.2.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-model\n  offload: Docker Offload (Docker Inc.)\n    Version:  v0.6.7\n    Path:     /Users/manu/.docker/cli-plugins/docker-offload\n  pass: Docker Pass Secrets Manager Plugin (beta) (Docker Inc.)\n    Version:  v0.1.5\n    Path:     /Users/manu/.docker/cli-plugins/docker-pass\n  sandbox: \"docker sandbox\" is deprecated, use Docker Sandboxes instead (Docker Inc.)\n    Version:  v0.13.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-sandbox\n  scout: Docker Scout (Docker Inc.)\n    Version:  v1.22.0\n    Path:     /Users/manu/.docker/cli-plugins/docker-scout\n\nServer:\n Containers: 5\n  Running: 1\n  Paused: 0\n  Stopped: 4\n Images: 40\n Server Version: 29.6.1\n Storage Driver: overlayfs\n  driver-type: io.containerd.snapshotter.v1\n Logging Driver: json-file\n Cgroup Driver: cgroupfs\n Cgroup Version: 2\n Plugins:\n  Volume: local\n  Network: bridge host ipvlan macvlan null overlay\n  Log: awslogs fluentd gcplogs gelf journald json-file local splunk syslog\n CDI spec directories:\n  /etc/cdi\n  /var/run/cdi\n Discovered Devices:\n  cdi: docker.com/gpu=webgpu\n Swarm: inactive\n Runtimes: io.containerd.runc.v2 runc\n Default Runtime: runc\n Init Binary: docker-init\n containerd version: e53c7c1516c3b2bff98eb76f1f4117477e6f4e66\n runc version: v1.3.6-0-g491b69ba\n init version: de40ad0\n Security Options:\n  seccomp\n   Profile: builtin\n  cgroupns\n Kernel Version: 6.12.76-linuxkit\n Operating System: Docker Desktop\n OSType: linux\n Architecture: aarch64\n CPUs: 10\n Total Memory: 7.653GiB\n Name: docker-desktop\n ID: 0789fc11-ca09-41e1-8a75-0c500b458fa1\n Docker Root Dir: /var/lib/docker\n Debug Mode: false\n HTTP Proxy: http.docker.internal:3128\n HTTPS Proxy: http.docker.internal:3128\n No Proxy: hubproxy.docker.internal\n Labels:\n  com.docker.desktop.address=unix:///Users/manu/Library/Containers/com.docker.docker/Data/docker-cli.sock\n Experimental: false\n Insecure Registries:\n  hubproxy.docker.internal:5555\n  ::1/128\n  127.0.0.0/8\n Live Restore Enabled: false\n Firewall Backend: iptables",
+      "stderr": "",
       "timedOut": false,
       "missing": false
     },
@@ -89,10 +89,37 @@
       "stderr": "",
       "timedOut": false,
       "missing": false
+    },
+    {
+      "command": "infrastructure/scripts/nginx-validate.sh finale",
+      "status": 0,
+      "signal": null,
+      "stdout": "=== nginx -t · profile: finale ===\n/docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration\n/docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/\n/docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh\n10-listen-on-ipv6-by-default.sh: info: /etc/nginx/conf.d/default.conf is not a file or does not exist\n/docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh\n/docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh\n/docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh\n/docker-entrypoint.sh: Configuration complete; ready for start up",
+      "stderr": "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: configuration file /etc/nginx/nginx.conf test is successful",
+      "timedOut": false,
+      "missing": false
+    },
+    {
+      "command": "docker compose --env-file /Users/manu/Documents/GitHub/brahmadatta-ai/.env -f infrastructure/compose/docker-compose.finale.yml config --quiet",
+      "status": 0,
+      "signal": null,
+      "stdout": "",
+      "stderr": "",
+      "timedOut": false,
+      "missing": false
+    },
+    {
+      "command": "docker ps -a --format {{.Names}} {{.Status}}",
+      "status": 0,
+      "signal": null,
+      "stdout": "infra-postgres-1 Up 3 weeks\ngood_marketer_web-frontend-1 Exited (255) 3 weeks ago\ngood_marketer_web-backend-1 Exited (255) 3 weeks ago\ngood_marketer_web-ollama-pull-1 Exited (0) 4 weeks ago\ngood_marketer_web-ollama-1 Exited (255) 3 weeks ago",
+      "stderr": "",
+      "timedOut": false,
+      "missing": false
     }
   ],
   "closeability": {
-    "issue_50": "blocked until finale-up and nine-step run execute successfully",
+    "issue_50": "ready-to-run-live-demo",
     "issue_57": "blocked until at least three full timed rehearsals run after issue #50 passes",
     "issue_59": "blocked on CEO decision for physical roster and registration/travel constraints",
     "issue_60": "blocked until issue #57 passes, release tag is cut, rollback is tested, and branch protection is tightened"

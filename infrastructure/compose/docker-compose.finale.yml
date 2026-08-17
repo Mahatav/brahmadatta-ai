@@ -137,7 +137,12 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94  # 17.6-alpine
+    # TLS-enabled build of the same pinned postgres digest — see images/postgres-tls.Dockerfile
+    # for why this is baked in at build time rather than bind-mounted. Required by
+    # brahmadatta.E005: APP_ENV=finale refuses to start against an unencrypted DATABASE_URL.
+    build:
+      context: .
+      dockerfile: images/postgres-tls.Dockerfile
     container_name: brahmadatta-finale-db
     <<: *hardening
     cap_drop: ["ALL"]
