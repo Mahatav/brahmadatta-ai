@@ -126,20 +126,26 @@ def test_a_body_over_djangos_memory_limit_is_413_not_500(client: Client):
     assert response.json()["trace_id"]
 
 
-def test_authenticated_read_reaches_the_stub(client: Client):
+@pytest.mark.django_db
+def test_authenticated_read_of_a_missing_mission_is_404_not_a_stub(client: Client):
+    """#154: `GET /missions/{id}` is real now. `MISSION_ID` is never created by any
+    test in this module, so the only honest answer is 404 — reaching the real
+    NOT_FOUND path (rather than the old 501 stub) is what this asserts."""
     response = client.get(f"/api/v1/missions/{MISSION_ID}", **bearer(OPERATOR))
-    assert response.status_code == 501
+    assert response.status_code == 404
     body = response.json()
-    assert body["error"]["code"] == "NOT_IMPLEMENTED"
-    assert body["error"]["details"]["tracked_by"]
+    assert body["error"]["code"] == "NOT_FOUND"
 
 
 # --- authorization ---------------------------------------------------------------
 
 
+@pytest.mark.django_db
 def test_reviewer_may_read(client: Client):
+    """A reviewer reaches the same real NOT_FOUND path an operator does — role alone
+    gates access to the read, per `require_role(request, *READ_ROLES)`."""
     response = client.get(f"/api/v1/missions/{MISSION_ID}", **bearer(REVIEWER))
-    assert response.status_code == 501
+    assert response.status_code == 404
 
 
 def test_reviewer_may_not_start_a_mission(client: Client):
