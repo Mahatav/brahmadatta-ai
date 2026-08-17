@@ -157,7 +157,17 @@ Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 - 2026-08-17 · MERGED · PR #162 (SEC-38/SEC-35 sandbox jail fixes) · #159 CLOSED
 - 2026-08-17 · MERGED · PR #161 (`preflight`/`start`/`pause`/`cancel`, rebased onto #160 post-squash) · #154 CLOSED · all 7 of 7 mission-lifecycle routers now wired; #50 unblocked
 - 2026-08-17 · MERGED · PR #157 (five-slide submission draft) · #33 · CI green after the wording-precision fix
-- 2026-08-17 · HIRED · `devops-engineer` · #50 · first live attempt at the D7 unattended gate run since #154 closed — fresh env, no-cache rebuild, real nine-step mission through the HTTP API
+- 2026-08-17 · HIRED · `devops-engineer` · #50 · first live attempt at the D7 unattended gate run since #154 closed — fresh env, no-cache rebuild, real nine-step mission through the HTTP API. Verdict: FAIL — new, deeper gap found (#168): nothing advances a mission past `VALIDATING`. Two small infra bugs fixed on the spot (demo/repositories mount, ARTIFACT_ROOT perms), PR #167.
+- 2026-08-17 · FILED · #168 · P0 · mission-stage driver gap, the actual remaining blocker on #50
+- 2026-08-17 · HIRED · `cto` · #168 · design brief (D-061) — found this is finishing #12, not new design: architecture spec + migrated `Job` model already exist with zero callers
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #168 · staffing plan (D-062) — MVP scope call (T4-lite), honest 3-day deadline-risk flag, T0 slip = critical failure mode
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #167 · review the D-032 fix (demo/repositories bind mount → build-time COPY, after CI caught the original mount violating a real architecture invariant no reviewer had caught). Verdict: APPROVE.
+- 2026-08-17 · MERGED · PR #167 (finale snapshot ingestion fix + #50 FAIL evidence) · #50
+- 2026-08-17 · MERGED · PR #169 (D-061/D-062 decision records)
+- 2026-08-17 · HIRED · `backend-developer` · #168 T0 · orchestrator tick loop — the highest-risk item, isolated worktree `driver-t0`
+- 2026-08-17 · HIRED · `backend-developer` · #168 T0b · snapshot-extraction utility, isolated worktree `driver-t0b`. Delivered PR #170 — round-trip + malicious-archive tests, 30/30 passing.
+- 2026-08-17 · HIRED · `cybersecurity` · #168 T0b · adversarial re-attack of PR #170's tar/zip extraction safety (path traversal, symlinks, setuid smuggling)
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #168 T0b · review PR #170 against D-062's scope
 
 **NOTE (2026-08-17): this log has been clobbered by concurrent agent writes twice this session** (agents with `Write`/`Edit` access reading a stale copy of this file at spawn time, then overwriting the whole file on their own save). Restored both times from the orchestrator's own record. If a hire-log entry you expect to see is missing, it may be a third occurrence — check recent PR/issue history on GitHub as the source of truth, not just this file.
 
