@@ -3324,3 +3324,142 @@ sibling error class — no `ErrorCode` contract change, consistent with D-063's 
 
 **Final approval authority** — CTO (technical), same routing as D-063; this is a
 fix to code D-063 already put through that process, not a new architectural call.
+## D-065 — T0 implementation calls: one-job-per-stage idempotency, TRIAGE driven directly by the orchestrator, and the split between the executor interface and its reference policy · 2026-08-17 · `backend-developer` seat
+
+Three calls made while implementing D-061/D-062's T0 (`orchestrator/executors.py`,
+`orchestrator/queue.py`, `manage.py run_orchestrator`/`run_worker`, PR #171), each
+non-trivial enough to record rather than leave implicit in code comments alone.
+
+### 1. "Does a `Job` row exist for (mission, kind)" is the whole idempotency check — no new column
+
+**Decision** — `ensure_jobs_enqueued` enqueues a job for a mission's current
+job-backed state only if no `Job` row exists at all for that `(mission, kind)` pair —
+not "no row in a live state." A retry (worker crash, stall) reuses the *same* row via
+`retry_job`/`reap_expired_leases` moving it back to `QUEUED`, never a second row.
+
+**Options considered** — (a) a new boolean/timestamp column on `Job` (e.g.
+`consumed_at`) marking "this terminal job already produced a transition"; (b) the
+existence check above, relying on the one-job-per-mission-per-kind invariant the
+architecture spec's own design already implies (fan-out lives *inside* one `PATCH_
+GENERATE`/`VERIFY` job, per §3.4; `BaselineReport`'s real unique constraint is the
+storage-level version of the same "one per mission" rule for `BASELINE`); (c) delete
+or archive a terminal job's row once dispatched.
+
+**Pros and cons** — (a) is the most explicit but is schema I do not own — `Job` is
+the database-engineer's fully-migrated model (D-061's own framing: "already migrated
+and tested... zero callers"), and adding a column to service an implementation detail
+of the orchestrator's own bookkeeping is exactly the kind of change my role's scope
+explicitly defers ("request changes rather than making them"). (c) would make `Job`
+rows unsuitable as the audit trail architecture spec §3.3.1 requires ("partial output
+is persisted... the morning shift never inherits a job whose only output was in a
+dead process's memory" — a deleted row is not inspectable the morning after). (b)
+costs nothing extra and falls directly out of a property the frozen design already
+establishes elsewhere (fan-out-inside-one-job, `BaselineReport`'s uniqueness) — the
+new idempotency check is a restatement of an existing invariant, not a new one.
+
+**Cost implications** — none.
+
+**Security/scalability implications** — none beyond what the existing invariant
+already covers.
+
+**Recommendation / ruling** — (b), implemented. Flag for whoever builds T1/T2 that
+this reasoning is written into `orchestrator/queue.py`'s module docstring
+("Enqueue") — a `JobKind` whose own design needs more than one row per mission per
+visit to a state (none currently do) would need this reconsidered, not silently
+worked around.
+
+**Final approval authority** — CTO (technical); low stakes, recorded because a wrong
+guess here reproduces #168's own failure shape one stage later (a duplicate-enqueue
+bug or a stuck mission), which is exactly the class of bug this whole issue exists to
+close.
+
+### 2. `TRIAGE` is driven directly by the orchestrator tick, not left unimplemented pending a `JobKind`
+
+**Decision** — `orchestrator.queue.advance_through_triage` emits `TRIAGE`'s three
+required events (`STAGE_STARTED`, a `LOG` reading "No static analyzers configured in
+this build", `STAGE_COMPLETED` — architecture spec §2.5) and transitions `TRIAGE ->
+STRESS_TEST` directly from the tick loop, rather than leaving `TRIAGE` stuck with no
+driver until T3 (owns `CORRELATE`, adjacent per D-062's task list) builds one.
+
+**Options considered** — (a) leave `TRIAGE` unhandled by T0, matching D-062's literal
+task assignment (`TRIAGE`/`CORRELATE` = T3, Day 2); (b) drive it directly from the
+tick loop now, since `JobKind` has no `TRIAGE` member at all (checked directly —
+`missions/models.py`'s `JobKind` choices) and nothing about emitting three
+deterministic, no-branching events needs a sandboxed worker.
+
+**Pros and cons** — (a) matches the staffing plan to the letter and avoids
+second-guessing a task boundary that isn't mine to move, but leaves a mission
+provably stuck at `TRIAGE` — the identical bug shape #168 itself is about — until T3
+lands, which defeats T0's own acceptance bar ("a mission... genuinely progresses...
+without manual intervention," #168's acceptance criteria) for every mission that
+reaches `BASELINE`'s far side before T3 merges. (b) closes that gap immediately, at
+the cost of one orchestrator-owned function whose behavior T3 did not design and may
+want to change (e.g. wanting `TRIAGE` to have a real `JobKind` after all, for
+uniformity, once T3 is actually staffed and looking at the whole picture).
+
+**Cost implications** — none; no new dependency, ~40 lines already written and
+tested (`orchestrator/tests/test_queue_tick.py`).
+
+**Security implications** — none; the three events are fixed strings with no
+operator- or model-derived content.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b), implemented, explicitly flagged in `orchestrator/
+queue.py`'s docstring as "T0 additive scope... flag for T3's review and replace if a
+different design is wanted" — not presented as settled. This is within my role's
+explicit authority ("module-internal structure of `orchestrator/`... the `JobKind`
+dispatch mechanism," architecture spec §1.4, "Backend developer decides") since it
+neither adds nor renames a `MissionState` or transition (`TRIAGE -> STRESS_TEST` is
+already in the frozen table) — only decides who drives an already-legal edge and how.
+
+**Final approval authority** — CTO (technical) to confirm the reading above is
+correct, or engineering-manager to fold this explicitly into T3's scope as "replace,
+not build from scratch," per D-061's own closing line that staffing/sequencing calls
+are engineering-manager's.
+
+### 3. The executor interface ships one real, tested reference policy (`FUZZ`), not zero
+
+**Decision** — `orchestrator/executors.py` registers a real `TransitionPolicy` for
+`JobKind.FUZZ` (always routes a terminal, non-infra-fault job to `CORRELATE`) rather
+than shipping every kind, including `FUZZ`, as a `NotImplementedError` stub — the
+literal reading of D-062's "one stub entry per JobKind."
+
+**Options considered** — (a) every kind stubbed, no exceptions, matching D-062's
+sentence exactly; (b) `FUZZ`'s transition policy implemented for real, everything
+else (including `FUZZ`'s own *executor* — the actual libFuzzer campaign runner)
+stubbed.
+
+**Pros and cons** — (a) is the more literal reading and avoids any risk of T0
+pre-empting T2/T3's real design. (b) is what my task's own instructions weighed
+this against directly: prioritize, in order, "the executor interface contract," "the
+claim/lock discipline with a real test," "the dispatch-and-transition wiring" — and
+name the `STRESS_TEST -> CORRELATE` trap as a required test, specifically. That trap
+cannot be exercised end-to-end through the real dispatcher (`orchestrator.queue.
+dispatch_terminal_jobs`, calling the real `transitions.transition()`) against a
+*stub* that only raises — the strongest test available for a stub is "dispatch logs
+and skips it," which proves the stub mechanism, not the routing decision. D-061 §2
+and D-062 both single out this specific routing question by name as the trap most
+likely to be gotten wrong under deadline pressure; shipping only a contract-table
+assertion (no dispatcher-level proof) would leave the actual behavior an implementer
+gets wrong unverified by anything except a static fact about the transition table.
+
+**Cost implications** — none; ~15 lines, already reviewed against the architecture
+spec's exact wording in the module's own docstring, which also states plainly that
+the two `job.result` keys it reads (`infra_failure`, `crashes_found`) are
+provisional and that T2/T3 should adjust in review rather than treat this as frozen.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b), implemented, with the deviation from "every kind
+stubbed" stated explicitly in three places (the module docstring, the `#168` issue
+comment posting the interface, and here) so it is never mistaken for a silent
+overreach into T2's or T3's actual scope — the `FUZZ` *executor* (the campaign
+runner itself) and the `CORRELATE` policy (the "nothing to bind -> `HUMAN_REVIEW`"
+decision) remain entirely unbuilt and unclaimed by T0.
+
+**Final approval authority** — CTO (technical); flagged for T2/T3 to confirm or
+correct the provisional `job.result` shape in code review rather than silently
+inherit it as frozen.

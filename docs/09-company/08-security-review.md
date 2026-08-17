@@ -4861,3 +4861,223 @@ condition are satisfied for the two specifically named findings:
 SEC-40, and SEC-41 should get their own tracked follow-up issues — recommending that now rather
 than letting them live only in this document, the same standing instruction §19's SEC-38 (nginx)
 finding was closed under.
+
+## 21. Review — 2026-08-16 · PR #171 `feat/168-t0-orchestrator-tick` · orchestrator tick loop,
+worker claim/dispatch loop (#168, T0)
+
+First security pass on this code, not a re-verification — `apps/control-api/orchestrator/
+queue.py`, `orchestrator/executors.py`, `missions/management/commands/run_orchestrator.py`,
+`run_worker.py`, plus `orchestrator/snapshot.py` and `authorization/archive.py` (T0b, merged
+into this branch) as far as T0's own call path touches them. Read `.project/decisions.md`
+D-061/D-062/D-063/D-064 first — this record assumes that context. Standing charge: this is
+mission-state-transition-adjacent code (locking, job claiming, the sole call-site for
+`orchestrator.transitions.transition()`), and the project's recurring "SEC-15-shaped" failure
+(canonical incident PR #110: verifying an id against the caller's *claim* rather than the
+locked row) is exactly what §1 below checks for.
+
+### 21.0 What I ran, for real, this session
+
+A real Postgres 16 container (`docker run postgres:16`, not SQLite — `SELECT ... FOR UPDATE
+[SKIP LOCKED]` is a no-op on SQLite, same caveat the author's own tests document), a Python 3.12
+venv with the project's exact `requirements.txt`/`requirements-dev.txt`. Confirmed the author's
+own claim first: full suite against real Postgres, **455 passed, 0 failed** (`orchestrator/`
+subset re-run standalone: **95 passed**), matching the PR description. `pip-audit -r
+requirements.txt`: **no known vulnerabilities**. All of this reproduced independently on the
+`driver-t0` worktree at `5d62dbf` (PR #171's head), not taken on report.
+
+Then six adversarial tests of my own, in a temporary, uncommitted file
+(`orchestrator/tests/test_sec171_adversarial.py` + a subprocess helper — not part of the PR,
+not pushed, listed here for the exact commands and results rather than left implicit):
+
+1. **50 real threads, one queued `Job` row, separate DB connections per thread** (harder than
+   the author's own 8-thread version). Exactly one winner, every time, across repeated runs.
+2. **6 real, separate OS processes** (`subprocess.Popen`, fresh `python` interpreter, fresh
+   `django.setup()`, fresh `psycopg` connection each — not `multiprocessing` threads-in-disguise)
+   racing one queued `Job` row. Exactly one winner. This is the closer approximation of "two
+   `run_worker` containers" the system will actually run as, and the author's own test suite
+   does not cover it.
+3. **The enqueue-side race** (see SEC-42 below) — reproduced deterministically by forcing two
+   `ensure_jobs_enqueued()` calls to overlap around the exists-check/insert window: **two `Job`
+   rows created for one `(mission, kind)` pair**, both independently claimable by two different
+   workers.
+4. **Split-brain lease fencing** (the scenario item 3 of my brief asked about directly: a worker
+   that is slow/stalled, not dead, still holding what it thinks is a valid lease after the
+   reaper reclaims it) — the *lease* mechanism itself holds: a stalled worker's late
+   `complete_job`/`heartbeat` call is correctly rejected once the reaper has requeued the job and
+   a second worker has claimed it. No finding here; recorded as a verified-clean property, not
+   skipped.
+
+### 21.1 SEC-42 (HIGH) — `ensure_jobs_enqueued`'s "does a `Job` row exist" check is a TOCTOU race with no DB-level backstop; two concurrent orchestrator ticks create duplicate `Job` rows for one `(mission, kind)`, both independently claimable
+
+**Location** — `orchestrator/queue.py:167-195` (`ensure_jobs_enqueued`) calling
+`orchestrator/queue.py:129-164` (`enqueue_job`); `missions/models.py:398-436` (`Job` — no
+`unique_together`/`UniqueConstraint` on `(mission, kind)`, confirmed by reading `Job.Meta`
+directly, only `indexes` on `(state, run_after)` and `(lease_expires_at,)`).
+
+**The defect.** `ensure_jobs_enqueued` treats "does at least one `Job` row exist for `(mission,
+kind)`" as the entire idempotency contract (D-064 §1, explicit and reasoned — "no new column"),
+but the existence check (`Job.objects.filter(...).exists()`) and the insert
+(`enqueue_job`'s `Job.objects.create(...)`) are not the same transaction and nothing locks
+between them: `enqueue_job` takes `select_for_update()` on the **`Mission`** row, not on
+anything that would serialize two callers both trying to enqueue the *same kind* for the *same
+mission* for the first time. Two callers that both read "no job yet" before either has
+committed its insert will both succeed — Postgres has no unique constraint to catch it, so this
+is silent, not a 409/`IntegrityError` a caller could catch and treat as "someone beat me to it."
+
+**Reproduced, not inferred** — §21.0 item 3 above. Two threads calling
+`orchestrator.queue.ensure_jobs_enqueued()` concurrently, forced to overlap at exactly this
+window (one paused between its `exists()` check and its `Job.objects.create()` call), produced
+**2 `Job` rows** for one `(mission=BASELINE-state mission, kind=JobKind.BASELINE)` pair, every
+run. A follow-up test confirmed the consequence: both rows are independently `claim_job`-able —
+`worker-1` and `worker-2` each successfully claimed a different one of the two duplicate rows,
+which is the literal double-execution outcome (two workers running the same `JobKind`'s executor
+concurrently against the same mission) my brief's item 3 asked about, reached by a different
+mechanism than lease-expiry-while-still-running (which, per §21.0 item 4, is *not* how this
+happens — the lease/fencing mechanism itself is sound).
+
+**Second-order SEC-15-shaped consequence.** `dispatch_terminal_jobs` (`queue.py:454-509`), the
+one function in this codebase (outside `authorization.service`) that calls
+`transitions.transition()`, resolves "the" terminal job for a mission's current kind with
+`Job.objects.filter(mission_id=..., kind=..., state__in=_TERMINAL_STATES).order_by
+("-finished_at").first()` — a heuristic ("most recently finished"), not a validated-unique
+lookup, and not itself lock-protected (reasonable on its own, since a genuinely-unique terminal
+job row is immutable once terminal — but the assumption of uniqueness is exactly what SEC-42
+breaks). If the race above produces two `Job` rows and two workers complete two divergent
+results for the same `(mission, kind)` — e.g., in this project's actual domain, two concurrent
+`FUZZ` or `VERIFY` runs disagreeing — `dispatch_terminal_jobs` silently picks whichever finished
+last and drives the mission's transition off it, discarding the other run's result with no log
+line calling out that a duplicate existed. This is the same *shape* as the PR #110 incident
+this review exists to catch (acting on a candidate selected by a claim/heuristic rather than a
+uniquely-owned locked row) even though the concrete mechanism differs from #110's.
+
+**Why HIGH and not CRITICAL.** Exploiting this requires two `run_orchestrator` processes
+(or two overlapping calls to `tick()`/`ensure_jobs_enqueued()`) racing against the same mission
+— an operational precondition, not something an external or unauthorized actor can trigger
+directly, and D-024's own design assumes exactly one `orchestrator` process. Today that
+precondition cannot even arise in the deployed system: this PR's own "Not in scope" section
+confirms no `orchestrator` compose service exists yet (`docker-compose.finale.yml`'s `worker`
+service is still the dead `rqworker` stub devops owns per D-061/D-062), so there is currently no
+way to run two. `Mission.state` itself is never at risk — `transitions.transition()` still
+correctly re-locks and validates the mission row on every call, so the worst outcome is wasted
+duplicate work and an arbitrarily-chosen result, not a mission corrupted into another mission's
+data or an unauthorized state change. That combination (real, reproduced, but not reachable in
+the system as actually deployable today) is why this is HIGH rather than a merge-blocking
+CRITICAL — but it is a real defect in code whose entire job is job-claim correctness, it will
+become reachable the moment `orchestrator` is wired into compose with any restart/rolling-deploy
+behavior devops hasn't designed yet, and the fix is small enough that shipping it now is cheaper
+than reopening this file later under deploy-day pressure.
+
+**Required fix** (not authored here — `Job` is database-engineer-owned schema per D-064 §1's own
+framing, same reasoning that kept this decision from adding a column unilaterally): add a real
+`UniqueConstraint`/`unique_together` on `Job(mission, kind)`. D-064 §1's own stated invariant —
+"a mission never legitimately needs two live jobs of the same kind" — is exactly the constraint
+a unique index enforces; `PAUSED -> X` resuming only into the state paused *from* means no
+mission ever legitimately re-enters a kind after leaving it. `ensure_jobs_enqueued` then needs
+one line changed: catch `IntegrityError` around the insert and treat it as "already enqueued,
+nothing to do" (the existence check becomes an optimization, not the correctness boundary).
+Until that lands, a cheaper stopgap that does not touch the shared schema: have
+`ensure_jobs_enqueued` take the same `select_for_update()` on the `Mission` row *before* its
+existence check (not just inside `enqueue_job`, after it), which would close the specific window
+this reproduction used, at the cost of being an application-level guarantee rather than a
+database one — the DB constraint is the fix I'd actually sign off on; the mission-lock stopgap
+is what I'd accept as an interim if the constraint needs a migration review cycle devops/database
+can't fit before this needs to ship.
+
+### 21.2 SEC-43 (MEDIUM) — `run_orchestrator` has no singleton guard; nothing in this codebase prevents the precondition SEC-42 needs
+
+**Location** — `missions/management/commands/run_orchestrator.py` (whole file). No advisory
+lock (`pg_advisory_lock`), no PID file, no leader-election check anywhere in `handle()` — the
+loop just calls `queue.tick()` on an interval forever.
+
+This is the other half of SEC-42: the reason "two orchestrator processes" is framed as an
+operational precondition rather than dismissed as impossible is that nothing in this file makes
+it impossible. D-024/D-061 *design* for exactly one `orchestrator` process but nothing
+*enforces* it — a supervisor restart that starts a new process before confirming the old one's
+`SIGTERM` handler actually exited, or an operator running `manage.py run_orchestrator` twice by
+mistake during manual ops, would both trigger SEC-42 with no error, no log line, no refusal at
+startup. Recommend a `pg_try_advisory_lock` (or equivalent) held for the process's lifetime,
+refusing to start (or blocking until acquired, logged clearly either way) if another instance
+already holds it — this is the standard fix for exactly this shape of "designed as a singleton,
+not enforced as one" gap, and is cheap relative to SEC-42's schema-constraint fix. Flagged
+separately from SEC-42 (not folded in) because it is devops/backend-developer-owned process
+wiring, not a `Job` schema change, and because closing SEC-42 alone (the DB constraint) already
+makes this gap non-exploitable even if the singleton guard is deferred — this is defense in
+depth, not a second copy of the same required fix.
+
+### 21.3 Everything else in my brief — checked, no findings
+
+- **Lease expiry / reclaim / split-brain** (brief item 3) — verified clean, reproduced live
+  (§21.0 item 4). `mark_running`, `heartbeat`, `complete_job`, `retry_job` all fence on
+  `job.lease_owner == worker_id` read from a freshly `select_for_update()`-locked row, never on
+  a caller-supplied belief about who holds the lease — this is the correct pattern, the inverse
+  of SEC-42's defect, in the same file. A worker whose lease was reclaimed while it was merely
+  slow (not dead) cannot overwrite the new owner's result or extend its own dead lease.
+- **`Job.result`/`Job.payload` content** (brief item 4) — spot-checked `orchestrator/
+  executors.py`'s one real reference policy (`_fuzz_transition_policy`, `JobKind.FUZZ`): reads
+  only `result["infra_failure"]` (bool) and documents `result["crashes_found"]` as
+  informational-only. `run_worker.py`'s `_report_result` writes `result.result` (per-executor
+  dict, per the interface contract's own "never a secret, never raw repository content" rule,
+  §"Two obligations D-061 §3 places on every executor"), plus `detail`/`error_code` — no path in
+  T0's own code writes repository content or a credential into either field. No `FUZZ`/other
+  executor bodies exist yet to audit beyond the stub (T2 territory) — flagging that this needs
+  the same check again once T1/T2/etc. land real executors, not treating T0's clean state as
+  proof for code that does not exist yet.
+- **DoS / resource exhaustion via a malformed job result** (brief item 5) — the author's own
+  flagged "retry forever on a bad policy" behavior in `dispatch_terminal_jobs` is real (a
+  `TransitionPolicy` that keeps returning an illegal target logs a full `logger.exception()`
+  traceback every tick, forever, for that one mission) but is not attacker-reachable today: no
+  external input reaches `job.result`/`Job.payload` in this PR's own code (no `JobKind` executor
+  that accepts untrusted input is built by T0), and the project's own single-mission-at-a-time
+  constraint (P2-12, reaffirmed D-062) bounds the blast radius to one mission's log volume, not
+  every mission's. LOW, tracked, not blocking — same non-blocking class as SEC-39/SEC-40 in this
+  document's prior rounds. One adjacent, also-LOW observation: `advance_out_of_validating`/
+  `advance_through_triage` (`queue.py:517-569`) swallow `ContractError` with a bare `continue`,
+  no `logger` call at all — unlike `dispatch_terminal_jobs`'s equivalent path, which does log. A
+  mission stuck on a permanently-failing guard here retries silently forever with zero
+  observability, which is a worse *debugging* experience than SEC-42/the retry-forever policy
+  case, but not a security finding on its own — noted for whoever next touches this file.
+- **Archive extraction** (`authorization/archive.py`, T0b, merged into this branch) — spot-
+  checked only as far as T0's own call path (`orchestrator/snapshot.materialize_snapshot`)
+  exercises it: `Mission.objects.get(pk=mission_id)` is not locked in `materialize_snapshot`,
+  but this is safe — `mission_id` there is `job.mission_id` off an already-claimed (and
+  therefore already row-locked-at-claim-time) `Job`, a foreign key that cannot change after the
+  row is created, not a caller's separately-supplied belief about which mission a result belongs
+  to. Not a SEC-15-shaped issue. Full re-audit of `extract_archive`'s own zip-slip/symlink/
+  decompression-bomb handling is **not reviewed** in this pass — that is D-063's own scope and
+  reads as already reasoned through in that decision record's "Security implications" section;
+  I did not independently re-attack it this round and am not claiming to have.
+
+### 21.4 What I did **not** review
+
+Dependency/container/network posture beyond `pip-audit` (no new runtime dependency landed in
+this PR — confirmed by reading `requirements.txt`'s diff, unchanged). `TRIAGE`'s stub-event
+content (fixed strings, no operator input, read directly — not worth a dedicated pass).
+`authorization/archive.py`'s own extraction internals beyond the one call path named above (see
+§21.3's last bullet). Any executor body beyond the one real `FUZZ` transition policy — there are
+none yet.
+
+### 21.5 Verdict
+
+**PASS WITH CONDITIONS.** No Critical. One HIGH (SEC-42 — duplicate `Job` rows from an
+unconstrained enqueue race, real and reproduced under real Postgres, but not reachable in the
+system as actually deployable today) and one related MEDIUM (SEC-43 — no singleton guard on
+`run_orchestrator`, the other half of the same gap). Two LOW, non-blocking, same tracked-not-
+reopened class this document already established for findings of this shape. The claim-locking
+property this PR's own tests exist to prove (`SELECT ... FOR UPDATE SKIP LOCKED`, exactly one
+winner per `Job` row) was independently reproduced, pushed harder than the author's own test (50
+threads; 6 real separate OS processes, not threads-in-one-interpreter), and holds without
+exception across every run. The split-brain lease scenario named directly in my brief was also
+independently reproduced and holds.
+
+**Conditions for full clearance** — not required to land this PR's own scope (SEC-42 is not
+reachable until an `orchestrator` service is actually run, which is explicitly out of this PR's
+scope per its own description), but required before `orchestrator` is ever deployed as, or
+alongside, more than one process:
+
+1. SEC-42 — a `UniqueConstraint` on `Job(mission, kind)` (database-engineer-owned schema,
+   backend-developer-owned call-site fix in `ensure_jobs_enqueued`).
+2. SEC-43 — a singleton guard (advisory lock or equivalent) in `run_orchestrator.py`.
+
+Recommend filing both against the `orchestrator` compose-wiring follow-up devops already owns
+per D-061/D-062 (the same ticket that will first make SEC-42's precondition reachable), so the
+fix lands before the precondition does rather than after.
