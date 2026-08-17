@@ -138,6 +138,21 @@ services:
       # deterministic tar (`authorization/archive.py`). Found running the #50 live
       # rehearsal against the finale profile, 2026-08-17; mirrored here for parity.
       - ../../demo/repositories:/demo/repositories:ro
+      # `missions/apps.py`'s `ready()` (#168 T1) imports `workers.baseline.dispatch`
+      # unconditionally on every Django process start, and that module imports
+      # `packages.sandbox` — so control-api now fails `ModuleNotFoundError: No module
+      # named 'workers'` on boot without these. `workers/`, `packages/`, `adapters/` are
+      # siblings of `apps/`, exactly like `demo/` above, and the `dev` target copies
+      # nothing in (source arrives entirely by bind mount) — so unlike the `runtime`
+      # target's `additional_contexts` fix in docker-compose.finale.yml, this is a plain
+      # bind mount here, landing at the same /app/<name> paths so dev and finale present
+      # an identical importable layout. Not :ro: unlike demo/repositories (read-only
+      # fixture data), these are live source directories other roles actively edit, and
+      # uvicorn's --reload-dir /app already picks up nested-mount changes the same way it
+      # does for /app itself. See control-api.Dockerfile's matching comment.
+      - ../../workers:/app/workers
+      - ../../packages:/app/packages
+      - ../../adapters:/app/adapters
     networks:
       # `api`, NOT `edge`. control-api shares a network with nginx and with nothing else.
       # See the networks: block — this is the fix for the Critical in the security review.
@@ -325,6 +340,11 @@ services:
     volumes:
       - ../../apps/control-api:/app
       - /app/.venv
+      # Same fix as control-api's identical mounts above — worker is the process that
+      # actually runs the stage executors, so it needs these at least as much.
+      - ../../workers:/app/workers
+      - ../../packages:/app/packages
+      - ../../adapters:/app/adapters
     networks:
       - backend
     depends_on:

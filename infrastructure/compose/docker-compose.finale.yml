@@ -93,8 +93,19 @@ services:
       # build time instead of it being bind-mounted (see that Dockerfile's comment).
       # demo/ sits outside this build's own context (apps/control-api/), so it is
       # supplied as a second, named build context rather than a path inside `context:`.
+      #
+      # workers-source/packages-source/adapters-source: the fix for the live #168/#174
+      # regression where `missions/apps.py`'s `ready()` (imported unconditionally by every
+      # Django process, including this one) raised `ModuleNotFoundError: No module named
+      # 'workers'` on every container boot — `workers/`, `packages/`, `adapters/` are
+      # siblings of `apps/`, same as `demo/`, and were never reachable from inside this
+      # build context either. See control-api.Dockerfile's matching comment for the full
+      # reasoning and fix/168-docker-build-context for the verified failure/fix.
       additional_contexts:
         demo-repositories: ../../demo/repositories
+        workers-source: ../../workers
+        packages-source: ../../packages
+        adapters-source: ../../adapters
     container_name: brahmadatta-finale-control-api
     <<: [*env-file, *hardening]
     read_only: true
@@ -215,9 +226,15 @@ services:
       dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
       target: runtime
       # Mirrors control-api's additional_contexts above — same image target, same
-      # build-time COPY of demo/repositories, same D-032 reasoning.
+      # build-time COPY of demo/repositories, same D-032 reasoning, and the same
+      # workers-source/packages-source/adapters-source fix for the #168/#174
+      # ModuleNotFoundError regression (worker needs this at least as much as
+      # control-api: it is the process that actually runs the stage executors).
       additional_contexts:
         demo-repositories: ../../demo/repositories
+        workers-source: ../../workers
+        packages-source: ../../packages
+        adapters-source: ../../adapters
     container_name: brahmadatta-finale-worker
     <<: [*env-file, *hardening]
     read_only: true

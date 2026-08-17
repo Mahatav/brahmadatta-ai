@@ -128,6 +128,42 @@ COPY --chown=app:app . /app
 # a bare `docker build` needs `--build-context demo-repositories=../../demo/repositories`.
 COPY --from=demo-repositories --chown=app:app . /demo/repositories
 
+# `missions/apps.py`'s `ready()` (#168 T1, PR #174) imports `workers.baseline.dispatch`
+# unconditionally on every Django process start — and that module imports `packages.sandbox`.
+# `ready()` runs on every entrypoint that populates the app registry (`manage.py`, ASGI/WSGI,
+# pytest-django), so this is not a BASELINE-only or worker-only concern: `control-api` itself
+# now fails to boot at all without `workers/` and `packages/` on `sys.path`.
+#
+# `config/settings/base.py` (D-066) already appends `REPO_ROOT` (`BASE_DIR.parent.parent`) to
+# `sys.path` to solve exactly this import — but that reasoning is bare-metal-only. On bare
+# metal, `apps/control-api` sits two directories below the real repo root, so
+# `BASE_DIR.parent.parent` lands on a directory that actually contains `workers/`, `packages/`,
+# `adapters/`. Inside this image `BASE_DIR` (`/app`) *is* the flattened build context — this
+# Dockerfile's own header states the context is `apps/control-api/` only — so
+# `BASE_DIR.parent.parent` resolves to the container filesystem root, which contains none of
+# them. `sys.path.append` on a nonsense path fails silently (no error, just an entry nothing
+# ever matches), so this was never caught by anything that imports settings without also
+# booting a real container: not CI (runs pytest against a full bare-metal checkout, never
+# builds this image), not `docker compose config` (validates YAML shape, never runs `docker
+# build`). Confirmed live: `docker build --target runtime ... && docker run ... manage.py
+# check` raised `ModuleNotFoundError: No module named 'workers'` before this fix, for both the
+# `dev` and `runtime` targets — see the PR for the exact output.
+#
+# Fixed the same way as `demo-repositories` two lines up, and for the identical reason (D-032):
+# named additional build contexts, so this Dockerfile's own build context stays
+# `apps/control-api/` — the contract this file's header states — while still reaching three
+# repo-root siblings of `apps/`. Copied to `/app/<name>`: plain subdirectories of `BASE_DIR`,
+# which is already at `sys.path[0]` (inserted above `REPO_ROOT` specifically to win the
+# `tools/` name collision D-066 documents), so `import workers`, `import packages`, `import
+# adapters` resolve with no further settings change — `REPO_ROOT`'s append stays in
+# `config/settings/base.py` as dead-but-harmless code for the bare-metal/CI case it was
+# actually written for. `docker compose build` resolves these automatically from both compose
+# files' `control-api` and `worker` services; a bare `docker build` needs three more
+# `--build-context NAME=PATH` flags alongside `demo-repositories`'s.
+COPY --from=workers-source --chown=app:app . /app/workers
+COPY --from=packages-source --chown=app:app . /app/packages
+COPY --from=adapters-source --chown=app:app . /app/adapters
+
 # `docker-compose.finale.yml` mounts named volumes at these two paths for the
 # content-addressed artifact store (ARTIFACT_ROOT) and the exported evidence bundle
 # store. A fresh named volume is created empty and root-owned; Docker seeds it from
