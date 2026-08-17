@@ -4895,3 +4895,141 @@ never charged against cgroup memory accounting for the untouched majority of it.
 `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`-equivalent override is needed on the `ContainerJail`
 path.** This confirms PR #188's own claim (its description states the same conclusion for the
 same reason) independently, from a different image and a different session.
+
+
+## D-076 — T4 (`JobKind.PATCH_GENERATE` executor + transition policy): T4-lite scope, attempt-scoped idempotency, and the degradation ladder living outside the gateway package · 2026-08-17 · `backend-developer` seat
+
+Implementing #168 T4 against D-061 §4's brief and D-062's T4-lite de-scoping. Four calls
+made while doing that, none of them decided verbatim by D-061/D-062.
+
+### 1. Confirmed and respected: T4-lite's boundary is the D-026 package move, nothing else
+
+D-062 de-scoped exactly one thing — "wire `PATCH_GENERATE` against the CURRENT
+`services/model-gateway` import path, NOT completing D-026's full package relocation." This
+task does not move, rename, or edit any file under `services/model-gateway/`. Every
+`gateway.*` symbol this task uses (`gateway.service.build_gateway`, `gateway.context.
+build_context`/`request_patch`, `gateway.ollama.OllamaCodeLlamaBackend`, `gateway.errors.*`)
+is consumed as-is, at its current path. The one genuinely new file this task adds inside
+`services/model-gateway/` is none — confirmed by `git diff --stat` before pushing.
+
+### 2. `sys.path`/import discipline: lazy, function-scoped, never at module top level
+
+**The finding.** `missions.apps.MissionsConfig.ready()` — the mechanism T0/T1/T7 already use
+to register a `JobKind` executor — runs on *every* process that touches `Job`/`Mission`,
+**including the ASGI process** (that file's own docstring says so directly). D-028/C5
+(`tests/architecture/test_import_direction.py::
+test_importing_the_asgi_app_does_not_load_the_gateway`) requires `gateway.*` never load
+inside the ASGI process. A `from gateway.service import ModelGateway` at the top of a module
+`ready()` imports would have broken that invariant the moment this task's own registration
+line landed — the exact "modules, not services" boundary decay that test's own docstring
+warns about, self-inflicted by a normal-looking import.
+
+**Decision** — `orchestrator/patch_generate_executor.py` (`missions/apps.py`'s new
+registration line) imports nothing from `gateway.*` at module scope. `sys.path` insertion
+(`_ensure_gateway_importable`) and every `from gateway...` import live inside function
+bodies that only `run_worker`'s claim loop ever reaches. Proven, not just argued:
+`tests/architecture/test_import_direction.py`'s full 8-test suite (including the runtime
+`config.asgi` import check) passes with this module registered.
+
+**Options considered** — (a) top-level `gateway.*` imports, relying on review discipline to
+catch any accidental ASGI reachability; (b) function-scoped imports, so the failure mode is
+structurally absent rather than reviewed-against.
+
+**Pros and cons** — (a) is what the module would look like if written the "obvious" way
+(mirroring `workers.baseline.dispatch`'s own top-level `from workers.baseline.run import
+run_baseline_stage`) and is exactly wrong here because `workers.baseline.run` is not the one
+package D-028 singles out for this restriction — `gateway` is. (b) costs one extra
+indirection per gateway call and is what `orchestrator/model_host.py`/`orchestrator/
+transitions.py` already do for a different reason (compose subprocess calls, not a security
+boundary) — here it is load-bearing, not tidiness.
+
+**Security implications** — this is the content of the decision; see above.
+
+**Final approval authority** — CTO (technical), since it touches D-028's boundary directly;
+flagging for confirmation rather than treating it as self-evidently correct.
+
+### 3. Attempt-scoped idempotency: keyed on `PatchCandidate.objects.filter(mission=...).count()`, not `Job.attempt`
+
+D-061 §3 names `PATCH_GENERATE` as the one exception to "check your stage's terminal artifact
+before doing real work," phrased as "using the job's attempt field." Read literally against
+code that did not exist yet when D-061 was written, that cannot mean the `Job.attempt` ORM
+column: `orchestrator/queue.py::ensure_jobs_enqueued` (T0, merged after D-061) states
+`PATCH_GENERATE`/`VERIFY` are "one job each with fan-out *inside* them," and
+`MAX_ATTEMPTS_BY_KIND[JobKind.PATCH_GENERATE]` is `1` — so `Job.attempt` never advances past
+`1` for this kind; a lease timeout goes straight to `FAILED` (`reap_expired_leases`), never
+back to `QUEUED`. There is no code path today that re-enters this executor for the same
+`Job` row.
+
+**Decision** — idempotency is keyed on the *internal* generation-attempt index, read from
+`PatchCandidate.objects.filter(mission=mission).count()` at the top of the executor: it
+resumes from `already + 1` rather than fanning out from `1` again. This is the property a
+hypothetical future re-entry (or a test exercising the function twice) needs, and it is what
+`test_executor_resumes_from_already_recorded_candidates_not_from_zero`/
+`test_executor_short_circuits_when_the_target_is_already_met`
+(`orchestrator/tests/test_patch_generate_executor.py`) prove directly, with a call-counting
+fake backend rather than just asserting a row count.
+
+**Options considered** — (a) treat D-061 §3's "the job's attempt field" as literally
+`Job.attempt` and key resumption on it (would always resume from `0` — vacuous, since
+`Job.attempt` never changes for this kind); (b) key on the count of `PatchCandidate` rows
+already recorded for the mission, per the reasoning above.
+
+**Recommendation / ruling** — (b). Flagged as a real deviation from D-061 §3's literal text,
+not a silent reinterpretation — the text predates the "one job, fan-out inside" design T0
+later ratified, and (a) is not implementable against the code as it actually landed.
+
+**Final approval authority** — CTO (technical), since it revises a named clause of D-061 §3.
+
+### 4. The degradation ladder (architecture spec §6.4) lives in the executor, not the gateway
+
+`services/model-gateway/gateway/client.py` has no transport retry of its own (checked
+directly), and `gateway/errors.py`'s own module docstring states the design intent plainly:
+"Degradation is the orchestrator's job... It is not the gateway's, because the gateway
+cannot tell the difference between 'the operator wants a fallback' and 'the operator wants
+the truth'." Building the retry/context-reduction ladder into `gateway.*` would have been
+both out of T4-lite's scope (touching a package D-062 says to leave alone) and against that
+package's own stated design.
+
+**Decision** — `_generate_with_ladder` (`orchestrator/patch_generate_executor.py`) implements
+all three rungs of §6.4 per fan-out attempt: the call as configured, one same-context
+transport retry, one reduced-context retry (`_reduced_code_slice` — the spec's "±40-line
+slice instead of ±120" approximated as the middle third of `Finding.code_slice`'s lines,
+since T3/CORRELATE — not yet merged to this branch — is what would define an exact
+line-window convention). `gateway.errors.LiveBackendUnavailableError` (no backend configured
+at all) skips the ladder outright rather than wasting two rungs on a fact that cannot change
+mid-ladder.
+
+**Cost implications** — none; no new runtime dependency, three iterations per attempt at
+worst, bounded by `OllamaCodeLlamaBackend`'s own per-call timeout (300s default).
+
+**Scalability implications** — none; single-mission-at-a-time, matching D-061/D-062.
+
+**Recommendation** — as implemented; `orchestrator/queue.py::default_deadline_seconds`
+gained one new branch (`JobKind.PATCH_GENERATE`, `attempts_target * 360s`, floor 1800s) so
+the job's own `deadline_at` has headroom for the worst case (up to three HTTP calls per
+attempt) without assuming it on every attempt — this is the "starting points... for T1/T3/
+T4/.../T7 to override at their own enqueue call" invitation that function's own docstring
+already names, not an unscoped change to shared infrastructure.
+
+**Also added, and flagged rather than silently folded in:**
+
+- `MissionPolicy.patch_generation_attempts` (`contracts/schemas/missions.py`), default `10`
+  — the fan-out width, matching the D6 kill criterion's supporting threshold ("at least 3 of
+  10 attempts," `docs/09-company/01-vision-and-p0-cut.md`). Not present in D-061/D-062's own
+  text; a minor API-contract addition within backend-developer's own scope of authority,
+  documented here per that role's own brief ("document every addition back into the contract
+  doc"). `packages/schemas/openapi.json` regenerated (`tools/export_openapi.py`) and
+  `contracts/tests/test_openapi_dump.py` re-passes against the new field.
+- `MODEL_ENDPOINT` env var (`.env.example`, `apps/control-api/.env.example`) — the gateway's
+  own settings module (`gateway/settings.py::from_environment`) reads `MODEL_ENDPOINT`; the
+  control API's pre-existing convention is `SMALL_MODEL_BASE_URL`
+  (`config/settings/base.py::MODEL_ENDPOINTS`). Nothing before this task wired the two
+  together. `_build_gateway_settings` falls back to `SMALL_MODEL_BASE_URL` when
+  `MODEL_ENDPOINT` is unset, so a deployment that only set the control API's own variable
+  still works — flagged for ml-infra-engineer to reconcile into one name, not decided
+  unilaterally here (same shape as D-052's own "flagged, not blocking" pattern).
+
+**Final approval authority (this whole record)** — CTO (technical), per D-061's own closing
+line for calls within a task's implementation; item 2's ASGI-import discipline and item 3's
+idempotency-key reinterpretation are flagged above for explicit confirmation since they
+revise or extend named clauses of D-061/D-028 rather than merely filling in unscoped detail.
