@@ -135,6 +135,24 @@ class RepositoryOutOfScopeError(ContractError):
     )
 
 
+class SnapshotExtractionFailedError(ContractError):
+    """A safety-checked archive still could not be written to disk (#168, T0b).
+
+    Distinct from `UnreadableArchiveError`: that one means the archive itself is
+    unsafe or unparseable and nothing should be trusted from it. This one means the
+    archive passed every content check and the failure is on the write side —
+    `ENOSPC`, a permission error, or any other `OSError` raised while materializing a
+    validated member to disk. Reuses `ErrorCode.INTERNAL_ERROR` the same way
+    `contracts.errors.MissionStateWriteError` does: this is an operational failure of
+    this deployment, not a caller mistake, so there is nothing for the caller to fix by
+    changing the request.
+    """
+
+    code = ErrorCode.INTERNAL_ERROR
+    http_status = 500
+    default_message = "The snapshot archive could not be extracted to disk."
+
+
 class InvalidOperatorInputError(ContractError):
     """Boundary validation that pydantic's length limits do not cover.
 

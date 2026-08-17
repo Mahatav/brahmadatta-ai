@@ -212,6 +212,15 @@ SNAPSHOT_STAGING_ROOT = Path(
 #: 512 MiB. The demo targets are single-digit megabytes; this is a DoS ceiling, not a
 #: realistic size, and ingestion refuses (does not truncate) the instant it is crossed.
 SNAPSHOT_MAX_BYTES = env.get_int("SNAPSHOT_MAX_BYTES", 536_870_912)
+#: Where `orchestrator.snapshot.materialize_snapshot` (#168, T0b) extracts a mission's
+#: stored snapshot archive back to disk, one fresh `<root>/<mission_id>/<uuid4>`
+#: directory per call. Kept a sibling of ARTIFACT_ROOT rather than nested inside it —
+#: extracted, writable working trees have a different lifecycle (created and torn down
+#: per stage run) than the content-addressed store (immutable, keyed by digest), and
+#: keeping them apart means a bulk cleanup of one can never touch the other.
+SNAPSHOT_WORKSPACE_ROOT = Path(
+    env.get_str("SNAPSHOT_WORKSPACE_ROOT", str(BASE_DIR / "var" / "workspaces"))
+)
 
 # --- Security headers ----------------------------------------------------------
 
