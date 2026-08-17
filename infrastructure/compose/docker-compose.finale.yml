@@ -89,6 +89,12 @@ services:
       context: ../../apps/control-api
       dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
       target: runtime          # source baked in; nothing mounted
+      # D-032: control-api.Dockerfile's `runtime` target COPYs demo/repositories in at
+      # build time instead of it being bind-mounted (see that Dockerfile's comment).
+      # demo/ sits outside this build's own context (apps/control-api/), so it is
+      # supplied as a second, named build context rather than a path inside `context:`.
+      additional_contexts:
+        demo-repositories: ../../demo/repositories
     container_name: brahmadatta-finale-control-api
     <<: [*env-file, *hardening]
     read_only: true
@@ -138,15 +144,10 @@ services:
       # above. Distinct from `evidence`: this is ingested snapshot bytes, not exported
       # evidence bundles.
       - artifacts:/var/lib/brahmadatta/artifacts
-      # `config.settings.base.SNAPSHOT_SOURCE_ROOT` defaults to `/demo/repositories`
-      # (`BASE_DIR.parent.parent / "demo" / "repositories"` inside the image). Nothing
-      # mounted that path in either compose profile before this — `source="git"`
-      # snapshot ingestion (the only way to hand the container a local demo target
-      # such as `pktcfg` without a real git remote) had never actually worked
-      # containerized, dev or finale. Read-only: the control-api process only ever
-      # reads from here to build a deterministic tar (`authorization/archive.py`),
-      # never writes. Found running the #50 live rehearsal, 2026-08-17.
-      - ../../demo/repositories:/demo/repositories:ro
+      # NOTE: no bind mount for `/demo/repositories` here — D-032 forbids a host-path
+      # mount into finale control-api. It is baked into the `runtime` image at build
+      # time instead; see the `additional_contexts` block above and
+      # control-api.Dockerfile's `COPY --from=demo-repositories`.
     networks:
       # `api`, NOT a shared ingress network. nginx is the only other member.
       - api
@@ -213,6 +214,10 @@ services:
       context: ../../apps/control-api
       dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
       target: runtime
+      # Mirrors control-api's additional_contexts above — same image target, same
+      # build-time COPY of demo/repositories, same D-032 reasoning.
+      additional_contexts:
+        demo-repositories: ../../demo/repositories
     container_name: brahmadatta-finale-worker
     <<: [*env-file, *hardening]
     read_only: true
@@ -232,7 +237,8 @@ services:
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
       - artifacts:/var/lib/brahmadatta/artifacts
-      - ../../demo/repositories:/demo/repositories:ro
+      # NOTE: no bind mount for `/demo/repositories` here — see control-api's identical
+      # note above. Baked into the image via `additional_contexts` instead.
     networks:
       - backend
     depends_on:
