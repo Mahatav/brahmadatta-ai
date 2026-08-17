@@ -2511,3 +2511,112 @@ downgraded in severity by this ruling; what changes is when they must be closed,
 
 **Final approval authority** — CTO (technical); `cybersecurity`'s PASS WITH CONDITIONS stands
 and this record is the disposition of those conditions it asked the CTO to make.
+
+---
+
+## D-060 — Design brief for #154 (wiring the 7 stubbed mission routers): three non-obvious
+calls made before either backend engineer starts
+
+Posted as a comment on #154 before hiring. Full brief there; this record is the disposition
+of the calls in it that are not simply "confirm what's already built."
+
+### 1. `preflight` is non-mutating; `start` is the only endpoint of the four that calls
+`orchestrator.transitions.transition()`
+
+**Decision** — `POST /missions/{id}/preflight` reads the locked mission row and its active
+authorization, runs the same checks `assert_transition` would run (authorization present /
+active / covers the snapshot, adapter supported, policy limits sane), and returns
+`PreflightReport` (`passed`, `checks`, `blocking_codes`) **without** calling `transition()` or
+writing `Mission.state`. `POST .../start` is the sole call that drives the mission out of
+`SNAPSHOTTED`/`VALIDATING` into the running workflow.
+
+**Options considered** — (a) preflight itself drives `SNAPSHOTTED → VALIDATING` (suggested by
+`EventType.PREFLIGHT_COMPLETED` already existing and firing on that target in
+`orchestrator/transitions.py`); (b) preflight is a read-only report, start is the only mutator.
+
+**Pros and cons** — (a) reuses an event type that already looks purpose-built for this and
+would make the "check" and "commit" the same call, which is fewer moving parts. It also means
+an operator retrying a failed preflight (fixing a policy value, calling it again) is retrying a
+state transition, not a report — a second call after the first already advanced the mission
+would need special-cased idempotency the schema gives no field for (`PreflightReport` has none),
+where StartRequest does. (b) matches what the endpoint's name and response shape actually
+promise — a report, not a commitment — and is safely re-runnable by construction, at the cost of
+leaving `EventType.PREFLIGHT_COMPLETED` either unused for now or re-purposed to fire from `start`
+instead.
+
+**Cost implications** — none; this determines which of two already-planned handlers contains a
+few lines of read-only checking logic, not new scope.
+
+**Security implications** — (b) is the humbler default per the standing rule on defaults: a
+"preflight" that silently commits a state change on a dry-run-shaped call is the overclaim-by-
+omission shape that rule exists to catch, one level removed (a UI or script that polls
+`/preflight` to display current readiness would be mutating the mission's own progress by
+polling it). (a) is not unsafe — the same lock and authorization checks still run inside
+`transition()` — but it is the more surprising contract for a caller.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (b). If `software-architect` or `engineering-manager` sees a
+concrete reason the transition table already commits to (a) — e.g. downstream code depends on
+`PREFLIGHT_COMPLETED` firing from this specific call — raise it before the transitions engineer
+starts; this is a resolvable-in-five-minutes disagreement, not one to silently code around.
+
+**Final approval authority** — CTO (technical).
+
+### 2. `idempotency_key` on mission create is net-new implementation, not existing wiring
+
+**Decision** — `MissionCreateRequest.idempotency_key` has no backing column and no consuming
+code anywhere in the repo today (confirmed by grep across `apps/control-api`); the only
+existing idempotency implementation in this area (`create_mission_snapshot`) works by content-
+hash comparison, not by a key field. The create engineer must add: a migration giving `Mission`
+an `idempotency_key` column with a **conditional** unique constraint (`UniqueConstraint(...,
+condition=Q(idempotency_key__isnull=False))`, not a plain `unique=True`, since most rows will
+have none), and the same savepoint-plus-`IntegrityError`-catch pattern already used for the
+`Artifact` race in `authorization/service.py::create_mission_snapshot` — attempt the insert,
+catch the unique violation, return the winning row's summary rather than a raw 500 or a check-
+then-act read.
+
+**Options considered** — (a) `if Mission.objects.filter(idempotency_key=key).exists(): return
+existing` then create (check-then-act); (b) DB-level conditional unique constraint plus
+catch-and-return-the-winner on the race.
+
+**Pros and cons** — (a) is simpler to write and correct in the non-racing case, but is exactly
+the TOCTOU window #154 was filed to ask about closing for mission creation specifically — two
+concurrent creates with the same key both pass the `exists()` check and both create a row. (b)
+costs one migration and mirrors a pattern already proven correct and reviewed elsewhere in this
+codebase, so it isn't a novel pattern for a reviewer to evaluate.
+
+**Cost implications** — one migration, reviewed as part of the create-mission PR.
+
+**Security implications** — this is the SEC-15-adjacent case named in the assignment: creation
+allowed to race with the same idempotency key produces two `Mission` rows for what the operator
+believed was one request. (b) closes it at the database, the only place that's actually
+race-proof.
+
+**Scalability implications** — negligible; one indexed nullable column.
+
+**Recommendation / ruling** — (b), mandatory. (a) is not an acceptable substitute — flag it in
+review if seen.
+
+**Final approval authority** — CTO (technical).
+
+### 3. `orchestrator/transitions.py::transition()` doesn't translate `Mission.DoesNotExist` —
+fix before wiring any of the four transition-calling endpoints
+
+**Finding, not really a choice** — `transition()`'s own `Mission.objects.select_for_update()
+.get(pk=mission_id)` has no `except Mission.DoesNotExist` (unlike `authorization/service.py::
+_lock_mission`, which does and raises `MissionNotFoundError`). Every existing caller
+(`authorize_mission`, `create_mission_snapshot`) pre-locks through its own guard first, so this
+path has never actually been hit by a bad id in production or review. `preflight`/`start`/
+`pause`/`cancel` would be the first callers to invoke `transition()` directly — a bad mission_id
+would fall through to the generic `Exception` handler in `api/errors.py` and come back as an
+unlabeled 500, not the `404` every other mission-not-found path returns.
+
+**Ruling** — fix once, at the source, mirroring `_lock_mission`'s catch, before wiring the four
+endpoints on top of it. This is cheaper and more correct than each of the four handlers
+duplicating an existence pre-check (which would also reopen the exact check-then-act window
+`authorization/service.py`'s own docstring warns against). Owned by the transitions engineer,
+since it's a one-line change in the file both new endpoints they're building call into.
+
+**Final approval authority** — CTO (technical); low enough stakes not to need a fuller record,
+included here because it blocks correct behavior on day one otherwise.
