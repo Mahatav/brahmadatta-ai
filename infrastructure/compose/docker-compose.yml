@@ -322,6 +322,22 @@ services:
   # below would crash-loop and bury every other service's logs. It becomes a default
   # service in the same commit that adds the dependency. See D-018 in
   # .project/decisions.md.
+  #
+  # #189 / D-072: this service CANNOT run FUZZ jobs (`packages.sandbox.container.
+  # ContainerJail`) as built today, and that is a real, unresolved gap, not an oversight
+  # papered over by the SANDBOX_FUZZ_IMAGE line below. `ContainerJail.run` shells out to
+  # a `docker` binary on PATH against a reachable docker daemon; this image
+  # (control-api.Dockerfile) has neither, and D-024 condition 4 forbids the obvious fix
+  # (bind-mounting /var/run/docker.sock into this container — that is full host-root
+  # equivalence for anything that can reach this container, the exact hole
+  # FORBIDDEN_SOCKET_PATHS/test_container_isolation.py exist to catch). A working FUZZ
+  # execution host is therefore a separate decision from "does a pinned image exist" —
+  # e.g. a process running directly on a docker-capable host (the same model this
+  # session's own real-campaign verification and packages/sandbox/tests/
+  # test_container_jail.py already use), or a dedicated sandbox-executor host reachable
+  # over a TLS-secured remote docker context. Neither is built. Flagged for the architect/
+  # orchestrator owner, not solved here — #189's scope is the image and its pinning, not
+  # this service's deployment topology.
   # ---------------------------------------------------------------------------
   worker:
     profiles: ["worker"]
@@ -336,6 +352,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://brahmadatta:brahmadatta-dev@db:5432/brahmadatta}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       PYTHONPATH: /app
+      # #189: threaded through so it is visible here even though THIS service cannot
+      # currently act on it — see the comment block above `worker:` for why.
+      SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:
       - ../../apps/control-api:/app

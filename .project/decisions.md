@@ -4729,3 +4729,169 @@ backend-developer's scope. The `Finding`-model integration named as a fast-follo
 is incomplete" in `orchestrator/correlate_executor.py`'s own docstring) needs no separate
 sign-off — it activates automatically once T2 lands `record_finding`, and is flagged here so
 that landing is not mistaken for a silent gap.
+
+
+## D-072 — Pinned fuzzing-toolchain image (#189, P0): base toolchain, digest-pinning mechanism for a self-built image, and the FUZZ-execution-host gap it surfaced · 2026-08-17 · `devops-engineer` seat
+
+**Decision** — Built `infrastructure/compose/images/fuzz-toolchain.Dockerfile`: `ubuntu:24.04`
+(pinned by index digest) plus `clang` (resolves to clang-18 on noble), `cmake`, `make`, and
+`libclang-rt-18-dev` (the compiler-rt package providing `libclang_rt.fuzzer-*.a` /
+`.asan-*.a` / `.ubsan_standalone-*.a`), fixed uid/gid 10001 matching `ContainerJailPolicy`'s
+own default. Added `infrastructure/scripts/build-fuzz-image.sh` to build it and resolve a
+`name@sha256:<64 hex>` reference `adapters/cpp/toolchain.py::require_pinned` accepts. Added
+`SANDBOX_FUZZ_IMAGE` to the root `.env.example` (empty by default — no safe default for
+running untrusted code) and threaded it through both compose files' `worker` service, with an
+explicit note that the compose `worker` service cannot currently act on it (§3 below). Added
+`workers/fuzzing/tests/test_real_campaign.py`, a real (not mocked) end-to-end test: builds the
+image for real, runs `run_fuzzing_stage` → `run_libfuzzer_campaign` → `ContainerJail` → a real
+`docker run` with the full D-024 flag set, against `demo/repositories/pktcfg`'s real seeded
+heap-buffer-overflow. Opt-in (`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1`), mirroring
+`finale-egress-evidence.sh`'s precedent for "real infra, real time" checks that do not belong
+in default per-PR CI.
+
+### 1. Toolchain: match CI's own Linux/Clang-18 signal, not a new pin
+
+**Options considered** — (a) Ubuntu 24.04 + apt `clang`/`libclang-rt-18-dev` (what CI's
+`ubuntu-24.04` runner family already is, one distro to reason about). (b) A pinned upstream
+`llvm/llvm-project` release image. (c) Alpine + a musl Clang build (smaller image).
+
+**Pros/cons** — (a): apt-installable in ~20s, same distro family CI's `cpp-adapter` job already
+prints toolchain versions for, no new base-image trust decision. (b): more "canonical" LLVM but
+a much larger pull and a second base-image pin to track for no correctness gain — pktcfg needs
+nothing LLVM's own release doesn't also get from Ubuntu's build. (c): smaller image, but
+libFuzzer-on-musl has known linking rough edges and no existing precedent anywhere in this
+repository (every other image here is glibc-based) — a new toolchain-compatibility risk for a
+size saving that doesn't matter at this project's scale (single demo target, not a fleet).
+
+**Cost implications** — apt install adds ~15-20s to a cold build, cached thereafter; ~400 MB
+image, comparable to control-api's Python base plus its dependency set.
+
+**Security implications** — none beyond what every other apt-based Dockerfile in this repo
+already carries (dependency provenance is Ubuntu's package signing, same trust boundary as
+`gcc`/`libasan`/`libubsan` on the CI runner itself, which CI already trusts for the identical
+ASan/UBSan runtime family). The image runs the untrusted fuzzer target, never the reverse —
+D-024's container flags (`--network none`, `--cap-drop ALL`, fixed non-root uid) are supplied
+by `ContainerJailPolicy` on every invocation regardless of what this image contains, so a
+compromised toolchain package would still be network-isolated and non-root at worst.
+
+**Scalability implications** — none; one image, rebuilt on Dockerfile change, cached otherwise.
+
+**Recommendation** — (a), implemented.
+
+**Final approval authority** — CTO (technical).
+
+### 2. Pinning a self-built image by digest: local `RepoDigest` (no registry) vs. a push
+
+**Decision** — `build-fuzz-image.sh` tries `docker inspect --format='{{index .RepoDigests 0}}'`
+on the freshly built local tag first, and only falls back to pushing to an operator-supplied
+`FUZZ_IMAGE_REGISTRY` if that is empty.
+
+**Why this is a real decision and not a formality** — every other digest pin in this repository
+(`postgres@sha256:...`, `nginxinc/nginx-unprivileged@sha256:...`, `python@sha256:...`) pins an
+UPSTREAM image whose digest came from a registry round-trip that already happened (`docker
+pull`). This is the first image built *by this repository* that Python code
+(`ContainerJailPolicy.image` via `adapters/cpp/toolchain.py::require_pinned`) must reference
+by digest — no prior Dockerfile here needed that. Whether a bare local build produces a usable
+digest with NO push is a property of the daemon's image store, checked directly in this
+session, not assumed: this machine's Docker Desktop uses the containerd image store
+(`driver-type: io.containerd.snapshotter.v1`, confirmed via `docker info`), under which a local
+build is content-addressed immediately — `docker inspect` returned a real `name@sha256:...`
+`RepoDigest` with no push, and `docker run` against that exact string, with the full D-024 flag
+set, worked. The classic overlay2 graphdriver (still the default on plain `apt install
+docker.io`, and on GitHub-hosted `ubuntu-24.04` runners as of this writing) does NOT populate a
+`RepoDigest` for a local-only image — that path needs an actual registry push, which is why the
+script supports `FUZZ_IMAGE_REGISTRY` rather than assuming the free path always works.
+
+**Options considered** — (a) local `RepoDigest`, registry-push fallback (chosen). (b) always
+push to a registry, unconditionally. (c) relax `require_pinned` to also accept a bare image ID
+(`sha256:<64 hex>` with no `name@` prefix) so no registry is ever needed.
+
+**Pros/cons** — (a): zero infrastructure cost on a containerd-backed host (this session's), a
+documented, actionable path (`FUZZ_IMAGE_REGISTRY`) on hosts that need it, and it never
+silently guesses which case applies — always states which path it took, on stderr. (b): works
+everywhere uniformly, but forces every operator (including this session's own containerd-store
+host, which does not need it) to stand up or have credentials for a registry just to iterate on
+this one image, for no correctness gain over (a). (c): weakens `require_pinned`'s own stated
+purpose — a bare image ID pins locally but is not portable across hosts/registries the way a
+`name@sha256:` reference is, and it is a change to a file this task's role does not own
+(`adapters/cpp/toolchain.py`, compiler-toolchain-engineer's), so out of scope regardless of
+merit.
+
+**Cost implications** — (a) as chosen: $0 on a containerd-store host (this project's actual dev
+host). A registry, if ever needed for a graphdriver-based deploy target, is a small additional
+line item (`registry:3`, or an existing container registry) — not costed here because it is not
+needed on the verified path.
+
+**Security implications** — a self-built image referenced only by a local digest is not
+independently reproducible from a fresh clone the way an upstream digest is (nobody else can
+`docker pull` this exact digest without either the same build or a shared registry) — this is
+the honest tradeoff of the free path, recorded rather than hidden: `require_pinned`'s guarantee
+("the string in the config cannot be silently repointed") still holds; "anyone anywhere can
+fetch these exact bytes" does not, until a registry is added. Flagged, not solved — matches
+this repository's own established pattern for a limitation that belongs to a scope this task
+does not own (compare `adapters/cpp/variants.py`'s `RLIMIT_AS` finding, flagged to
+`packages/sandbox`'s owner rather than solved unilaterally there).
+
+**Scalability implications** — none at this project's scale (one image, one demo target,
+finale-day operation). A multi-host or CI-distributed deploy would need the registry path
+regardless of what this decision picks, since a digest that only exists in one machine's local
+containerd content store is not reachable from a second machine by construction.
+
+**Recommendation** — (a), implemented.
+
+**Final approval authority** — CTO (technical).
+
+### 3. The `worker` compose service cannot execute FUZZ jobs today — flagged, not solved here
+
+**Finding** — `packages/sandbox/container.py`'s own module docstring (D-024 condition 4) is
+explicit: `/var/run/docker.sock` must never be bind-mounted, anywhere. `ContainerJail.run`
+shells out to a `docker` binary against a reachable daemon (`_run_cli`, `subprocess.run([...,
+"run", ...])`) — that requires either a docker CLI plus a locally reachable daemon (a socket
+mount, forbidden) or a remote docker context. `docker-compose.yml`/`docker-compose.finale.yml`'s
+`worker` service is built from `control-api.Dockerfile` (a Python/uvicorn image with no `docker`
+CLI at all) and mounts no socket, by design. So even with a pinned `SANDBOX_FUZZ_IMAGE` now
+threaded through both compose files' `worker` environment, that specific containerized service
+cannot start a single `ContainerJail`-backed FUZZ job as built today — the gap #189 named
+("no pinned fuzzing-toolchain image exists... a live #50 run will still die at the FUZZ step")
+is only half closed by this task: the image now exists and is proven to work, but nothing in
+the current compose topology can invoke it from inside the containerized worker process.
+
+**Options considered, not chosen here (out of #189's scope — the image and its pinning, not
+this service's deployment topology)** — (a) run the FUZZ-dispatching process directly on a
+docker-capable host, not inside the `worker` compose container (the model this session's own
+verification and `packages/sandbox/tests/test_container_jail.py` already use). (b) a dedicated
+sandbox-executor host, reachable from `worker` via a TLS-secured remote `DOCKER_HOST`, with
+`docker` CLI added to that image. (c) bind-mount `/var/run/docker.sock` into `worker` — rejected
+outright, not merely deprioritized: this is the exact hole D-024 condition 4 and
+`FORBIDDEN_SOCKET_PATHS`/`tests/architecture/test_container_isolation.py` exist to catch, full
+host-root-equivalent access for anything that can reach the `worker` container.
+
+**Recommendation** — flag to the software-architect / orchestrator owner as a real, structural
+blocker on a live #50 FUZZ run, additional to and separate from #189's own "no image exists"
+finding, which is now resolved. Do not choose (a) vs (b) unilaterally here — that is a
+deployment-topology and, for (b), a security-posture (TLS-secured remote docker daemon) call
+this task's scope does not cover, and (c) is not on the table at all under D-024.
+
+**Cost/Security/Scalability implications** — deferred to whichever of (a)/(b) the architect
+selects; not costed here since neither is implemented in this PR.
+
+**Final approval authority** — CTO (technical) for the topology choice; cybersecurity review
+required before either (a) or (b) ships, per CLAUDE.md's standing rule for isolation-relevant
+changes.
+
+### 4. `ContainerJail`'s cgroup `--memory` vs. `packages/sandbox/jail.py`'s `RLIMIT_AS`: independently checked, not assumed
+
+Per T1/T5's and `adapters/cpp/variants.py`'s documented `RLIMIT_AS`-vs-ASan trap
+(`MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`, ~28 TiB measured on the subprocess-jail path): checked
+directly on the container path in this session, not assumed either way. `docker run --memory
+2048m` (a quarter of `ContainerJailPolicy`'s own 8192 MiB default) against this exact pinned
+image ran pktcfg's real ASan+UBSan+libFuzzer build to a real heap-buffer-overflow crash with no
+allocation failure (`peak_rss_mb: 36` in the libFuzzer output — nowhere near even the 2048 MiB
+ceiling). This is a structural property, not a coincidence of this one input size: Docker's
+`--memory` is enforced by the cgroup v2 memory controller against actual *resident* (charged)
+pages, while `RLIMIT_AS` constrains *reserved virtual address space* regardless of whether it is
+ever touched — ASan's ~28 TiB shadow-memory reservation is `mmap`'d `PROT_NONE`/lazily and is
+never charged against cgroup memory accounting for the untouched majority of it. **No
+`MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`-equivalent override is needed on the `ContainerJail`
+path.** This confirms PR #188's own claim (its description states the same conclusion for the
+same reason) independently, from a different image and a different session.

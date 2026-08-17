@@ -219,6 +219,13 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # #189 / D-072: mirrors docker-compose.yml's identical note — this service cannot run
+  # FUZZ jobs (`packages.sandbox.container.ContainerJail`) as built today. `ContainerJail`
+  # shells out to a `docker` binary against a reachable daemon; this image has neither,
+  # and D-024 condition 4 forbids bind-mounting /var/run/docker.sock in as the fix. See
+  # docker-compose.yml's `worker:` comment for the full reasoning. SANDBOX_FUZZ_IMAGE is
+  # still threaded through below so it is visible rather than silently absent, not because
+  # this service can act on it yet.
   worker:
     profiles: ["worker"]
     build:
@@ -250,6 +257,7 @@ services:
       # evidence bundle: `CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`)
       # has no `django_rq` in requirements.txt and was never reached by this rehearsal.
       ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
+      SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
