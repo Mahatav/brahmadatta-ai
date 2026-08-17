@@ -106,13 +106,16 @@ def test_dispatch_terminal_jobs_moves_an_infra_faulted_fuzz_job_to_failed(missio
 
 
 def test_dispatch_terminal_jobs_never_wedges_on_an_unregistered_kind(mission):
-    """`BASELINE`'s transition policy is still the D-062 stub (`NotImplementedError`)
-    as of T0 — dispatch must log and skip it, not raise into the caller and stop
-    every other mission's tick from running."""
+    """`PATCH_GENERATE`'s transition policy is still the D-062 stub
+    (`NotImplementedError`) — T4 is explicitly de-scoped from the MVP push per D-062,
+    so this is the one `JobKind` guaranteed to stay unregistered through the rest of
+    #168's build-out. Dispatch must log and skip it, not raise into the caller and
+    stop every other mission's tick from running. (Originally used `BASELINE`, which
+    T1 later registered a real policy for — see PR #174 review.)"""
     walk_to(mission, MissionState.BASELINE)
     Job.objects.create(
         mission=mission,
-        kind=JobKind.BASELINE,
+        kind=JobKind.PATCH_GENERATE,
         state=JobState.SUCCEEDED,
         result={"passed": True},
         run_after=NOW,
