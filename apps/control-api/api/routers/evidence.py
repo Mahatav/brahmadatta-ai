@@ -130,6 +130,14 @@ def get_verification(request: HttpRequest, mission_id: UUID, patch_id: UUID):
     "/missions/{mission_id}/evidence",
     response={200: EvidenceBundle, **ERROR_RESPONSES},
     summary="The complete evidence bundle for a mission",
+    description=(
+        "SEC-50, D-071c: this handler returns `assemble_evidence_bundle`'s result "
+        "directly, without going through `orchestrator.evidence_export` at all — it "
+        "is safe *because* `assemble_evidence_bundle` itself now sanitizes every "
+        "`GateResult.detail` before returning (not because this handler does "
+        "anything extra), so this endpoint stays safe automatically if that function "
+        "is ever called from a new site in the future too."
+    ),
     operation_id="getEvidenceBundle",
 )
 def get_evidence(request: HttpRequest, mission_id: UUID):

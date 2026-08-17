@@ -1,5 +1,13 @@
 """Independent redaction pass for `GateResult.detail` at every point it can reach an
-exported artifact (#168 T6, SEC-48, `.project/decisions.md` D-071b).
+exported artifact (#168 T6, SEC-48/SEC-50, `.project/decisions.md` D-071b/D-071c).
+
+As of SEC-50 (D-071c), this function's primary call site is `orchestrator.
+evidence_bundle.assemble_evidence_bundle` itself — upstream of both of its
+consumers, `api/routers/evidence.py::get_evidence` (which previously returned the
+raw bundle unredacted) and `orchestrator.evidence_export.export_mission` (which
+retains its own independent calls to this function as defense in depth). See
+`evidence_bundle.py`'s module docstring for the full reasoning on why the
+sanitization point moved there.
 
 `contracts/verdict.py::GateResult.detail`'s own docstring promises "User-safe summary.
 Never raw target output, never secrets." `orchestrator.verification._summarize`

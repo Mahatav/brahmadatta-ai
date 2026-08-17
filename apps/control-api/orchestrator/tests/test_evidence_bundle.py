@@ -18,7 +18,9 @@ import pytest
 
 from authorization.errors import MissionNotFoundError
 from contracts.enums import (
+    EvidenceSource,
     FuzzingMode,
+    GateName,
     GateStatus,
     LanguageAdapter,
     MissionState,
@@ -26,6 +28,7 @@ from contracts.enums import (
     PatchProvenance,
     Verdict,
 )
+from contracts.verdict import GateMatrix, GateResult
 from missions.models import (
     BaselineReport,
     FuzzingReport,
@@ -45,6 +48,15 @@ from orchestrator.tests.conftest import (
 )
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+#: The exact D-071b reproduction scenario, rebuilt here (SEC-50, D-071c): a
+#: fabricated `DATABASE_URL=postgresql://...` line spliced into captured
+#: subprocess-shaped text, on a `FAIL` gate.
+_POISONED_CONNECTION_STRING_DETAIL = (
+    "cmake configure: -- Configuring done\n"
+    "-- DATABASE_URL=postgresql://brahmadatta:s3cr3t-pw@10.0.0.5:5432/prod\n"
+    "CMake Error: could not find CMAKE_C_COMPILER exit=1"
+)
 
 
 def _two_candidate_mission(mission, finding):
@@ -302,3 +314,120 @@ def test_no_authorization_raises_evidence_unavailable(db):
     )
     with pytest.raises(EvidenceUnavailableError):
         assemble_evidence_bundle(bare.id, now=NOW)
+
+
+# ---------------------------------------------------------------------------------
+# 4. SEC-50, D-071c — sanitized at the source, not only at the export boundary
+# ---------------------------------------------------------------------------------
+#
+# `GET /missions/{id}/evidence` (`api/routers/evidence.py::get_evidence`) calls
+# `assemble_evidence_bundle` directly and returns the result as the ninja response
+# body — it never goes anywhere near `orchestrator.evidence_export`, so the SEC-48
+# fix (which only sanitized at the export boundary) left this function's raw,
+# unredacted output reaching that endpoint. This is the reviewer's exact
+# reproduction of that scenario, run directly against `assemble_evidence_bundle` and
+# serialized with `.model_dump_json()` the same way django-ninja does for the HTTP
+# response — the adversarial test the fix is proven against.
+
+
+def test_poisoned_detail_is_redacted_by_assemble_evidence_bundle_itself(mission, finding):
+    """Rebuilds the identical D-071b reproduction (a fabricated `DATABASE_URL=
+    postgresql://...` line embedded in a poisoned `compile` gate's `detail`), calls
+    `assemble_evidence_bundle` directly (exactly what `get_evidence` does, with no
+    intervening `export_mission` call), and serializes with `.model_dump_json()`
+    (exactly what django-ninja does for the response). Before the SEC-50 fix, both
+    `postgresql://` and `s3cr3t-pw` were present verbatim in this output; this test
+    fails if that regresses."""
+    walk_to(mission, MissionState.PATCH)
+    candidate = candidates.record_patch_candidate(
+        mission.id,
+        finding_id=finding.id,
+        provenance=PatchProvenance.OPERATOR_SUPPLIED,
+        diff=CANDIDATE_A.read_text(),
+        files_changed=1,
+        lines_changed=7,
+        policy_status=PatchPolicyStatus.ACCEPTED,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.VERIFY, trace_id=TRACE, now=NOW)
+    poisoned_matrix = GateMatrix(
+        compile=GateResult(
+            name=GateName.COMPILE,
+            status=GateStatus.FAIL,
+            evidence_source=EvidenceSource.TOOL_EXECUTION,
+            tool="cmake",
+            detail=_POISONED_CONNECTION_STRING_DETAIL,
+        ),
+        reproducer_eliminated=GateResult.not_run(
+            GateName.REPRODUCER_ELIMINATED,
+            "Not run: configure failed before a replay binary existed.",
+        ),
+        regression_preserved=GateResult.not_run(
+            GateName.REGRESSION_PRESERVED, "Not run: configure failed."
+        ),
+    )
+    candidates.record_verification(
+        mission.id,
+        patch_id=candidate.id,
+        gates=poisoned_matrix,
+        started_at=NOW,
+        finished_at=NOW,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.EXPORTING, trace_id=TRACE, now=NOW)
+
+    # No call to export_mission anywhere in this test — this is exactly what
+    # `get_evidence` does: read the bundle directly and hand it to the caller.
+    bundle = assemble_evidence_bundle(mission.id, now=NOW)
+    serialized = bundle.model_dump_json()  # what django-ninja serializes to the client
+
+    for fragment in ("DATABASE_URL", "postgresql://", "s3cr3t-pw", "10.0.0.5", "CMake Error"):
+        assert fragment not in serialized, (
+            f"assemble_evidence_bundle's own model_dump_json() leaked a secret-shaped "
+            f"fragment ({fragment!r}) — SEC-50 regression"
+        )
+    assert "[redacted at export boundary" in serialized
+
+    # And on the raw Python object too, not just the serialized string — proves the
+    # sanitization happened at assembly, not as an artifact of JSON encoding.
+    for record in bundle.verifications:
+        for result in record.gates.results():
+            assert "postgresql://" not in (result.detail or "")
+            assert "s3cr3t-pw" not in (result.detail or "")
+
+
+def test_benign_detail_survives_assemble_evidence_bundle_unchanged(mission, finding):
+    """The false-positive guard, at the same layer: a real, honest gate outcome —
+    including `contracts/verdict.py`'s own `_CUT_REASON`, present on every
+    `GateMatrix` by default — must survive `assemble_evidence_bundle` unredacted."""
+    walk_to(mission, MissionState.PATCH)
+    candidate = candidates.record_patch_candidate(
+        mission.id,
+        finding_id=finding.id,
+        provenance=PatchProvenance.OPERATOR_SUPPLIED,
+        diff=CANDIDATE_A.read_text(),
+        files_changed=1,
+        lines_changed=7,
+        policy_status=PatchPolicyStatus.ACCEPTED,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.VERIFY, trace_id=TRACE, now=NOW)
+    candidates.record_verification(
+        mission.id,
+        patch_id=candidate.id,
+        gates=gate_matrix(),  # all PASS, benign tool/detail — the conftest default
+        started_at=NOW,
+        finished_at=NOW,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.EXPORTING, trace_id=TRACE, now=NOW)
+
+    bundle = assemble_evidence_bundle(mission.id, now=NOW)
+    serialized = bundle.model_dump_json()
+
+    assert "[redacted at export boundary" not in serialized
+    assert "Not run: cut from the seven-day build" in serialized

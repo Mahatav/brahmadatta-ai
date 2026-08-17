@@ -32,24 +32,27 @@ byte-identical bundle content never corrupts or duplicates the artifact bytes on
 disk — only a new `Export` row (a new `export_id`, new `generated_at`) is added,
 which is the correct behaviour for a new export *request*.
 
-## Redaction at the export boundary (SEC-48, D-071b)
+## Redaction at the export boundary (SEC-48, D-071b) — now a second, redundant layer (SEC-50, D-071c)
 
-`assemble_evidence_bundle` (`orchestrator.evidence_bundle`) is upstream of this module
-and trusts `GateResult.detail`'s own schema contract — "User-safe summary. Never raw
-target output, never secrets." (`contracts/verdict.py:61-64`) — the same promise
-`orchestrator.verification._summarize` is responsible for keeping (SEC-45, on the
-still-unmerged `feat/168-t5-verify-executor` branch as of this fix). This module is
-the last code that runs before that value can leave the system entirely, inside a
-tarball handed to an external competition judge, so it does not extend that trust: as
-of this fix, `export_mission` runs every `GateResult.detail` reachable from the
-assembled bundle through `orchestrator.redaction.sanitize_detail` — an allowlist, not
-a denylist (see that module's own docstring for why) — before any of `report.md`,
-`report.json`, or `gate-matrix.json` is rendered. `render_gate_matrix` and
-`_render_gate_table` independently call the same sanitizer on the values they render,
-so both are safe even if ever called directly with an unsanitized bundle by some
-future caller — the same "don't rely on a single point" reasoning D-071b applied to
-this module's relationship with `orchestrator.verification` applies here too, one
-layer in.
+`assemble_evidence_bundle` (`orchestrator.evidence_bundle`) now sanitizes every
+`GateResult.detail` it reads *before* returning the bundle at all (SEC-50, D-071c) —
+originally this module was the only place that happened, which left `GET
+/missions/{id}/evidence` (`api/routers/evidence.py::get_evidence`, which calls
+`assemble_evidence_bundle` directly and never reaches this module) returning the raw,
+unredacted bundle. Sanitizing at the point of assembly closes that gap for every
+current and future consumer of the bundle, not just this one.
+
+This module's own redaction — `_sanitize_bundle_for_export` on the assembled bundle,
+plus `render_gate_matrix` and `_render_gate_table` independently calling
+`orchestrator.redaction.sanitize_detail` on the values they render — is therefore now
+redundant against a bundle that already arrives clean. Kept anyway, per D-071b's own
+"don't rely on a single point" reasoning, now applied one layer further out:
+`sanitize_detail` is documented idempotent specifically so stacking these calls is
+always safe and never double-mangles an already-safe value, and this module remains
+the last code that runs before a `detail` string can leave the system entirely,
+inside a tarball handed to an external competition judge — worth staying independently
+safe even if `evidence_bundle`'s own sanitization were ever weakened or bypassed by a
+future change upstream.
 
 ## Known gaps, disclosed rather than silently absorbed
 
@@ -149,8 +152,10 @@ def export_mission(
     formats = list(formats) if formats else list(DEFAULT_FORMATS)
     root = workspace_root if workspace_root is not None else default_export_workspace_root()
 
+    # SEC-50, D-071c: already sanitized by assemble_evidence_bundle itself.
     bundle = assemble_evidence_bundle(mission.id, now=now)
-    bundle = _sanitize_bundle_for_export(bundle)  # SEC-48, D-071b — see module docstring
+    # SEC-48, D-071b: redundant layer, kept as defense in depth — see module docstring.
+    bundle = _sanitize_bundle_for_export(bundle)
 
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     bundle_name = f"brahmadatta-evidence-{mission.id}-{stamp}"
@@ -264,14 +269,22 @@ def _sanitize_bundle_for_export(bundle: EvidenceBundle) -> EvidenceBundle:
     """Return a copy of `bundle` whose every `VerificationRecord.gates.*.detail` has
     been passed through `orchestrator.redaction.sanitize_detail`.
 
-    This is the single point every exported artifact's data flows through after
-    assembly: `_write_bundle_files` (`report.md` via `render_markdown`, `report.json`
-    via `EvidenceBundle.model_dump_json()`, `gate-matrix.json` via
-    `render_gate_matrix`) is always called with this function's return value, never
-    the raw output of `assemble_evidence_bundle` — closing the `model_dump_json()`
-    leak SEC-48 named specifically, which no per-renderer sanitization call could
-    close on its own (`model_dump_json()` walks the object graph directly; it does
-    not go through `render_gate_matrix`/`_render_gate_table` at all).
+    SEC-50, D-071c: `bundle` is already sanitized by the time it reaches this
+    function — `assemble_evidence_bundle` sanitizes at the point of assembly, before
+    either of its two callers (this module and `api/routers/evidence.py::get_evidence`)
+    ever sees a bundle. This call is a second, redundant pass kept as defense in
+    depth (`sanitize_detail` is idempotent, so re-running it here is always safe).
+
+    Originally (SEC-48, D-071b) this was the single point every exported artifact's
+    data flowed through after assembly: `_write_bundle_files` (`report.md` via
+    `render_markdown`, `report.json` via `EvidenceBundle.model_dump_json()`,
+    `gate-matrix.json` via `render_gate_matrix`) is always called with this
+    function's return value, never the raw output of `assemble_evidence_bundle` —
+    that property is what closed the `model_dump_json()` leak SEC-48 named
+    specifically (no per-renderer sanitization call could close it alone, since
+    `model_dump_json()` walks the object graph directly and never goes through
+    `render_gate_matrix`/`_render_gate_table` at all). Still true and still worth
+    keeping now that the upstream source is also clean.
 
     `EvidenceBundle` and its nested schemas (`VerificationRecord`, `GateMatrix`,
     `GateResult`) are ordinary mutable pydantic models (`extra="forbid"`, not

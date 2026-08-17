@@ -9,6 +9,32 @@ so a shape fix there is not duplicated here) and reassembled into the one schema
 judge is handed. This module is a read, never a write — `orchestrator.evidence_export`
 is the module that turns the result into durable bytes and DB rows.
 
+## Redaction at the source (SEC-48/SEC-50, D-071b/D-071c)
+
+Every `VerificationRecord.gates.*.detail` this module reads is run through
+`orchestrator.redaction.sanitize_detail` **here**, inside `assemble_evidence_bundle`
+itself, before the bundle is returned to *either* of its two callers. This was
+originally only done at the export boundary (`orchestrator.evidence_export.
+export_mission`, via `_sanitize_bundle_for_export`) — SEC-50 (D-071c) found that
+`GET /missions/{id}/evidence` (`api/routers/evidence.py::get_evidence`) calls this
+function directly and returns its result as the HTTP response, never going anywhere
+near `export_mission`, so the export-only fix left that endpoint returning the raw,
+unredacted bundle to anyone holding a `READ_ROLES` token (including `REVIEWER`, a
+read-only role) with a single authenticated `GET` and no export audit trail at all.
+
+Sanitizing here, upstream of both consumers, means neither `get_evidence` nor
+`export_mission` can forget to do it — the property D-071b's own reasoning already
+wanted for the export boundary now holds for the bundle's assembly point, which is
+the one place both call paths actually share.
+
+`evidence_export.py`'s own three redaction call sites (`_sanitize_bundle_for_export`,
+`render_gate_matrix`, `_render_gate_table`) are now redundant against a bundle that
+already comes out of this function clean — kept anyway, per D-071b's own "don't rely
+on a single point" reasoning: `sanitize_detail` is documented idempotent specifically
+so stacking these calls is always safe and never double-mangles an already-safe
+value. Same for `_gates_not_run`'s own call below, which now sanitizes an
+already-sanitized `detail` on its way into the joined string it returns.
+
 ## Honest partial data (`CLAUDE.md`'s "no decorative fake metrics" rule, applied here)
 
 A mission can legitimately reach `EXPORTING` — or be exported mid-pipeline on the
@@ -134,6 +160,7 @@ def assemble_evidence_bundle(mission_id: UUID, *, now: datetime | None = None) -
     reproducers = _all_reproducers(mission_id, findings)
     patches, _ = evidence_repository.list_patch_candidates(mission_id, limit=10_000, offset=0)
     verifications = repository.load_verifications(mission_id)
+    verifications = _sanitize_verifications(verifications)  # SEC-50, D-071c — see module docstring
 
     verdict_summary = _verdict_summary(patches, verifications)
     recommended_patch_id = _recommended_patch_id(verifications)
@@ -164,6 +191,33 @@ def assemble_evidence_bundle(mission_id: UUID, *, now: datetime | None = None) -
         isolation_mode=ISOLATION_MODE,
         tool_versions=tool_versions,
     )
+
+
+def _sanitize_verifications(verifications: list) -> list:
+    """Return a list of `VerificationRecord` copies with every gate's `detail`
+    passed through `orchestrator.redaction.sanitize_detail`.
+
+    SEC-50, D-071c: this runs *inside* `assemble_evidence_bundle`, upstream of every
+    consumer of the bundle it returns — `api/routers/evidence.py::get_evidence`
+    (which returns this function's result directly as the HTTP response) and
+    `orchestrator.evidence_export.export_mission` (which sanitizes again, defense in
+    depth) both get a bundle whose `detail` fields are already safe, rather than
+    depending on each call site remembering to sanitize on its own.
+    """
+    return [_sanitize_verification_record(record) for record in verifications]
+
+
+def _sanitize_verification_record(record):
+    """`VerificationRecord`/`GateMatrix`/`GateResult` are ordinary mutable pydantic
+    models (`extra="forbid"`, not `frozen`) — `model_copy(deep=True)` plus direct
+    attribute assignment on the copy is safe and does not re-trigger
+    `VerificationRecord`'s own `_verdict_follows_from_gates` validator (construction-
+    time only; this never touches `.status`, only `.detail`, so the derived verdict
+    already recorded on `record` is never invalidated)."""
+    sanitized = record.model_copy(deep=True)
+    for result in sanitized.gates.results():
+        result.detail = sanitize_detail(result.detail)
+    return sanitized
 
 
 def _optional(reader, mission_id: UUID):
@@ -267,12 +321,16 @@ def _gates_not_run(verifications) -> list[str]:
     SEC-48 / D-071b: `result.detail` is run through `orchestrator.redaction.
     sanitize_detail` *here*, before it is spliced into the plain string this function
     returns — once that splice happens there is no field boundary left for a later
-    redaction pass to find; the export boundary (`orchestrator.evidence_export`) never
-    sees `GateResult.detail` as its own value for these entries, only this already-
-    joined string, so this is the one and only place this particular leak path can be
-    closed. See `orchestrator/redaction.py`'s module docstring for the full reasoning
-    (independent of, and in addition to, `orchestrator.evidence_export`'s own
-    redaction of every other `detail` it renders or serializes)."""
+    redaction pass to find; nothing downstream of this function ever sees
+    `GateResult.detail` as its own value for these entries again, only this already-
+    joined string. `verifications` is already sanitized by the time it reaches this
+    function (SEC-50, D-071c — `assemble_evidence_bundle` sanitizes at the point of
+    assembly, before either of its callers ever sees a bundle), so this call is now a
+    second, redundant pass over an already-safe value — kept anyway as defense in
+    depth (`sanitize_detail` is idempotent by design, so this is always safe) and
+    because this remains the one place this specific string-splice leak path could
+    ever be closed if the upstream call were ever removed. See `orchestrator/
+    redaction.py`'s module docstring for the full reasoning."""
     entries: list[str] = []
     for record in verifications:
         short_patch = str(record.patch_id)[:8]

@@ -298,6 +298,129 @@ def test_export_evidence_requires_operator_role(client: Client, evidence_rows):
     assert response.status_code == 403
 
 
+# ---------------------------------------------------------------------------------
+# SEC-50, D-071c: GET /evidence must be safe on its own, not only via POST /export
+# ---------------------------------------------------------------------------------
+#
+# `get_evidence` calls `assemble_evidence_bundle` directly and never touches
+# `orchestrator.evidence_export` — the SEC-48 fix, which only sanitized inside
+# `export_mission`, left this endpoint returning the raw bundle. `READ_ROLES`
+# includes REVIEWER, a read-only role with no export audit trail, so this exercises
+# the exact exploit scenario the reviewer reproduced: one authenticated GET, no
+# `POST /export` involved at all.
+
+
+_POISONED_CONNECTION_STRING_DETAIL = (
+    "cmake configure: -- Configuring done\n"
+    "-- DATABASE_URL=postgresql://brahmadatta:s3cr3t-pw@10.0.0.5:5432/prod\n"
+    "CMake Error: could not find CMAKE_C_COMPILER exit=1"
+)
+
+
+@pytest.fixture
+def poisoned_evidence_rows():
+    from datetime import timedelta
+
+    from missions.models import Authorization, Snapshot
+
+    mission = Mission.objects.create(
+        name="pktcfg-poisoned",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    Authorization.objects.create(
+        mission=mission,
+        statement="I am authorized to test this repository on behalf of the owner.",
+        granted_by="Mahatav Arora",
+        granted_at=NOW - timedelta(minutes=5),
+        expires_at=NOW + timedelta(hours=8),
+        repository_ref="file:///demo/repositories/pktcfg",
+    )
+    Snapshot.objects.create(
+        mission=mission,
+        commit_sha="0" * 40,
+        archive_sha256="d" * 64,
+        file_count=31,
+        bytes_total=120_000,
+    )
+    finding = Finding.objects.create(
+        mission=mission,
+        category=FindingCategory.HEAP_BUFFER_OVERFLOW.value,
+        severity=Severity.CRITICAL.value,
+        tool=AnalyzerTool.ADDRESS_SANITIZER.value,
+        discovery_method=DiscoveryMethod.FUZZING_CAMPAIGN.value,
+        file_path="src/decode.c",
+        line=43,
+        function="emit_tab",
+        fingerprint="asan:emit-tab-poisoned",
+        reproducible=True,
+        title="literal tab overflows decode buffer",
+        sanitizer_report="sanitized stack only",
+        code_slice="bounded source slice",
+        detected_at=NOW,
+    )
+    patch = PatchCandidate.objects.create(
+        mission=mission,
+        finding=finding,
+        provenance=PatchProvenance.OPERATOR_SUPPLIED.value,
+        diff="diff --git a/src/decode.c b/src/decode.c\n",
+        files_changed=1,
+        lines_changed=7,
+        policy_status=PatchPolicyStatus.ACCEPTED.value,
+        created_at=NOW,
+    )
+    poisoned_matrix = GateMatrix(
+        compile=GateResult(
+            name=GateName.COMPILE,
+            status=GateStatus.FAIL,
+            evidence_source=EvidenceSource.TOOL_EXECUTION,
+            tool="cmake",
+            detail=_POISONED_CONNECTION_STRING_DETAIL,
+        ),
+        reproducer_eliminated=GateResult.not_run(
+            GateName.REPRODUCER_ELIMINATED,
+            "Not run: configure failed before a replay binary existed.",
+        ),
+        regression_preserved=GateResult.not_run(
+            GateName.REGRESSION_PRESERVED, "Not run: configure failed."
+        ),
+    )
+    VerificationRecord.objects.create(
+        mission=mission,
+        patch=patch,
+        gates=poisoned_matrix.model_dump(mode="json"),
+        verdict="REJECTED",
+        started_at=NOW,
+        finished_at=NOW,
+        worktree_sha256="c" * 64,
+    )
+    return mission
+
+
+def test_get_evidence_bundle_redacts_poisoned_gate_detail_for_a_reviewer(
+    client: Client, poisoned_evidence_rows
+):
+    """SEC-50: rebuilds the exact D-071b reproduction (a fabricated `DATABASE_URL=
+    postgresql://...` line embedded in a poisoned `compile` gate's `detail`) and
+    calls `GET /evidence` — no `POST /export` anywhere in this test — as a REVIEWER,
+    the read-only, apparently-external-facing role the reviewer flagged as the exact
+    blast radius. Before the fix, both `postgresql://` and `s3cr3t-pw` were present
+    verbatim in this response body."""
+    mission = poisoned_evidence_rows
+
+    response = client.get(f"/api/v1/missions/{mission.id}/evidence", **bearer(REVIEWER))
+
+    assert response.status_code == 200
+    raw_body = response.content.decode()
+    for fragment in ("DATABASE_URL", "postgresql://", "s3cr3t-pw", "10.0.0.5", "CMake Error"):
+        assert fragment not in raw_body, (
+            f"GET /evidence leaked a secret-shaped fragment ({fragment!r}) to a "
+            f"REVIEWER — SEC-50 regression"
+        )
+    assert "[redacted at export boundary" in raw_body
+
+
 def _passing_gates() -> GateMatrix:
     def gate(name: GateName) -> GateResult:
         return GateResult(

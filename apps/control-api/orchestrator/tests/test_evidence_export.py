@@ -310,6 +310,119 @@ def test_sanitize_detail_passes_every_benign_shape_through_unchanged(detail):
 
 
 # ---------------------------------------------------------------------------------
+# 2b. The reviewer's own bare-secret probes (SEC-48 re-review, SEC-50 fix) — the
+#     module docstring's disclosed, non-blocking known limitation, re-run for real
+#     against the now-upstream sanitization to confirm this fix does not silently
+#     change that assessment in either direction.
+# ---------------------------------------------------------------------------------
+#
+# The re-review actively tried to defeat `sanitize_detail` with secret shapes
+# carrying none of the markers it checks for (no `=` outside `exit=<code>`, no
+# `://`, no PEM marker, no newline, nothing outside the allowlisted character set)
+# and found nine concrete shapes that pass through completely unredacted — every
+# category named in the review's own table. This is not the leak class SEC-48/
+# SEC-50 target (that class is always either multi-line, or carries an assignment/
+# scheme marker, or both — see `orchestrator/redaction.py`'s module docstring); the
+# review judged it non-blocking and trackable as a fast-follow, not a regression to
+# fix in this pass. This test locks that assessment in as an explicit, honest
+# expectation: it fails loudly (rather than silently) the moment `sanitize_detail`'s
+# behaviour on these shapes ever changes, in either direction — whether someone
+# accidentally closes the gap and forgets to update this test (fine, but should be
+# noticed) or accidentally widens it further (not fine).
+_BARE_SECRET_PROBES = {
+    "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+    "aws_secret_key_no_prefix": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "space_separated_key_value": "DATABASE PASSWORD hunter2 s3cr3tpw12345",
+    "openai_shaped_key": "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR",
+    "github_pat_shaped": "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+    "slack_token_shaped": "xoxb-1234567890-1234567890123-abcdefghijklmnopqrstuvwx",
+    "unpadded_base64_blob": "dGhpc2lzYXNlY3JldHZhbHVldGhhdHNob3VsZG5vdGxlYWs",
+    "jwt_shaped": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.dQw4w9WgXcQ",
+    "password_colon_style": "password: hunter2superSecretValue123",
+}
+
+
+@pytest.mark.parametrize("detail", _BARE_SECRET_PROBES.values(), ids=_BARE_SECRET_PROBES.keys())
+def test_bare_secret_probes_remain_a_disclosed_non_blocking_gap(detail):
+    """Documents, rather than silently carries, the known limitation: none of these
+    nine shapes are redacted by `sanitize_detail` today. If this assertion ever
+    starts failing because a shape got redacted, that is a welcome tightening — update
+    this test and the module docstring's "Known limitation" section together. If it
+    fails because `sanitize_detail` stopped redacting a shape it used to catch, that
+    is a real regression."""
+    assert sanitize_detail(detail) == detail, (
+        f"{detail!r} is now redacted — if intentional, update the module docstring's "
+        f"'Known limitation' section and this test together"
+    )
+
+
+def test_bare_secret_probe_also_reaches_the_full_pipeline_unredacted(
+    mission, finding, tmp_path, settings
+):
+    """The same non-blocking gap, confirmed at the full pipeline level (not just the
+    unit function) — mirrors the reviewer's own methodology. A `GateResult.detail`
+    carrying two of the bare-secret shapes above, with no `=`/`://`/newline/PEM
+    marker, lands verbatim in the real exported bundle. Not a regression: this is
+    the pre-existing, disclosed limitation, confirmed unchanged by the SEC-50 fix
+    (which sanitizes upstream using the identical `sanitize_detail` function, so a
+    shape it cannot catch here it cannot catch there either)."""
+    settings.ARTIFACT_ROOT = tmp_path / "artifacts"
+    settings.EXPORT_WORKSPACE_ROOT = tmp_path / "exports"
+
+    walk_to(mission, MissionState.PATCH)
+    candidate = candidates.record_patch_candidate(
+        mission.id,
+        finding_id=finding.id,
+        provenance=PatchProvenance.OPERATOR_SUPPLIED,
+        diff=CANDIDATE_A.read_text(),
+        files_changed=1,
+        lines_changed=7,
+        policy_status=PatchPolicyStatus.ACCEPTED,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.VERIFY, trace_id=TRACE, now=NOW)
+    bare_secret_detail = (
+        "ctest environment leak AKIAIOSFODNN7EXAMPLE "
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY exit=1"
+    )
+    matrix = GateMatrix(
+        compile=GateResult(
+            name=GateName.COMPILE,
+            status=GateStatus.FAIL,
+            evidence_source=EvidenceSource.TOOL_EXECUTION,
+            tool="ctest",
+            detail=bare_secret_detail,
+        ),
+        reproducer_eliminated=GateResult.not_run(
+            GateName.REPRODUCER_ELIMINATED, "Not run: configure failed."
+        ),
+        regression_preserved=GateResult.not_run(
+            GateName.REGRESSION_PRESERVED, "Not run: configure failed."
+        ),
+    )
+    candidates.record_verification(
+        mission.id,
+        patch_id=candidate.id,
+        gates=matrix,
+        started_at=NOW,
+        finished_at=NOW,
+        trace_id=TRACE,
+        now=NOW,
+    )
+    transitions.transition(mission.id, MissionState.EXPORTING, trace_id=TRACE, now=NOW)
+
+    export_mission(mission.id, reuse_existing=False, now=NOW)
+    artifact = Artifact.objects.get(mission=mission, kind="evidence_bundle")
+    files = _extract_bundle_files(artifact, settings.ARTIFACT_ROOT)
+
+    # Documented, not silently regressed: both bare secrets are present verbatim.
+    for filename, content in files.items():
+        assert "AKIAIOSFODNN7EXAMPLE" in content, filename
+        assert "wJalrXUtnFEMI" in content, filename
+
+
+# ---------------------------------------------------------------------------------
 # 3. SEC-49 — the cap is enforced before ingest, and the failure path cleans up
 # ---------------------------------------------------------------------------------
 
