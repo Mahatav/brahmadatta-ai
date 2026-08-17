@@ -170,3 +170,7 @@ push access. Agent work goes through the same PR and review chain as theirs.
   real command output. "Should pass" is reported as "not verified".
 - **Security work comes first** when it competes with a feature for the same slot.
 - Findings go in the issue or the PR, where the team reads them — not into the CEO's inbox.
+- 2026-08-17 · HIRED · `devops-engineer` · closeout · reviewing PR #155, standing merge-readiness duty across the fleet for this push
+- 2026-08-17 · HIRED · `cto` · closeout · design brief for #154 before backend starts, to pre-empt an SEC-15-shaped bug in the new HTTP surface
+- 2026-08-17 · HIRED · `competition-strategist` · closeout · #33, five-slide draft, independent of #154
+- 2026-08-17 · HIRED · `ui-ux-designer` · closeout · spec for pulling back #25/#52/#56 from CUT, independent of #154
