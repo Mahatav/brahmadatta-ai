@@ -167,7 +167,13 @@ Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 - 2026-08-17 · HIRED · `backend-developer` · #168 T0 · orchestrator tick loop — the highest-risk item, isolated worktree `driver-t0`
 - 2026-08-17 · HIRED · `backend-developer` · #168 T0b · snapshot-extraction utility, isolated worktree `driver-t0b`. Delivered PR #170 — round-trip + malicious-archive tests, 30/30 passing.
 - 2026-08-17 · HIRED · `cybersecurity` · #168 T0b · adversarial re-attack of PR #170's tar/zip extraction safety (path traversal, symlinks, setuid smuggling)
-- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #168 T0b · review PR #170 against D-062's scope
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #168 T0b · review PR #170 against D-062's scope. Verdict: APPROVE, conditional on rebase.
+- 2026-08-17 · HIRED · `cybersecurity` (final confirmation) · #168 T0b · re-attack the decompression-bomb fix (commit 73d8471) specifically. Verdict: CLEARED — reproduced the original bomb refused, the cross-member cumulative case, and independently verified the author's stdlib-internals claim by forging lying archive headers.
+- 2026-08-17 · MERGED · PR #170 (T0b snapshot extraction, incl. decompression-bomb fix) · #168
+- 2026-08-17 · HIRED · `engineering-manager` · #168 T0 · review PR #171 (highest-stakes review of the day). Verdict: APPROVE — independently reproduced 455/455 passing on real Postgres, confirmed the `_HeartbeatThread` bug fix, confirmed exactly 3 `transitions.transition()` call sites.
+- 2026-08-17 · HIRED · `cybersecurity` · #168 T0 · adversarial concurrency attack on the SKIP LOCKED claim mechanism — 50 threads, 6 real separate processes, split-brain lease fencing, all held. Verdict: CLEARED, with SEC-42 (HIGH, duplicate Job rows under two racing orchestrator processes — precondition doesn't exist yet) and SEC-43 (MEDIUM, no singleton guard) filed as #176/#177.
+- 2026-08-17 · MERGED · PR #171 (T0 orchestrator tick loop) · **#168's actual fix** — VALIDATING → BASELINE now genuinely drives
+- 2026-08-17 · HIRED · `engineering-manager` + `cybersecurity` (parallel) · #168 T1/T5/T7 · review the three executor PRs (#174/#175/#173) after rebase onto the merged T0/T0b. T5 (VERIFY) specifically flagged for an unsandboxed model-generated-patch-execution risk (D-067) — cybersecurity given explicit authority to make the ship/block call, not just flag it.
 
 **NOTE (2026-08-17): this log has been clobbered by concurrent agent writes twice this session** (agents with `Write`/`Edit` access reading a stale copy of this file at spawn time, then overwriting the whole file on their own save). Restored both times from the orchestrator's own record. If a hire-log entry you expect to see is missing, it may be a third occurrence — check recent PR/issue history on GitHub as the source of truth, not just this file.
 
