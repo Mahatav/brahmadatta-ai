@@ -2514,6 +2514,139 @@ and this record is the disposition of those conditions it asked the CTO to make.
 
 ---
 
+## D-057 · Dependency and compiler health get `NOT RUN` gate-style treatment outside the verdict matrix · 2026-08-16 · `ui-ux-designer`
+
+**Decision** — In the Analysis Rail's new "dependency health" and "compiler health" rows
+(#25), an entire class of check that never ran renders with the same visual weight as an unrun
+*gate* in a verdict matrix — `--bd-state-not-run`, the word `NOT RUN`, a mandatory inline
+reason — even though neither row is a member of the five-gate `VerificationRecord` schema DS-03
+was written about. Full spec in
+[`13-cut-pullback-design-spec.md`](13-cut-pullback-design-spec.md) §1.3.
+
+**Options considered** — (a) apply D-023's literal rule: anything outside a verdict matrix is an
+unproduced *value*, rendered as a quiet em dash in `--bd-text-secondary`; (b) extend DS-03's
+gate-style treatment to these two rows specifically; (c) omit the rows entirely until a real
+producer exists.
+
+**Pros and cons** — (a) is the literal reading of DS-03's own review question ("is this in a
+gate matrix?" — no) but produces exactly the failure this project has a standing rule against:
+a capability that was never wired, sitting next to ones that were, rendered in the system's own
+colour of de-emphasis. A skimming reader cannot tell "we looked and found nothing" from "we
+never looked" if both are quiet grey. (b) costs one extended rule and keeps the distinction
+checkable — a reviewer's question becomes "is this disclosing a check that could have run and
+did not," which is broader than "is this in a `VerificationRecord`" but is the same underlying
+concern D-009 was written for. (c) is the safest reading of "don't fabricate a state with no
+producer," but an *omitted* row is the one thing D-009 was written to prevent — a missing line
+in a panel titled "Analysis Rail" reads as "there was nothing to check," which is false; there
+was something to check and it was never built.
+
+**Cost implications** — none; one shared component (`NotRunCoverageRow`) for both rows.
+
+**Security implications** — positive, same family as D-009 and D-023: prevents an unbuilt
+capability from reading as a clean result by omission or by de-emphasis.
+
+**Scalability implications** — none. If a dependency scanner or compiler-warning capture is
+ever built, the row's state machine gains real states without changing its visual grammar.
+
+**Recommendation** — (b), as implemented.
+
+**Final approval authority** — CTO, since it reconciles this document to DS-03 the way DS-03
+itself reconciled the design system to the architecture spec; `product-manager` for the
+user-facing framing (a panel disclosing what it does *not* cover is a scope statement).
+
+---
+
+## D-058 · Presentation mode is re-admitted from `CUT` for internal rehearsal only, gated at build time · 2026-08-16 · `ui-ux-designer`
+
+**Decision** — #52 (presentation mode) is specified for pullback, scoped strictly to
+pre-finale rehearsal, screenshots and internal walkthroughs — never the finale, never in front
+of a judge. It is enabled only by choosing a distinct build artifact
+(`command-center:presentation`), defaults off, cannot be toggled at runtime, and independently
+refuses to activate if a real (non-fixture) mission is bound to the page. Disclosure is a
+persistent top-strip chip (per `04-design-system.md` §2.6, unchanged) plus a new full-bleed
+diagonal watermark so the disclosure survives a cropped screenshot. Full spec in
+[`13-cut-pullback-design-spec.md`](13-cut-pullback-design-spec.md) §2.
+
+**Options considered** — (a) leave #52 cut, as `10-fallback-ladder.md` §2.5 currently states
+("no presentation mode to hide behind"); (b) re-admit it as originally scoped in
+`01-vision-and-p0-cut.md` P1-7 — a competition presentation toggle, reachable from the running
+app; (c) re-admit it narrowly, gated at build time, for rehearsal only, with the finale doctrine
+in §2.5 left completely unchanged.
+
+**Pros and cons** — (a) is the safe, already-decided position and is what the orchestrator's
+task explicitly asked to reconsider given schedule room; leaving it cut forfeits pullback work
+that was requested. (b) is what P1-7 originally meant and is the version that is genuinely
+dangerous: a toggle reachable from the running app is a toggle that can be reached
+accidentally, which is the specific failure `10-fallback-ladder.md` §2.5 was written to prevent
+("it looks exactly like a real mission, which is what makes it useful in week one and dangerous
+at hour 30"). (c) gets the rehearsal value P1-7 wanted without reopening the finale risk: the
+mock surface only exists in a build artifact nobody would run at the finale, and even inside
+that build it refuses to pretend to be a real mission. The cost is two independent gates to
+build and test rather than one flag.
+
+**Cost implications** — one additional build target/env file; no runtime cost in the finale
+build, which does not import the presentation-mode code at all.
+
+**Security implications** — this is the load-bearing part of the decision. The gap this closes
+is real: today `sse_replay.py`'s own safeguards (loopback bind, header, SSE comment) are
+server-side only and invisible in the rendered UI, so a tired operator reusing it for a quick
+look has no on-screen reminder. The two independent gates (build artifact choice + real-mission
+refusal) are what make "cannot be enabled accidentally during a real mission" a checkable
+property rather than an assertion, per D-049. `10-fallback-ladder.md` §2.5 and §4 are otherwise
+completely unchanged by this decision — the finale still runs the artifact that does not
+contain this code at all.
+
+**Scalability implications** — none.
+
+**Recommendation** — (c), as implemented. `cybersecurity` should review the build-time
+exclusion (§2.7's acceptance criteria in the design spec) before this is treated as shipped,
+since "the code is absent from the bundle" is exactly the kind of claim D-049 says needs a named
+test, not a description.
+
+**Final approval authority** — `product-manager`, since this reopens user-facing scope that was
+previously and deliberately cut; CEO if the PM judges the rehearsal/finale boundary itself needs
+a business call rather than a design one. `10-fallback-ladder.md`'s finale doctrine is
+unaffected and needs no re-approval.
+
+---
+
+## D-059 · Keyboard operability ships without reinstating the command palette or adding destructive-control mnemonics · 2026-08-16 · `ui-ux-designer`
+
+**Decision** — #56's keyboard map (`13-cut-pullback-design-spec.md` §3) is built entirely on
+`Tab`/`Shift+Tab`/`Enter`/`Space`/`Escape` and native focus order. No global command-palette
+shortcut is reinstated (it stays cut per `04-design-system.md` §11), and no destructive control
+(`[ CANCEL MISSION ]`, `[ EMERGENCY TEARDOWN ]`) gets a single-letter mnemonic.
+
+**Options considered** — (a) build #56 alone, tab-and-enter only; (b) build #56 and also
+reinstate the cut `CommandPalette` (`Ctrl/Cmd+K`) since a keyboard pass is already touching
+every control; (c) tab-and-enter, plus mnemonic shortcuts on the bottom-strip controls for
+power-user speed.
+
+**Pros and cons** — (b) is a real temptation once every control has to be reachable by
+keyboard anyway, but it is a second un-cut item riding on an authorization that named three
+specific issues, not "keyboard work in general" — and the palette was cut for a stated reason
+(P1-10 is basic operability, not full tooling) that this task did not revisit. (c) makes
+destructive actions faster to reach exactly where speed is least wanted, and an undiscoverable
+mnemonic (with no palette to list it) fails the P1-10 bar for a different reason: a shortcut
+nobody can find is not "keyboard operable" in the sense the cut item meant. (a) is the literal
+scope of #56 and is what a single-operator P1-10 bar actually requires — every control reachable
+by `Tab`, nothing reachable by accident.
+
+**Cost implications** — lower than (b) or (c); no new global key-handling layer.
+
+**Security implications** — mildly positive for (a): destructive controls stay behind an
+explicit focus-and-activate sequence with no shortcut path that a stray keypress elsewhere on
+the page (e.g., in `AIParticleCore`'s text input) could trigger.
+
+**Scalability implications** — none.
+
+**Recommendation** — (a), as implemented.
+
+**Final approval authority** — `product-manager`, since declining to reinstate a cut item is a
+scope call; `cto` if a future accessibility pass argues P1-10's bar has moved.
+
+---
+
 ## D-060 — Design brief for #154 (wiring the 7 stubbed mission routers): three non-obvious
 calls made before either backend engineer starts
 
