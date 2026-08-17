@@ -13,6 +13,15 @@ import pytest
 from authorization.archive import build_tar_from_directory, enumerate_members, extract_archive
 from authorization.errors import SnapshotExtractionFailedError, UnreadableArchiveError
 
+#: `extract_archive` requires callers to supply `max_bytes` explicitly (round-4
+#: security review, HIGH-1) — same "no implicit default" contract
+#: `authorization.store.ingest_from_path` already uses. 10 MB is generous headroom
+#: over anything a test in this module legitimately writes, while still being a real,
+#: finite ceiling rather than an unbounded stand-in. Tests that specifically exercise
+#: the ceiling itself (the decompression-bomb tests below) pass their own, much
+#: smaller `max_bytes` so the bomb archives they build stay cheap to construct.
+TEST_MAX_BYTES = 10_000_000
+
 
 def test_enumerate_members_counts_a_real_tar_honestly(tmp_path: Path):
     tar_path = tmp_path / "a.tar"
@@ -200,7 +209,7 @@ def test_extract_archive_round_trips_build_tar_from_directory(tmp_path: Path):
     build_tar_from_directory(source, tar_path)
 
     dest = tmp_path / "extracted"
-    info = extract_archive(tar_path, dest)
+    info = extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
 
     source_files = sorted(
         p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file()
@@ -229,7 +238,7 @@ def test_extract_archive_normalizes_extracted_permissions(tmp_path: Path):
         tar.addfile(info, io.BytesIO(content))
 
     dest = tmp_path / "out"
-    extract_archive(tar_path, dest)
+    extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
 
     mode = (dest / "setuid.txt").stat().st_mode
     assert not (mode & 0o4000)  # setuid bit never survives
@@ -248,7 +257,7 @@ def test_extract_archive_refuses_a_tar_path_traversal_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
 
     # Nothing was left behind for a caller to mistake for a completed extraction, and
     # nothing was ever written outside tmp_path/out either.
@@ -265,7 +274,7 @@ def test_extract_archive_refuses_a_tar_absolute_path_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
     assert not Path("/etc/passwd-pwned-by-test").exists()
 
@@ -277,7 +286,7 @@ def test_extract_archive_refuses_a_zip_absolute_path_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(zip_path, dest)
+        extract_archive(zip_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -295,7 +304,7 @@ def test_extract_archive_refuses_a_tar_symlink_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -312,7 +321,7 @@ def test_extract_archive_refuses_a_tar_hardlink_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -330,7 +339,7 @@ def test_extract_archive_refuses_a_tar_device_node_member(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -350,7 +359,7 @@ def test_extract_archive_a_mixed_archive_writes_nothing_if_one_member_is_unsafe(
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
     assert not (tmp_path / "escape.txt").exists()
 
@@ -364,7 +373,7 @@ def test_extract_archive_refuses_a_file_that_is_neither_tar_nor_zip(tmp_path: Pa
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(junk, dest)
+        extract_archive(junk, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -384,7 +393,7 @@ def test_extract_archive_refuses_a_corrupt_tar(tmp_path: Path):
 
     dest = tmp_path / "out"
     with pytest.raises(UnreadableArchiveError):
-        extract_archive(corrupt, dest)
+        extract_archive(corrupt, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()
 
 
@@ -400,7 +409,7 @@ def test_extract_archive_refuses_when_the_destination_already_exists(tmp_path: P
     (dest / "unrelated.txt").write_text("already here")
 
     with pytest.raises(SnapshotExtractionFailedError):
-        extract_archive(tar_path, dest)
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     # The pre-existing directory and its content are untouched, not wiped.
     assert (dest / "unrelated.txt").read_text() == "already here"
 
@@ -417,12 +426,189 @@ def test_extract_archive_reports_a_write_failure_and_cleans_up(tmp_path: Path):
 
     dest = tmp_path / "out"
     with patch(
-        "authorization.archive.shutil.copyfileobj",
+        "authorization.archive._copy_within_budget",
         side_effect=OSError(28, "No space left on device"),
     ):
         with pytest.raises(SnapshotExtractionFailedError):
-            extract_archive(tar_path, dest)
+            extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
 
     # Cleaned up rather than left as a half-written tree a caller could mistake for
     # a complete extraction.
+    assert not dest.exists()
+
+
+# --- extract_archive: the extraction-size ceiling (round-4 review, HIGH-1) ----------
+
+
+def _write_zero_fill_targz(path: Path, member_name: str, size: int) -> None:
+    """Build a real `tar.gz` whose single member is `size` zero bytes.
+
+    Zero-fill is what makes this a *bomb* rather than merely a large legitimate file:
+    it is maximally compressible under gzip, so `size` can be many times larger than
+    the bytes actually written to `path` — a small archive on disk, a huge one once
+    decompressed. This is the same construction the round-4 review's own PoC used.
+    """
+    with tarfile.open(path, mode="w:gz") as tar:
+        info = tarfile.TarInfo(member_name)
+        info.size = size
+
+        class _ZeroFill:
+            """A read-only stream of `size` zero bytes, without ever materializing
+            them all in memory at once — `tarfile` reads this in its own internal
+            chunks via `.read(n)`."""
+
+            def __init__(self, total: int):
+                self._remaining = total
+
+            def read(self, n: int = -1) -> bytes:
+                if n < 0:
+                    n = self._remaining
+                take = min(n, self._remaining)
+                self._remaining -= take
+                return b"\x00" * take
+
+        tar.addfile(info, _ZeroFill(size))
+
+
+def test_extract_archive_refuses_a_tar_gz_decompression_bomb(tmp_path: Path):
+    """Reconstructs the round-4 review's exact PoC shape at a scale suited to a fast
+    test: one member, declared and actually producing far more zero bytes on
+    decompression than a modest `max_bytes` ceiling allows, compressed at a high
+    enough ratio that the archive file on disk is a small fraction of that.
+
+    This particular shape — a single member that honestly declares its own huge
+    size — is caught by the cheap declared-size pre-check alone (confirmed
+    separately below); it is included here anyway because it is the literal PoC
+    shape the review built and ran, at a size that keeps this test fast rather than
+    writing gigabytes to disk. See
+    `test_extract_archive_refuses_when_no_single_declared_size_exceeds_the_cap_but_their_sum_does`
+    for the case that isolates the running-bytes-written check specifically — a
+    single truthful member can never itself defeat the pre-check, since both
+    `tarfile` and `zipfile` already bound what `.read()` can return to the member's
+    own declared size; the running check earns its keep against *many* individually
+    honest, individually-under-cap members whose sum still exceeds the ceiling.
+    """
+    bomb_path = tmp_path / "bomb.tar.gz"
+    bomb_size = 50_000_000  # 50 MB of zero bytes, declared and real
+    _write_zero_fill_targz(bomb_path, "zeros.bin", bomb_size)
+
+    # Confirms the "bomb" property the test relies on: a high compression ratio, not
+    # merely "an archive declaring a size over the cap."
+    on_disk = bomb_path.stat().st_size
+    assert on_disk < bomb_size / 100, "fixture is not actually highly compressed"
+
+    dest = tmp_path / "out"
+    cap = 5_000_000  # 5 MB — well under the 50 MB the bomb would actually extract to
+    with pytest.raises(UnreadableArchiveError):
+        extract_archive(bomb_path, dest, max_bytes=cap)
+
+    # Nothing partially extracted left behind — same cleanup guarantee as every other
+    # rejection path in this module.
+    assert not dest.exists()
+
+
+def test_extract_archive_refuses_a_tar_member_whose_declared_size_alone_exceeds_the_cap(
+    tmp_path: Path,
+):
+    """The cheap pre-check: a member's *declared* header size alone is enough to
+    refuse, before any byte is read off the (in this case, entirely ordinary, not
+    highly-compressed) archive."""
+    tar_path = tmp_path / "big-declared.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        info = tarfile.TarInfo("big.bin")
+        info.size = 10_000_000
+        tar.addfile(info, io.BytesIO(b"\x00" * 10_000_000))
+
+    dest = tmp_path / "out"
+    with pytest.raises(UnreadableArchiveError):
+        extract_archive(tar_path, dest, max_bytes=1_000_000)
+    assert not dest.exists()
+
+
+def test_extract_archive_refuses_when_no_single_declared_size_exceeds_the_cap_but_their_sum_does(
+    tmp_path: Path,
+):
+    """Isolates the running, actual-bytes-written check (`_copy_within_budget`) from
+    the cheap per-member declared-size pre-check: three members, each honestly
+    declaring — and actually containing — 900,000 bytes, none of which individually
+    exceeds the 2,000,000-byte cap, so the pre-check passes every one of them. Their
+    *sum* (2,700,000 bytes) exceeds the cap, and only a check against the cumulative
+    bytes actually written across the whole extraction, evaluated during the write
+    pass rather than the header-inspection pass, catches this. Confirms the archive
+    is refused partway through, with nothing partially extracted left behind —
+    including the first two members, which on their own would have been fine.
+    """
+    tar_path = tmp_path / "many-small.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        for name in ("a.bin", "b.bin", "c.bin"):
+            info = tarfile.TarInfo(name)
+            info.size = 900_000
+            tar.addfile(info, io.BytesIO(b"\x00" * 900_000))
+
+    dest = tmp_path / "out"
+    with pytest.raises(UnreadableArchiveError):
+        extract_archive(tar_path, dest, max_bytes=2_000_000)
+    assert not dest.exists()
+
+
+def test_extract_archive_accepts_a_legitimately_large_archive_under_the_cap(
+    tmp_path: Path,
+):
+    """The cap must not be so tight it breaks real use: an archive whose real,
+    uncompressed content is large but still comfortably under `max_bytes` extracts
+    fine, uncompressed-tar included (the `source="git"` shape, which is the only
+    currently-active call path per the round-4 review)."""
+    source = tmp_path / "repo"
+    source.mkdir()
+    (source / "big.bin").write_bytes(b"x" * 8_000_000)  # 8 MB, real content
+    (source / "small.txt").write_text("a real, small file too")
+
+    tar_path = tmp_path / "legit.tar"
+    build_tar_from_directory(source, tar_path)
+
+    dest = tmp_path / "out"
+    info = extract_archive(tar_path, dest, max_bytes=10_000_000)
+
+    assert (dest / "big.bin").stat().st_size == 8_000_000
+    assert (dest / "small.txt").read_text() == "a real, small file too"
+    assert info.bytes_total == 8_000_000 + len("a real, small file too")
+
+
+# --- extract_archive: Low-priority test-coverage gaps (round-4 review) --------------
+
+
+def test_extract_archive_refuses_a_zip_symlink_member(tmp_path: Path):
+    """LOW-1 (round-4 review): `enumerate_members` already has the zip-symlink
+    equivalent of this test; `extract_archive` — the function that actually writes to
+    disk — did not. The reviewer independently verified the property held by direct
+    attack; this closes the named-test gap."""
+    import stat as stat_module
+
+    zip_path = tmp_path / "evil-symlink.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        link = zipfile.ZipInfo("innocuous_link")
+        link.external_attr = (stat_module.S_IFLNK | 0o777) << 16
+        zf.writestr(link, "/tmp")
+        victim = zipfile.ZipInfo("innocuous_link/passwd")
+        zf.writestr(victim, "attacker bytes")
+
+    dest = tmp_path / "out"
+    with pytest.raises(UnreadableArchiveError):
+        extract_archive(zip_path, dest, max_bytes=TEST_MAX_BYTES)
+    assert not dest.exists()
+
+
+def test_extract_archive_refuses_a_tar_fifo_member(tmp_path: Path):
+    """LOW-2 (round-4 review): same `not (member.isfile() or member.isdir())` check
+    already covers this identically to the device-node case, but it had no member of
+    its own to demonstrate it."""
+    tar_path = tmp_path / "evil-fifo.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        fifo = tarfile.TarInfo("evil-fifo")
+        fifo.type = tarfile.FIFOTYPE
+        tar.addfile(fifo)
+
+    dest = tmp_path / "out"
+    with pytest.raises(UnreadableArchiveError):
+        extract_archive(tar_path, dest, max_bytes=TEST_MAX_BYTES)
     assert not dest.exists()

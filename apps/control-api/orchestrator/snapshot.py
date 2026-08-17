@@ -22,10 +22,16 @@ mission's stage should extract and *where* the result should land.
   `SnapshotArtifactUnavailableError`.
 * **The archive is on disk but unsafe or unreadable** — corrupt, truncated, or
   carrying a member `authorization.archive.extract_archive` refuses (a path-traversal
-  name, a symlink/hardlink, a non-file/non-directory type). Propagated as
+  name, a symlink/hardlink, a non-file/non-directory type, or a member whose declared
+  or actual size would push the extraction past `settings.SNAPSHOT_MAX_BYTES` — a
+  decompression bomb; round-4 review, HIGH-1). Propagated as
   `authorization.errors.UnreadableArchiveError` — this module adds no translation
   layer over that refusal, since "unreadable" and "unsafe" both already mean the same
-  thing to a caller: there is nothing here to extract.
+  thing to a caller: there is nothing here to extract. This is also why
+  `extract_archive` is called with `max_bytes=settings.SNAPSHOT_MAX_BYTES` below,
+  rather than some independently-chosen extraction ceiling: it is the same number
+  `authorization.service.create_mission_snapshot` already caps the *ingested* archive
+  at, so the two ends of the round-trip cannot drift apart.
 * **The write side fails** — a full disk, a permission error, anything else stopping
   bytes from reaching the fresh workspace directory once the archive itself has
   already passed every safety check. Propagated as
@@ -139,7 +145,9 @@ def materialize_snapshot(
     mission_root.mkdir(parents=True, mode=0o700, exist_ok=True)
     dest_dir = mission_root / uuid.uuid4().hex
 
-    info = archive.extract_archive(archive_path, dest_dir)
+    info = archive.extract_archive(
+        archive_path, dest_dir, max_bytes=settings.SNAPSHOT_MAX_BYTES
+    )
 
     return MaterializedSnapshot(
         mission_id=str(mission.id),

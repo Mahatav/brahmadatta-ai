@@ -211,6 +211,15 @@ SNAPSHOT_STAGING_ROOT = Path(
 )
 #: 512 MiB. The demo targets are single-digit megabytes; this is a DoS ceiling, not a
 #: realistic size, and ingestion refuses (does not truncate) the instant it is crossed.
+#:
+#: Shared, deliberately, with the *extraction* side of the same round-trip
+#: (`orchestrator.snapshot.materialize_snapshot` passes this same value to
+#: `authorization.archive.extract_archive`'s `max_bytes`) rather than each end
+#: choosing its own number. Round-4 security review, HIGH-1: an ingested archive can
+#: pass this ceiling on its own (compressed) size while still decompressing to
+#: hundreds of GB on disk — a gzip bomb of highly-compressible content compresses at
+#: up to ~1000:1 — so the ceiling has to be enforced again, independently, against the
+#: bytes extraction actually writes, not just assumed to still hold from ingest time.
 SNAPSHOT_MAX_BYTES = env.get_int("SNAPSHOT_MAX_BYTES", 536_870_912)
 #: Where `orchestrator.snapshot.materialize_snapshot` (#168, T0b) extracts a mission's
 #: stored snapshot archive back to disk, one fresh `<root>/<mission_id>/<uuid4>`
