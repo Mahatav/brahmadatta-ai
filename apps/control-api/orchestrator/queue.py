@@ -15,6 +15,16 @@ function takes which lock and why.
 see `orchestrator/executors.py`'s module docstring for why that boundary is load-
 bearing, not stylistic.
 
+**D-073 — kind-scoped worker fleets.** `claim_job` takes an optional `kinds` filter
+so more than one `run_worker` process can claim disjoint slices of this same table
+instead of every process contending over every kind. The containerized `worker`
+service (no docker CLI, D-036 forbids mounting the socket into it) claims
+`DEFAULT_WORKER_KINDS` — every `JobKind` except `FUZZ`/`MINIMIZE` — by default; the
+bare-metal `fuzz-worker` process (the only thing anywhere in this system ever given
+container-runtime access) is started with `--kinds FUZZ,MINIMIZE` and claims nothing
+else. See `FUZZ_ONLY_KINDS`/`DEFAULT_WORKER_KINDS` below and `missions.management.
+commands.run_worker` for the CLI half.
+
 `manage.py run_orchestrator` (the tick loop) calls: `tick`, which runs, in order:
 
 1. `reap_expired_leases` — a `LEASED`/`RUNNING` job whose lease expired (a crashed
@@ -59,6 +69,7 @@ restartable with no loss").
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import timedelta
 from uuid import UUID
 
@@ -72,6 +83,38 @@ from orchestrator import events, transitions
 from orchestrator.executors import transition_policy_for
 
 logger = logging.getLogger("orchestrator.queue")
+
+#: `JobKind`s that require a container runtime
+#: (`packages.sandbox.container.ContainerJail`) to execute at all. D-036 forbids
+#: mounting the Docker socket into any containerized service, and D-073 is the ruling
+#: that a kind-scoped `fuzz-worker` process — never the containerized `worker` — is the
+#: only thing anywhere in this system given container-runtime access. This constant is
+#: the single source of truth for "which kinds can only run on fuzz-worker"; everything
+#: else in this module derives from it rather than restating the pair.
+FUZZ_ONLY_KINDS: frozenset[JobKind] = frozenset({JobKind.FUZZ, JobKind.MINIMIZE})
+
+#: The kind set a `worker` process claims when `--kinds` is not passed on `manage.py
+#: run_worker` (D-073 task 1). Computed as "every `JobKind` except the fuzz-only ones"
+#: — a default-EXCLUSION list — rather than a hand-maintained default-INCLUSION list of
+#: every other kind by name. Two reasons, recorded here because the choice was a real
+#: one and not obvious:
+#:
+#: 1. **Fails closed by construction, not by upkeep.** A `JobKind` added later (a T8,
+#:    say) is automatically claimable by the general `worker` unless someone
+#:    deliberately adds it to `FUZZ_ONLY_KINDS` — the safe default for "does this new
+#:    kind need a container runtime" is "no", so a forgotten update to this file cannot
+#:    silently start denying the general worker its jobs. A default-inclusion list has
+#:    the opposite failure mode: forgetting to add a new kind to the inclusion list
+#:    silently strands it — every job of that kind sits `QUEUED` forever with no error,
+#:    which is a much quieter failure than a `NotImplementedError` from an unregistered
+#:    executor.
+#: 2. **One property to audit instead of two.** With default-exclusion, "can the
+#:    containerized `worker` ever claim a `FUZZ`/`MINIMIZE` job" reduces to one
+#:    question — "is `FUZZ_ONLY_KINDS` correct" — checked directly against
+#:    `packages.sandbox`'s own dependency (`ContainerJail`). A default-inclusion list
+#:    would need its own separate audit that it actually excludes both kinds, which is
+#:    the same fact stated twice and one of the two copies is the one that goes stale.
+DEFAULT_WORKER_KINDS: frozenset[JobKind] = frozenset(JobKind) - FUZZ_ONLY_KINDS
 
 #: Which JobKind runs while a mission sits in a given job-backed state. Deliberately
 #: excludes `MissionState.TRIAGE` (no `JobKind` — see `advance_through_triage`).
@@ -225,7 +268,13 @@ def ensure_jobs_enqueued(*, now=None) -> list[Job]:
 # ------------------------------------------------------------------------------------
 
 
-def claim_job(worker_id: str, *, lease_seconds: int = DEFAULT_LEASE_SECONDS, now=None) -> Job | None:
+def claim_job(
+    worker_id: str,
+    *,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    kinds: Iterable[JobKind] | None = None,
+    now=None,
+) -> Job | None:
     """`SELECT ... FOR UPDATE SKIP LOCKED`, architecture spec §3.1, verbatim.
 
     Two (or more) workers calling this concurrently each get a *different* queued
@@ -234,15 +283,27 @@ def claim_job(worker_id: str, *, lease_seconds: int = DEFAULT_LEASE_SECONDS, now
     `orchestrator/tests/test_queue_claim_locking.py::test_two_concurrent_claimers_never_get_the_same_job`.
     SQLite compiles `SKIP LOCKED` to a no-op (same caveat `api/tests/test_mission_lifecycle.py`
     already documents for `pause`/`cancel`), so that test is Postgres-only.
+
+    `kinds` (D-073): when given, restricts the claim to `Job` rows whose `kind` is in
+    the set, enforced in the `WHERE` clause of the same locking query above — a
+    `fuzz-worker` process passing `kinds={JobKind.FUZZ, JobKind.MINIMIZE}` and a general
+    `worker` process passing `kinds=DEFAULT_WORKER_KINDS` can run concurrently against
+    the same `Job` table and never contend over, or claim, each other's rows. `None`
+    (the default) claims across every kind, unchanged from this function's pre-D-073
+    behavior — every existing caller that does not pass `kinds` keeps claiming
+    anything queued. `manage.py run_worker` never calls this with `kinds=None`; it
+    always resolves and passes an explicit set (`DEFAULT_WORKER_KINDS` or `--kinds`),
+    so the "fails closed" property lives at that call site, not by relying on this
+    default — see that command's module docstring.
     """
     now = now or timezone.now()
     with transaction.atomic():
-        job = (
-            Job.objects.select_for_update(skip_locked=True)
-            .filter(state=JobState.QUEUED, run_after__lte=now)
-            .order_by("created_at")
-            .first()
+        candidates = Job.objects.select_for_update(skip_locked=True).filter(
+            state=JobState.QUEUED, run_after__lte=now
         )
+        if kinds is not None:
+            candidates = candidates.filter(kind__in=[str(k) for k in kinds])
+        job = candidates.order_by("created_at").first()
         if job is None:
             return None
         job.state = JobState.LEASED

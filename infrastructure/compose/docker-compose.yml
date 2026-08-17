@@ -278,6 +278,19 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - backend
+    ports:
+      # Published on LOOPBACK ONLY, dev profile only. D-073: `fuzz-worker`
+      # (infrastructure/scripts/run-fuzz-worker.sh) is a bare-metal host process, not
+      # a compose service — it has no route onto the `backend` network (`internal:
+      # true`) at all, so it needs Postgres reachable at `127.0.0.1` the same way
+      # nginx already is. `apps/control-api/.env.example`'s own `DATABASE_URL`
+      # default (`localhost:5432`) already assumed this was reachable; it previously
+      # was not — this closes that pre-existing gap rather than opening a new one.
+      # Not published in docker-compose.finale.yml: that file states "no port is
+      # published except through nginx" as an explicit invariant, and changing it for
+      # the finale host is an open decision for CTO/devops + cybersecurity, not made
+      # here — see the D-073 follow-up entry in .project/decisions.md.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brahmadatta} -d ${POSTGRES_DB:-brahmadatta}"]
       interval: 5s
@@ -323,21 +336,17 @@ services:
   # service in the same commit that adds the dependency. See D-018 in
   # .project/decisions.md.
   #
-  # #189 / D-072: this service CANNOT run FUZZ jobs (`packages.sandbox.container.
-  # ContainerJail`) as built today, and that is a real, unresolved gap, not an oversight
-  # papered over by the SANDBOX_FUZZ_IMAGE line below. `ContainerJail.run` shells out to
-  # a `docker` binary on PATH against a reachable docker daemon; this image
-  # (control-api.Dockerfile) has neither, and D-024 condition 4 forbids the obvious fix
-  # (bind-mounting /var/run/docker.sock into this container — that is full host-root
-  # equivalence for anything that can reach this container, the exact hole
-  # FORBIDDEN_SOCKET_PATHS/test_container_isolation.py exist to catch). A working FUZZ
-  # execution host is therefore a separate decision from "does a pinned image exist" —
-  # e.g. a process running directly on a docker-capable host (the same model this
-  # session's own real-campaign verification and packages/sandbox/tests/
-  # test_container_jail.py already use), or a dedicated sandbox-executor host reachable
-  # over a TLS-secured remote docker context. Neither is built. Flagged for the architect/
-  # orchestrator owner, not solved here — #189's scope is the image and its pinning, not
-  # this service's deployment topology.
+  # D-073 — this container claims every JobKind EXCEPT FUZZ/MINIMIZE, BY DESIGN, not
+  # by an oversight in `manage.py run_worker`'s `--kinds` flag. It has no `docker` CLI
+  # and D-036 forbids ever mounting the host's Docker socket into it, so it structurally
+  # cannot run `packages.sandbox.container.ContainerJail` — the mechanism every FUZZ/
+  # MINIMIZE job needs. FUZZ/MINIMIZE are claimed instead by `fuzz-worker`, a SEPARATE
+  # bare-metal process on the host (infrastructure/scripts/run-fuzz-worker.sh), started
+  # as `python manage.py run_worker --kinds FUZZ,MINIMIZE` — the only process anywhere
+  # in this system ever given container-runtime access, and deliberately given no
+  # model-gateway client and no route to model-host. Do NOT "fix" this by mounting
+  # /var/run/docker.sock here or by adding FUZZ back to this service's claimed kinds —
+  # see .project/decisions.md D-036 and D-073 before changing anything in this block.
   # ---------------------------------------------------------------------------
   worker:
     profiles: ["worker"]

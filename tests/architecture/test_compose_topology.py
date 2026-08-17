@@ -135,6 +135,49 @@ def test_finale_stage_origin_is_loopback_http_only() -> None:
     assert not any("certs" in str(volume) for volume in volumes)
 
 
+def test_dev_db_port_is_published_on_loopback_only() -> None:
+    """D-073: the dev profile's `db` publishes a host port so the bare-metal
+    `fuzz-worker` process (infrastructure/scripts/run-fuzz-worker.sh) can reach
+    Postgres from outside the compose network at all — `db` itself stays off any
+    routable network (`test_content_holding_services_are_never_routable` covers
+    that). This asserts the *host* side of that publish never widens past loopback —
+    a `"5432:5432"` or `0.0.0.0:...` edit here would make Postgres reachable from
+    anything else on the operator's network, not just this host's own processes.
+    """
+    doc = _load(DEV)
+    db = (doc.get("services") or {}).get("db") or {}
+    ports = db.get("ports") or []
+
+    assert ports, "db has no published port; if D-073's fuzz-worker fix was reverted, update this test too"
+    for port in ports:
+        assert str(port).startswith("127.0.0.1:"), (
+            f"db port {port!r} is not loopback-scoped. Every published port in this "
+            "compose family binds 127.0.0.1 only — see nginx's own ports for the "
+            "existing pattern this must match."
+        )
+
+
+def test_finale_db_publishes_no_port() -> None:
+    """The finale profile's own header comment states "no port is published except
+    through nginx" as an explicit invariant (item 6 of its documented differences
+    from the dev profile). D-073 needed a bare-metal Postgres connection for
+    fuzz-worker and deliberately did NOT extend the dev fix to this file — that is
+    an open decision for CTO/devops-engineer plus a `cybersecurity` review, not
+    made silently. This test is the tripwire: if `db` ever gains a `ports:` entry
+    here without that decision being recorded, this fails instead of the invariant
+    quietly eroding.
+    """
+    doc = _load(FINALE)
+    db = (doc.get("services") or {}).get("db") or {}
+    assert not db.get("ports"), (
+        "docker-compose.finale.yml's db service now publishes a port. That is a "
+        "deliberate, reviewed exception to this file's own stated invariant ('no "
+        "port is published except through nginx') or it is a regression — which one "
+        "must be recorded in .project/decisions.md (see the D-073 follow-up entry) "
+        "before this assertion is relaxed."
+    )
+
+
 def test_dev_exposes_only_the_ingress_and_reviewed_exceptions() -> None:
     doc = _load(DEV)
     routable = _services_on_routable(doc)
