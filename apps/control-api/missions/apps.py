@@ -22,6 +22,9 @@ class MissionsConfig(AppConfig):
         # Add one line here per JobKind executor module as each stage lands (T1-T6);
         # this is deliberately a flat list, not magic auto-discovery, so a stage that
         # forgot to register is a visible NotImplementedError, not a silent no-op.
-        from orchestrator import correlate_executor  # noqa: F401
-        from orchestrator import teardown_executor  # noqa: F401
+        from orchestrator import (
+            correlate_executor,  # noqa: F401
+            patch_generate_executor,  # noqa: F401
+            teardown_executor,  # noqa: F401
+        )
         from workers.baseline import dispatch  # noqa: F401

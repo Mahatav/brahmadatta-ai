@@ -134,6 +134,19 @@ def default_deadline_seconds(kind: JobKind, policy: dict) -> int:
     """
     if kind == JobKind.FUZZ:
         return int(policy.get("fuzz_seconds", 1800))
+    if kind == JobKind.PATCH_GENERATE:
+        # #168 T4. One `Job`, `attempts_target` generations internally (D-027,
+        # architecture spec §3.4). `OllamaCodeLlamaBackend`'s own per-call timeout
+        # defaults to 300s and the executor's own degradation ladder (architecture
+        # spec §6.4) can make up to three HTTP calls per attempt (initial, one
+        # transport retry, one reduced-context retry) — 900s worst case per attempt.
+        # 360s/attempt is a deliberately generous *stage* budget, not a per-call
+        # timeout: enough headroom for a live CPU-served model without assuming the
+        # full worst case on every attempt. `deadline_at` is a backstop the
+        # orchestrator's watchdog enforces (§3.3.3), not the ladder's own per-call
+        # timeouts, which the gateway/backend still owns.
+        attempts = int(policy.get("patch_generation_attempts", 10))
+        return max(1800, attempts * 360)
     sandbox = policy.get("sandbox") or {}
     return int(sandbox.get("max_seconds", 5400))
 

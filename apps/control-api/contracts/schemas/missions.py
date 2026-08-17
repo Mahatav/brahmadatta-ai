@@ -77,6 +77,20 @@ class MissionPolicy(StrictSchema):
         description="How many times a minimized input must replay from a clean "
         "build before `reproducible` is set.",
     )
+    patch_generation_attempts: int = Field(
+        default=10,
+        ge=1,
+        le=20,
+        description="Fan-out width for JobKind.PATCH_GENERATE (D-027, architecture "
+        "spec §3.4: '1 job, N attempts internally'). Each attempt that produces a "
+        "parseable candidate is persisted as its own PatchCandidate row the moment "
+        "it is produced, whether policy-accepted or not. Default 10 matches the D6 "
+        "kill criterion's supporting threshold ('at least 3 of 10 attempts', "
+        "docs/09-company/01-vision-and-p0-cut.md). Added by #168 T4 — not present "
+        "in the original architecture spec's MissionPolicy listing, so documented "
+        "here as the addition it is (backend-developer's minor-contract-detail "
+        "authority per its own role brief).",
+    )
 
 
 class MissionCreateRequest(StrictSchema):
