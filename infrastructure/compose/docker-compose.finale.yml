@@ -121,10 +121,32 @@ services:
       # is visible where the deployment is described, and so a future settings module that
       # does read it from the environment gets the right answer.
       CONN_MAX_AGE: "0"
+      # `config.settings.base.ARTIFACT_ROOT` defaults to `BASE_DIR / "var" / "artifacts"`
+      # (`/app/var/artifacts`) — inside `/app`, which the `runtime` image target bakes in
+      # read-only and this service's own `read_only: true` enforces at the container
+      # level too. The content-addressed snapshot store has therefore never been able to
+      # write a single byte under the finale profile: `POST .../snapshot` 500s on
+      # `OSError: [Errno 30] Read-only file system: '/app/var'` the moment it tries to
+      # materialize the tar it just built. Repointed at a named volume, same pattern as
+      # `evidence:` below. Found running the #50 live rehearsal, 2026-08-17.
+      ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
     volumes:
       - django-static:/app/staticfiles
       # Evidence artifacts survive a container replacement.
       - evidence:/var/lib/brahmadatta/evidence
+      # The content-addressed snapshot artifact store — see the ARTIFACT_ROOT comment
+      # above. Distinct from `evidence`: this is ingested snapshot bytes, not exported
+      # evidence bundles.
+      - artifacts:/var/lib/brahmadatta/artifacts
+      # `config.settings.base.SNAPSHOT_SOURCE_ROOT` defaults to `/demo/repositories`
+      # (`BASE_DIR.parent.parent / "demo" / "repositories"` inside the image). Nothing
+      # mounted that path in either compose profile before this — `source="git"`
+      # snapshot ingestion (the only way to hand the container a local demo target
+      # such as `pktcfg` without a real git remote) had never actually worked
+      # containerized, dev or finale. Read-only: the control-api process only ever
+      # reads from here to build a deterministic tar (`authorization/archive.py`),
+      # never writes. Found running the #50 live rehearsal, 2026-08-17.
+      - ../../demo/repositories:/demo/repositories:ro
     networks:
       # `api`, NOT a shared ingress network. nginx is the only other member.
       - api
@@ -201,9 +223,16 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.finale
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
       REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
+      # Mirrors control-api's ARTIFACT_ROOT fix above, for parity if this profile is
+      # ever activated. NOT independently verified working end to end — see #50's
+      # evidence bundle: `CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`)
+      # has no `django_rq` in requirements.txt and was never reached by this rehearsal.
+      ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
+      - artifacts:/var/lib/brahmadatta/artifacts
+      - ../../demo/repositories:/demo/repositories:ro
     networks:
       - backend
     depends_on:
@@ -260,4 +289,5 @@ volumes:
   nginx-logs:
   django-static:
   evidence:
+  artifacts:
   ollama-models:

@@ -2753,3 +2753,66 @@ since it's a one-line change in the file both new endpoints they're building cal
 
 **Final approval authority** — CTO (technical); low enough stakes not to need a fuller record,
 included here because it blocks correct behavior on day one otherwise.
+
+### 4. #50 live rehearsal (2026-08-17) — two finale-profile infra bugs, fixed on the spot; a third, larger gap, reported not fixed
+
+**Context** — First live attempt at the #50 D7 gate since #154 wired all 7 remaining
+mission-lifecycle HTTP routers. Full findings in `.project/evidence/d7-gate-50-live-run-2026-08-17.{json,md}`.
+
+**Decision (devops-engineer authority — environment setup, containerization)** — Fixed two
+newly-discovered, small, clearly-scoped infrastructure bugs without asking, consistent with
+this repo's existing pattern of fixing the two prior stale-image/TLS environment bugs on
+sight:
+
+1. `demo/repositories` was never bind-mounted into `control-api` in either compose profile,
+   so `SNAPSHOT_SOURCE_ROOT`-based snapshot ingestion (the only way to hand the container a
+   local demo target like `pktcfg`) had never actually worked containerized. Fixed: read-only
+   mount added to both `docker-compose.finale.yml` and `docker-compose.yml`.
+2. `ARTIFACT_ROOT` pointed inside the finale image's `read_only: true` filesystem; repointing
+   it at a named volume then hit Docker's default root-owned-volume behavior against a
+   non-root, `cap_drop: ["ALL"]` container. Fixed: named volume plus a build-time
+   `mkdir`+`chown app:app` in `control-api.Dockerfile`'s `runtime` stage (relying on Docker's
+   documented volume-seeding-from-image behavior), which also silently fixes the identical,
+   previously-latent bug in the pre-existing `evidence` volume — never exercised before today
+   because nothing had reached mission teardown/export until #154 made `start` reachable.
+
+**Options considered for bug 2** — (a) grant `CHOWN`/`DAC_OVERRIDE` at runtime and chown in an
+entrypoint script before dropping to `app`; (b) bake the directories into the image at build
+time, owned correctly, and rely on Docker's volume-seeding behavior; (c) drop `read_only:
+true` / `cap_drop: ["ALL"]` for these two paths.
+
+**Pros and cons** — (a) works but requires adding an entrypoint script and granting two
+capabilities at runtime that the finale hardening posture (SEC-04/SEC-38) deliberately does
+not currently grant — expands runtime attack surface for a permissions problem that is really
+a build-time one. (b) costs two lines in a Dockerfile already owned by devops per its own
+header comment, adds nothing at runtime, and needed no capability changes. (c) would quietly
+undo hardening decided upstream by prior security review specifically to fix this one
+narrow gap — clearly wrong.
+
+**Cost implications** — negligible; no new capabilities, no new base image, ~10s extra build time.
+
+**Security implications** — (b) is a strict improvement: it closes a real-world "the app can't
+even write its own evidence" failure mode without touching `cap_drop: ["ALL"]` / `read_only:
+true`, which stay exactly as strict as the last security review left them.
+
+**Scalability implications** — none; both are small named volumes.
+
+**Recommendation / ruling** — (b), implemented. Not sent for cybersecurity re-review before
+landing, on the basis that it changes zero runtime capabilities or network posture and only
+affects two previously-broken, previously-unreachable write paths — flagging here so
+cybersecurity can veto or wave through in the normal review cadence rather than this being
+silently absorbed.
+
+**Final approval authority** — CTO (technical); flag for cybersecurity awareness given SEC-04/
+SEC-38 touch the same file.
+
+**The gate itself still fails.** A third, much larger gap was found and left unfixed by design
+per this session's explicit instructions: no HTTP endpoint or automatic process advances a
+mission past `VALIDATING` — the actual stage-execution code (`workers/baseline`,
+`workers/fuzzing`, `orchestrator/candidates.py`, `orchestrator/verification.py`) exists and is
+tested but has no caller. This is reported, not fixed — it is the same size and review shape
+as #154 itself, squarely backend/orchestration engineering, not a devops call. See the
+evidence files for the full technical detail and static + empirical confirmation.
+
+**Final approval authority (staffing the fix)** — CTO / engineering-manager, per this
+project's normal issue-staffing process; not decided here.

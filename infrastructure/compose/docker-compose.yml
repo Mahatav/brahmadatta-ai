@@ -131,6 +131,13 @@ services:
       - ../../apps/control-api:/app
       # Keep the host's macOS/arm .venv out of the container; /opt/venv is the real one.
       - /app/.venv
+      # `config.settings.base.SNAPSHOT_SOURCE_ROOT` defaults to `/demo/repositories`.
+      # Nothing mounted that path here either — `source="git"` snapshot ingestion
+      # against a local demo target (e.g. `pktcfg`) had never actually worked
+      # containerized. Read-only: control-api only ever reads from here to build a
+      # deterministic tar (`authorization/archive.py`). Found running the #50 live
+      # rehearsal against the finale profile, 2026-08-17; mirrored here for parity.
+      - ../../demo/repositories:/demo/repositories:ro
     networks:
       # `api`, NOT `edge`. control-api shares a network with nginx and with nothing else.
       # See the networks: block — this is the fix for the Critical in the security review.

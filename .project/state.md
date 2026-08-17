@@ -113,30 +113,56 @@ history.
 
 ## The critical path now
 
-**#154 — CLOSED, 2026-08-17.** All 7 of the 7 stub mission-lifecycle HTTP routers
-(`create`, `list`, `get`, `preflight`, `start`, `pause`, `cancel`) are wired to the real
-orchestrator/service layer, via PR #160 and PR #161. Full review chain on both
-(engineering-manager APPROVE, cybersecurity CLEARED, QA PASS on #161's concurrency
-properties specifically) — see the closing comment on #154 for the complete trail.
-A real pre-existing bug (`orchestrator/transitions.py`'s `select_for_update().get()`
-missing a `Mission.DoesNotExist` catch) was found by the CTO's design brief before code
-was written, and fixed with a test proven to fail pre-fix and pass post-fix.
+**#154 closed 2026-08-17** (PR #160 + PR #161, full review chain: backend-developer x2,
+engineering-manager, cybersecurity, qa-engineer). All 11 mission-lifecycle HTTP routers are
+now genuinely wired. **#50 was attempted live the same day, the first attempt since #154
+landed, and still FAILS** — for a different, deeper reason than #154 fixed. Full evidence:
+`.project/evidence/d7-gate-50-live-run-2026-08-17.{json,md}`.
 
-**#154 was the actual, complete blocker on #50.** Every module underneath the HTTP layer
-was already real and tested; only the entry points weren't wired. That's no longer true.
+That run: fixed two small, newly-discovered devops-scope environment bugs on the spot
+(`demo/repositories` was never mounted into `control-api` in either compose profile, so
+local-target snapshot ingestion had never worked containerized; `ARTIFACT_ROOT` pointed
+inside the finale image's read-only filesystem, and the volume fallback was root-owned
+against a non-root, capability-dropped container — both fixed in
+`infrastructure/compose/docker-compose.finale.yml`, `docker-compose.yml`, and
+`infrastructure/compose/images/control-api.Dockerfile`; see decisions.md #4). With those
+fixed, drove a real mission through `create → authorize → snapshot → preflight → start`
+against `pktcfg` over the real HTTP API and confirmed, empirically (60s of unattended
+polling, zero state change) and statically (full grep of every router, the transitions
+module, and the worker packages), that **nothing — no HTTP endpoint, no background
+process, no signal, no queue consumer — ever advances a mission past `VALIDATING`.** The
+state machine legally permits `VALIDATING → BASELINE` and every stage after it, and the
+actual stage-execution code (`workers/baseline/run.py`, `workers/fuzzing/`,
+`orchestrator/candidates.py`, `orchestrator/verification.py`) is real and unit-tested — it
+simply has no caller. `workers/baseline/run.py`'s own docstring names this directly: the
+"future orchestrator" that was supposed to call it was never built. The identical gap
+recurs at `CANCELLING → CANCELLED` (teardown runs for real, but nothing finalizes the
+mission afterward).
 
-**Next step: attempt a live #50 run.** Nothing else is known to block it — but this needs
-re-verifying for real (fresh `.env`, Docker state, TLS certs) rather than assumed carried
-over from the 2026-08-15 reconciliation pass, since state can drift between sessions.
-Everything else in D7–D9 remains downstream: #57 (rehearsals) needs #50 to pass once;
-#60 (freeze) needs #57.
+**This is the actual, complete reason #50 cannot pass today.** Not environment (fixed,
+three times now across two sessions), not #154's own scope (#154's acceptance criteria
+correctly stopped at `start` and never claimed more) — a missing mission-stage driver that
+connects the state machine to the already-built pipeline code. Sizeable, scoped engineering
+work of the same shape as #154 itself; not attempted in the #50 rehearsal per its explicit
+instructions, reported instead.
+
+Everything else in D7–D9 is downstream of this: #57 (rehearsals) needs #50 to pass once;
+#60 (freeze) needs #57. Nothing else on the board is close to gating; this is the one thing.
+
+**#168 filed 2026-08-17** for the driver gap. CTO design brief (D-061) and
+engineering-manager staffing plan (D-062) both done — see `.project/decisions.md`. Key
+finding: this is finishing issue #12, not new design; an architecture spec (D-024/D-026)
+and a migrated `Job` model already exist with zero callers. Staffing of the Day-1 parallel
+tracks (T0 orchestrator tick loop, T0b snapshot extraction, T1/T5/T7 executors) is the
+active next step.
 
 ## Open, owned by the CEO
 
 1. **#59 — finale roster.** Who is physically present for the run, and the runbook's
    incident-lead/demo-operator/evidence-lead split. Registration and travel lead time
-   apply once decided. Independent of #154/#50 — can be decided in parallel.
+   apply once decided. Unrelated to the gate blocker — can be decided in parallel.
 
 Closed since the last version of this file: #2 (deadline), #3 (competition rules), #8
-(visual references), #63 (bisect stays cut) — all resolved earlier in the build and already
-reflected in `docs/09-company/03-seven-day-plan.md`.
+(visual references), #63 (bisect stays cut), #154 (2026-08-17) — all resolved earlier in
+the build (or today, for #154) and already reflected in
+`docs/09-company/03-seven-day-plan.md` / the evidence file above.

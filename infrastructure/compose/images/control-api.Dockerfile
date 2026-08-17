@@ -109,6 +109,20 @@ ENV DJANGO_SETTINGS_MODULE=config.settings.finale
 
 COPY --chown=app:app . /app
 
+# `docker-compose.finale.yml` mounts named volumes at these two paths for the
+# content-addressed artifact store (ARTIFACT_ROOT) and the exported evidence bundle
+# store. A fresh named volume is created empty and root-owned; Docker seeds it from
+# whatever already exists at the mount point in the image at first mount, ownership
+# included — so creating these here, owned by `app`, is what lets the non-root
+# `runtime` process (USER app:app below, and `read_only: true` + `cap_drop: ["ALL"]`
+# in the finale compose file — no CHOWN capability at runtime to fix this after the
+# fact) actually write into them. Without this, both paths 500 on first write with
+# `PermissionError: [Errno 13] Permission denied`. Found running the #50 live
+# rehearsal, 2026-08-17 — `evidence/` had never been reached by any prior partial
+# verification, and `artifacts/` had never existed as a writable path in any profile.
+RUN mkdir -p /var/lib/brahmadatta/artifacts /var/lib/brahmadatta/evidence \
+ && chown -R app:app /var/lib/brahmadatta
+
 USER app:app
 EXPOSE 8000
 
