@@ -32,15 +32,24 @@ named beside it. Where a property is *intended* rather than demonstrated, it say
      `::test_snapshot_with_an_expired_authorization_is_refused`,
      `::test_snapshot_with_a_revoked_authorization_is_refused`
 
-   **Demonstrated at exactly one stage: `INGEST`, via `/snapshot`.** SEC-31 (round-4
-   security review) caught this docstring citing two tests against `preflight`/`start`
-   that do not exist, and cannot yet — `preflight_mission` and `start_mission`
-   (`api/routers/missions.py`) are unconditional `NotImplementedYetError`; nothing in
-   them reaches the authorization gate, the orchestrator, or any business logic at
-   all. The property is *intended* to hold at every stage once each is wired to the
-   orchestrator (#12), and is proven, today, only at the one stage that already is.
-   Add each stage's own citation here as it lands — do not restore a citation for a
-   test that has not been written.
+   **Demonstrated at two call paths now: `INGEST` via `/snapshot`, and the
+   `SNAPSHOTTED -> VALIDATING` move via `/preflight` and `/start` (#154).**
+   `preflight_mission` (non-mutating, D-060 §1) and `start_mission`
+   (`missions/service.py`) both run `contracts.state_machine.assert_stage_can_run`
+   against `MissionStage.INGEST` — the same guard `/snapshot` runs, reached a second
+   way rather than reimplemented — so a mission with no active authorization gets a
+   failed `authorization_and_stage` check from `/preflight` and a clean
+   `AuthorizationRequiredError` from `/start`, never a state move.
+   — `api/tests/test_mission_lifecycle.py::test_preflight_reports_not_ready_without_raising_when_unauthorized`,
+     `::test_starting_before_snapshot_is_refused`
+
+   `pause_mission`/`cancel_mission` do **not** extend this citation: their targets
+   (`PAUSED`, `CANCELLING`) are both in `contracts.state_machine
+   ._AUTHORIZATION_EXEMPT_TARGETS` by design — getting a mission out safely must never
+   depend on a record that may itself be the reason an operator wants out. `BASELINE`
+   through `EXPORTING` (the internal orchestrator stages this issue does not wire an
+   HTTP entry point for) remain *intended* only. Add each stage's own citation here as
+   it lands — do not restore a citation for a test that has not been written.
 
 ## The shape of every write in here
 
