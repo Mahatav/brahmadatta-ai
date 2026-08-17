@@ -113,19 +113,29 @@ history.
 
 ## The critical path now
 
-**#154 — wire 7 of 11 mission-lifecycle routers to the orchestrator.** Filed 2026-08-17.
-This is the actual blocker on #50, found by attempting the live run rather than trusting
-the board. Real, sizeable implementation work — not attempted in this reconciliation pass.
-Everything else in D7–D9 is downstream of it: #57 (rehearsals) needs #50 to pass once;
-#60 (freeze) needs #57. Nothing else on the board is close to gating; this is the one thing.
+**#154 — CLOSED, 2026-08-17.** All 7 of the 7 stub mission-lifecycle HTTP routers
+(`create`, `list`, `get`, `preflight`, `start`, `pause`, `cancel`) are wired to the real
+orchestrator/service layer, via PR #160 and PR #161. Full review chain on both
+(engineering-manager APPROVE, cybersecurity CLEARED, QA PASS on #161's concurrency
+properties specifically) — see the closing comment on #154 for the complete trail.
+A real pre-existing bug (`orchestrator/transitions.py`'s `select_for_update().get()`
+missing a `Mission.DoesNotExist` catch) was found by the CTO's design brief before code
+was written, and fixed with a test proven to fail pre-fix and pass post-fix.
+
+**#154 was the actual, complete blocker on #50.** Every module underneath the HTTP layer
+was already real and tested; only the entry points weren't wired. That's no longer true.
+
+**Next step: attempt a live #50 run.** Nothing else is known to block it — but this needs
+re-verifying for real (fresh `.env`, Docker state, TLS certs) rather than assumed carried
+over from the 2026-08-15 reconciliation pass, since state can drift between sessions.
+Everything else in D7–D9 remains downstream: #57 (rehearsals) needs #50 to pass once;
+#60 (freeze) needs #57.
 
 ## Open, owned by the CEO
 
 1. **#59 — finale roster.** Who is physically present for the run, and the runbook's
    incident-lead/demo-operator/evidence-lead split. Registration and travel lead time
-   apply once decided. Unrelated to #154 — can be decided in parallel.
-2. **Staffing #154.** It's the single remaining piece of real engineering between here and
-   a demonstrable gate pass.
+   apply once decided. Independent of #154/#50 — can be decided in parallel.
 
 Closed since the last version of this file: #2 (deadline), #3 (competition rules), #8
 (visual references), #63 (bisect stays cut) — all resolved earlier in the build and already

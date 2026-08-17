@@ -139,6 +139,27 @@ Append-only. Format: `YYYY-MM-DD · HIRED|FIRED · agent · phase · trigger`
 - 2026-08-07 · HIRED · `devops-engineer` · D1 · nginx (#10), compose and CI (#11)
 - 2026-08-07 · HIRED · `general-purpose` as `compiler-toolchain-engineer` · D1 · demo C target (#4). **The project-local seats in `.claude/agents/` are not registered as agent types in this session** — the registry loads from the session's working directory, which is the parent folder. Workaround: spawn `general-purpose` and have it read the role file as its first instruction. Same for `security-research-engineer`, `ml-infra-engineer`, `competition-strategist`.
 - 2026-08-07 · HIRED · `ui-ux-designer` · D1/D2 · P0 screen set and tokens (#7), unblocked once the CEO supplied visual references
+- 2026-08-17 · HIRED · `devops-engineer` · closeout · reviewing PR #155, standing merge-readiness duty across the fleet for this push
+- 2026-08-17 · HIRED · `cto` · closeout · design brief for #154 before backend starts, to pre-empt an SEC-15-shaped bug in the new HTTP surface
+- 2026-08-17 · HIRED · `competition-strategist` · closeout · #33, five-slide draft, independent of #154
+- 2026-08-17 · HIRED · `ui-ux-designer` · closeout · spec for pulling back #25/#52/#56 from CUT, independent of #154
+- 2026-08-17 · HIRED · `general-purpose` as `competition-strategist` (2nd instance) · closeout · reconcile PR #157's slide redraft with the pre-existing honesty-tripwire test (`tests/test_submission_and_finale_closure.py`); wording-only fix, pushed as `3cff324`
+- 2026-08-17 · HIRED · `backend-developer` (Engineer A) · #154 · wired `create_mission`/`list_missions`/`get_mission`, PR #160
+- 2026-08-17 · HIRED · `engineering-manager` · #154 · review PR #160. **First attempt failed**: built-in `engineering-manager` has no `Bash`/`gh` tool — correctly refused to fabricate a verdict. Retried as `general-purpose` reading `~/.claude/agents/engineering-manager.md`. Same limitation likely applies to `product-manager`, `ui-ux-designer`, `ceo` — check the registry's Tools column before assuming shell access. Retry: APPROVE.
+- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #160's idempotency-key write surface. Verdict: CLEARED.
+- 2026-08-17 · MERGED · PR #160 (`create_mission`/`list_missions`/`get_mission`, 3 of 7 stubs) · #154 · both reviews signed off, CI green
+- 2026-08-17 · HIRED · `backend-developer` (Engineer B) · #154 · wired `preflight`/`start`/`pause`/`cancel`, fixed the `transitions.py` DoesNotExist bug, PR #161 rebased on #160
+- 2026-08-17 · HIRED · `engineering-manager` (as `general-purpose`) · #154 · review PR #161. Verdict: APPROVE.
+- 2026-08-17 · HIRED · `cybersecurity` · #154 · review PR #161's row-lock concurrency. Verdict: CLEARED.
+- 2026-08-17 · HIRED · `qa-engineer` · #154 · verify PR #161's concurrency tests. Verdict: PASS — deliberately weakened the lock, confirmed the test catches it (5/5 failures), restored, confirmed green.
+- 2026-08-17 · HIRED · `general-purpose` as `security-research-engineer` (2nd instance) · #159 · fixed SEC-38 (freeze-before-kill) and SEC-35 (FSIZE fallback) in `packages/sandbox/jail.py`, PR #162
+- 2026-08-17 · HIRED · `cybersecurity` · #159 · binding D-056 independent re-attack of PR #162. Verdict: CLEARED — SEC-38 re-attacked with a harder adversarial variant (60x clean, ~220k process creations); SEC-35 re-attacked with a non-Python SIGXFSZ-ignoring target. Found and filed 3 new non-blocking residuals (#163/#164/#165).
+- 2026-08-17 · MERGED · PR #162 (SEC-38/SEC-35 sandbox jail fixes) · #159 CLOSED
+- 2026-08-17 · MERGED · PR #161 (`preflight`/`start`/`pause`/`cancel`, rebased onto #160 post-squash) · #154 CLOSED · all 7 of 7 mission-lifecycle routers now wired; #50 unblocked
+- 2026-08-17 · MERGED · PR #157 (five-slide submission draft) · #33 · CI green after the wording-precision fix
+- 2026-08-17 · HIRED · `devops-engineer` · #50 · first live attempt at the D7 unattended gate run since #154 closed — fresh env, no-cache rebuild, real nine-step mission through the HTTP API
+
+**NOTE (2026-08-17): this log has been clobbered by concurrent agent writes twice this session** (agents with `Write`/`Edit` access reading a stale copy of this file at spawn time, then overwriting the whole file on their own save). Restored both times from the orchestrator's own record. If a hire-log entry you expect to see is missing, it may be a third occurrence — check recent PR/issue history on GitHub as the source of truth, not just this file.
 
 **Humans on the repo:** Mahatav (CEO, Kelowna) and Raunak (`raunaksachinkhanna`, India) — both
 push access. Agent work goes through the same PR and review chain as theirs.
