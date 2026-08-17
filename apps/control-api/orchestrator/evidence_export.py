@@ -32,6 +32,25 @@ byte-identical bundle content never corrupts or duplicates the artifact bytes on
 disk — only a new `Export` row (a new `export_id`, new `generated_at`) is added,
 which is the correct behaviour for a new export *request*.
 
+## Redaction at the export boundary (SEC-48, D-071b)
+
+`assemble_evidence_bundle` (`orchestrator.evidence_bundle`) is upstream of this module
+and trusts `GateResult.detail`'s own schema contract — "User-safe summary. Never raw
+target output, never secrets." (`contracts/verdict.py:61-64`) — the same promise
+`orchestrator.verification._summarize` is responsible for keeping (SEC-45, on the
+still-unmerged `feat/168-t5-verify-executor` branch as of this fix). This module is
+the last code that runs before that value can leave the system entirely, inside a
+tarball handed to an external competition judge, so it does not extend that trust: as
+of this fix, `export_mission` runs every `GateResult.detail` reachable from the
+assembled bundle through `orchestrator.redaction.sanitize_detail` — an allowlist, not
+a denylist (see that module's own docstring for why) — before any of `report.md`,
+`report.json`, or `gate-matrix.json` is rendered. `render_gate_matrix` and
+`_render_gate_table` independently call the same sanitizer on the values they render,
+so both are safe even if ever called directly with an unsanitized bundle by some
+future caller — the same "don't rely on a single point" reasoning D-071b applied to
+this module's relationship with `orchestrator.verification` applies here too, one
+layer in.
+
 ## Known gaps, disclosed rather than silently absorbed
 
 * `ExportRequest.include_artifacts=True` does not yet copy raw stage artifacts
@@ -65,12 +84,13 @@ from django.conf import settings
 from django.utils import timezone
 
 from authorization import archive, store
-from authorization.errors import MissionNotFoundError
+from authorization.errors import MissionNotFoundError, UnreadableArchiveError
 from contracts.schemas.common import ArtifactRef
 from contracts.schemas.evidence import EvidenceBundle, ExportReceipt
 from contracts.verdict import GateStatus
 from missions.models import Artifact, Export, Mission, PatchCandidate
 from orchestrator.evidence_bundle import assemble_evidence_bundle
+from orchestrator.redaction import sanitize_detail
 
 #: `Artifact.kind` for the one durable object this module writes. A single value
 #: because the tarball is the artifact of record — its contents already carry
@@ -130,6 +150,7 @@ def export_mission(
     root = workspace_root if workspace_root is not None else default_export_workspace_root()
 
     bundle = assemble_evidence_bundle(mission.id, now=now)
+    bundle = _sanitize_bundle_for_export(bundle)  # SEC-48, D-071b — see module docstring
 
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     bundle_name = f"brahmadatta-evidence-{mission.id}-{stamp}"
@@ -137,6 +158,8 @@ def export_mission(
     bundle_dir = root / f"{bundle_name}-{uuid.uuid4().hex}"
     bundle_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
 
+    tar_path = bundle_dir.parent / f"{bundle_name}.tar"
+    tar_gz_path = bundle_dir.parent / f"{bundle_name}.tar.gz"
     try:
         manifest_entries = _write_bundle_files(bundle_dir, bundle, formats, include_artifacts)
         (bundle_dir / "manifest.json").write_text(
@@ -146,18 +169,47 @@ def export_mission(
             )
         )
 
-        tar_path = bundle_dir.parent / f"{bundle_name}.tar"
-        tar_gz_path = bundle_dir.parent / f"{bundle_name}.tar.gz"
-        archive.build_tar_from_directory(bundle_dir, tar_path)
-        _gzip_deterministic(tar_path, tar_gz_path)
-        tar_path.unlink(missing_ok=True)
+        try:
+            archive.build_tar_from_directory(bundle_dir, tar_path)
+            _gzip_deterministic(tar_path, tar_gz_path)
+            tar_path.unlink(missing_ok=True)
 
-        ingest = store.ingest_from_path(
-            Path(settings.ARTIFACT_ROOT),
-            tar_gz_path,
-            max_bytes=settings.EVIDENCE_BUNDLE_MAX_BYTES,
-        )
-        tar_gz_path.unlink(missing_ok=True)
+            # SEC-49, D-071b: `tar_gz_path` already exists uncapped on disk by this
+            # point — nothing earlier in this pipeline streams/caps the tar or gzip
+            # write itself (see this module's "Known gaps" section for why that is
+            # not being rebuilt in this pass) — so the size ceiling is checked here,
+            # immediately after the tarball is created and before it is ever handed
+            # to `store.ingest_from_path`, rather than discovering the same fact a
+            # second time only after `ingest_from_path` has opened and started
+            # reading it. Raises the identical error `ingest_from_path` would raise
+            # on the same condition, so callers see one consistent failure shape
+            # either way.
+            actual_bytes = tar_gz_path.stat().st_size
+            if actual_bytes > settings.EVIDENCE_BUNDLE_MAX_BYTES:
+                raise UnreadableArchiveError(
+                    f"Evidence bundle exceeds the "
+                    f"{settings.EVIDENCE_BUNDLE_MAX_BYTES}-byte ceiling.",
+                    details={
+                        "max_bytes": settings.EVIDENCE_BUNDLE_MAX_BYTES,
+                        "actual_bytes": actual_bytes,
+                    },
+                )
+
+            ingest = store.ingest_from_path(
+                Path(settings.ARTIFACT_ROOT),
+                tar_gz_path,
+                max_bytes=settings.EVIDENCE_BUNDLE_MAX_BYTES,
+            )
+        finally:
+            # SEC-49: unconditional, not just the happy-path unlink the previous
+            # version of this function had. Whether the tar/gzip step itself raised,
+            # the cap check above raised, or `ingest_from_path` raised, no tarball —
+            # oversized or otherwise — is left behind in `EXPORT_WORKSPACE_ROOT`.
+            # `missing_ok=True` makes both calls safe regardless of how far this
+            # block got (`tar_path` is already gone on the happy path; `tar_gz_path`
+            # may or may not exist depending on where a failure occurred).
+            tar_path.unlink(missing_ok=True)
+            tar_gz_path.unlink(missing_ok=True)
     finally:
         shutil.rmtree(bundle_dir, ignore_errors=True)
 
@@ -201,6 +253,48 @@ def _receipt_from_export(export_row: Export) -> ExportReceipt:
         artifacts=[ArtifactRef(**ref) for ref in export_row.artifact_refs],
         generated_at=export_row.generated_at,
     )
+
+
+# ------------------------------------------------------------------------------------
+# Redaction (SEC-48, D-071b)
+# ------------------------------------------------------------------------------------
+
+
+def _sanitize_bundle_for_export(bundle: EvidenceBundle) -> EvidenceBundle:
+    """Return a copy of `bundle` whose every `VerificationRecord.gates.*.detail` has
+    been passed through `orchestrator.redaction.sanitize_detail`.
+
+    This is the single point every exported artifact's data flows through after
+    assembly: `_write_bundle_files` (`report.md` via `render_markdown`, `report.json`
+    via `EvidenceBundle.model_dump_json()`, `gate-matrix.json` via
+    `render_gate_matrix`) is always called with this function's return value, never
+    the raw output of `assemble_evidence_bundle` — closing the `model_dump_json()`
+    leak SEC-48 named specifically, which no per-renderer sanitization call could
+    close on its own (`model_dump_json()` walks the object graph directly; it does
+    not go through `render_gate_matrix`/`_render_gate_table` at all).
+
+    `EvidenceBundle` and its nested schemas (`VerificationRecord`, `GateMatrix`,
+    `GateResult`) are ordinary mutable pydantic models (`extra="forbid"`, not
+    `frozen`) — `model_copy(deep=True)` plus direct attribute assignment on the copy
+    is safe here and does not re-trigger `VerificationRecord`'s own
+    `_verdict_follows_from_gates` validator (that only runs at construction time, and
+    this never changes `.status`, only `.detail`, so the derived verdict this
+    function's caller already recorded is never invalidated by anything this function
+    does).
+    """
+    if not bundle.verifications:
+        return bundle
+    sanitized_verifications = [
+        _sanitize_verification_record(record) for record in bundle.verifications
+    ]
+    return bundle.model_copy(update={"verifications": sanitized_verifications})
+
+
+def _sanitize_verification_record(record):
+    sanitized = record.model_copy(deep=True)
+    for result in sanitized.gates.results():
+        result.detail = sanitize_detail(result.detail)
+    return sanitized
 
 
 # ------------------------------------------------------------------------------------
@@ -285,7 +379,13 @@ def _write_file(bundle_dir: Path, directory: Path, name: str, data: bytes, kind:
 
 def render_gate_matrix(bundle: EvidenceBundle) -> list[dict]:
     """Every `VerificationRecord`'s matrix, flattened for skimming — architecture spec
-    §5.3's `gate-matrix.json`."""
+    §5.3's `gate-matrix.json`.
+
+    SEC-48, D-071b: `sanitize_detail` is called on `result.detail` here directly, on
+    top of `export_mission` already handing this function a pre-sanitized `bundle`
+    (`_sanitize_bundle_for_export`) — independent, not redundant-and-therefore-
+    removable: this function stays safe even if some future caller invokes it
+    directly against an unsanitized bundle."""
     flattened = []
     for record in bundle.verifications:
         flattened.append(
@@ -297,7 +397,7 @@ def render_gate_matrix(bundle: EvidenceBundle) -> list[dict]:
                     str(result.name): {
                         "status": str(result.status),
                         "tool": result.tool,
-                        "detail": result.detail,
+                        "detail": sanitize_detail(result.detail),
                     }
                     for result in record.gates.results()
                 },
@@ -471,10 +571,15 @@ def _gate_denominator(verification) -> str:
 
 
 def _render_gate_table(verification) -> str:
+    """SEC-48, D-071b: `sanitize_detail` on `result.detail` directly — see
+    `render_gate_matrix`'s docstring for why this is independent of, not merely
+    redundant with, `export_mission` already sanitizing the bundle before this is
+    ever called."""
     rows = ["| Gate | Status | Tool | Detail |", "|---|---|---|---|"]
     for result in verification.gates.results():
+        safe_detail = sanitize_detail(result.detail)
         rows.append(
-            f"| {result.name} | {result.status} | {result.tool or '—'} | {result.detail or '—'} |"
+            f"| {result.name} | {result.status} | {result.tool or '—'} | {safe_detail or '—'} |"
         )
     return "\n".join(rows)
 

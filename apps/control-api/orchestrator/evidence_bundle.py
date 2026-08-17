@@ -59,6 +59,7 @@ from contracts.schemas.evidence import (
 from contracts.verdict import GateStatus, derive_mission_verdict
 from missions.models import Mission
 from orchestrator import evidence_repository, repository
+from orchestrator.redaction import sanitize_detail
 
 #: `packages.sandbox.ISOLATION_MODE` is a deployment-level constant (which backend is
 #: actually wired in, not a per-run measurement — see this module's own note below on
@@ -261,14 +262,25 @@ def _gates_not_run(verifications) -> list[str]:
     """Derived from the verification records just read, never hand-set — the shape
     architecture spec §5.4 point 4 (Δ #51) asks for, applied at the point of assembly
     rather than in a schema validator (that fix is `contracts/`'s to make; out of this
-    task's scope, and flagged in the handoff)."""
+    task's scope, and flagged in the handoff).
+
+    SEC-48 / D-071b: `result.detail` is run through `orchestrator.redaction.
+    sanitize_detail` *here*, before it is spliced into the plain string this function
+    returns — once that splice happens there is no field boundary left for a later
+    redaction pass to find; the export boundary (`orchestrator.evidence_export`) never
+    sees `GateResult.detail` as its own value for these entries, only this already-
+    joined string, so this is the one and only place this particular leak path can be
+    closed. See `orchestrator/redaction.py`'s module docstring for the full reasoning
+    (independent of, and in addition to, `orchestrator.evidence_export`'s own
+    redaction of every other `detail` it renders or serializes)."""
     entries: list[str] = []
     for record in verifications:
         short_patch = str(record.patch_id)[:8]
         for result in record.gates.results():
             if result.status in (GateStatus.NOT_RUN, GateStatus.ERROR):
+                safe_detail = sanitize_detail(result.detail) or "no reason recorded"
                 entries.append(
-                    f"patch {short_patch}: {result.name} {result.status} — {result.detail or 'no reason recorded'}"
+                    f"patch {short_patch}: {result.name} {result.status} — {safe_detail}"
                 )
     return entries
 
