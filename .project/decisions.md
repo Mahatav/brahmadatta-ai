@@ -5988,3 +5988,402 @@ routing) is the correct next claim on the three days remaining, not this.
 lines, which this record extends rather than reopens. No CEO risk acceptance is required per
 point 3 above; this is noted for CEO/PM visibility in the handoff, not routed as a required
 sign-off.
+
+---
+
+## D-080 — T6 (`JobKind.EXPORT` executor + evidence bundle assembly): the zero-verifications
+trap, idempotency split between the two callers, and three disclosed (not silently patched)
+gaps · 2026-08-17 · `backend-developer` seat
+
+Implementation notes for #168 T6, per D-061 §4's own framing: "a hard dependency of #168
+closing #50, not a parallel nice-to-have — without it the driver reproduces the exact
+'stuck forever' bug one stage later, at `EXPORTING`." Five calls worth recording.
+
+### 1. The zero-verifications trap: `EXPORTING` on a successful export routes to `FAILED`,
+never `HUMAN_REVIEW`, when there is no verification evidence at all
+
+**Decision** — `export_transition_policy` (`orchestrator/export_executor.py`) checks
+`repository.load_verifications(mission.id)` before calling `derive_mission_outcome`; if the
+list is empty, it returns `MissionState.FAILED` directly rather than deriving a verdict.
+
+**Options considered** — (a) always call `derive_mission_outcome(verdicts)`, which reduces an
+empty list to `HUMAN_REVIEW_REQUIRED` (`contracts.verdict.derive_mission_verdict`'s own stated
+rule: "no verifications at all -> HUMAN_REVIEW_REQUIRED"), and return `STATE_FOR_VERDICT[HUMAN_
+REVIEW_REQUIRED]` = `MissionState.HUMAN_REVIEW`; (b) special-case the empty list to `FAILED`.
+
+**Pros and cons** — (a) reads as the more "correct" mapping at first glance — it reuses the
+same reduction function `transition()` itself will check against — but it is wrong for a reason
+only visible by reading `contracts.state_machine.assert_verdict_is_evidenced` past its first
+branch: that guard raises `VerificationRequiredError` for **every** target in `VERDICT_FOR_
+STATE` — `VERIFIED`, `REJECTED`, *and* `HUMAN_REVIEW` — when `verifications` is empty ("a
+verdict state must be justified by at least one gate matrix" is unconditional, not "unless the
+target is the cautious one"). A policy implementing (a) returns a target that `dispatch_
+terminal_jobs`' call to `transitions.transition()` then refuses with `InvalidStateTransitionError`
+→ actually `VerificationRequiredError` (still a `ContractError`, still caught and logged, never
+raised into the tick loop) — logged and retried, forever, every tick, since nothing about the
+policy's own logic changes between ticks. That is `EXPORTING` hanging exactly the way
+`VALIDATING` hung before #168, one stage later, which is the literal failure this task exists to
+prevent (D-061 §6, point 6). (b) is legal unconditionally — `FAILED` has no entry in `VERDICT_
+FOR_STATE`, so `assert_verdict_is_evidenced` returns immediately for it — and states the honest
+thing: a mission that reached `EXPORTING` with nothing to derive a verdict from is a pipeline
+defect, not a "we're not sure, ask a human" case (asking a human is *also* blocked by the same
+guard, for the same reason).
+
+**Cost implications** — none; same function, one extra `if`.
+
+**Security implications** — none. If anything, positive: (a) would have been a live 409-loop
+discoverable only by watching orchestrator logs for a mission stuck in `EXPORTING`, not by any
+automated check — the same category of "found by reading the code, not by running into it live"
+D-060/D-061 both flag repeatedly in this project's own history.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), implemented. In the intended pipeline this branch should not be
+reachable at all — `CORRELATE`'s own transition policy (T3, D-061 §2) is supposed to route
+"nothing to bind" straight to `HUMAN_REVIEW` before `PATCH`/`VERIFY` ever run, so `EXPORTING`
+is only entered once at least one `VerificationRecord` exists. T3 and T5 are not both landed on
+`main` as of this task (checked directly), so this function does not get to assume that
+invariant holds yet. Flagged for QA's Day-3 integration pass to exercise once T3/T5 land, not
+silently assumed away here. Proven directly by
+`orchestrator/tests/test_export_executor.py::test_zero_verifications_routes_to_failed_never_a_
+verdict_state`, which drives a mission to `EXPORTING` with zero records (via the `walk_to` test
+fixture, not the real job-backed pipeline) and asserts the resulting `FAILED` transition is
+actually accepted by the real state machine, not merely returned by the policy.
+
+**Final approval authority** — CTO (technical); this is the same category of binding mapping
+call D-061 §2 reserved for itself over the `STRESS_TEST -> HUMAN_REVIEW` trap.
+
+### 2. Idempotency differs by caller: the pipeline-driven executor reuses a mission's existing
+`Export`; the operator-facing `POST /export` endpoint always creates a fresh one
+
+**Decision** — `orchestrator.evidence_export.export_mission` takes `reuse_existing: bool`.
+`orchestrator/export_executor.py`'s `JobKind.EXPORT` executor always calls it `True` (D-061 §3
+rule 2: a worker that crashed mid-export must not redo the work or duplicate the bundle on
+restart). `api/routers/evidence.py`'s `POST /export` handler always calls it `False` (each
+request is a distinct, deliberate export action — mirroring ordinary `POST` semantics, and this
+project's own existing precedent, `missions.service.create_mission`'s `idempotency_key` handling
+for `POST /missions`).
+
+**Options considered** — (a) one behaviour for both callers (either always reuse, or never);
+(b) the split above, keyed by which caller is asking.
+
+**Pros and cons** — "always reuse" for the HTTP endpoint would mean a second `POST /export` with
+different `formats`/`include_artifacts` silently returns the *first* call's receipt, ignoring
+the new request body — a caller-visible correctness bug, not a convenience. "Never reuse" for
+the pipeline-driven executor would mean a crash-and-restart re-renders and re-tars the whole
+bundle every time (wasted work, though not corruption — `store.ingest_from_path` is itself
+content-addressed and idempotent) and, worse, is the literal D-061 §3 rule 2 violation named for
+`BASELINE`/every other stage's own terminal-artifact check. (b) costs one extra boolean parameter
+and is correct for both callers' actual semantics.
+
+**Cost implications** — none.
+
+**Security implications** — none.
+
+**Scalability implications** — none at one mission at a time.
+
+**Recommendation** — (b), implemented, proven by `orchestrator/tests/test_export_executor.py::
+test_rerunning_the_executor_reuses_the_existing_export` (executor path — one `Export`/`Artifact`
+row survives two calls) and `::test_export_mission_reuse_existing_false_creates_a_fresh_row_but_
+no_duplicate_bytes` (HTTP path — two `Export` rows, one `Artifact` row, since the tarball bytes
+are unchanged and content-addressed).
+
+**Final approval authority** — CTO (technical), though low-stakes; flagged for visibility since
+it is a minor, undocumented-until-now addition to `04-api-plan.md`'s equivalent in this repo
+(`docs/03-technical/21-api-specification.md` — the frozen OpenAPI dump is the actual contract,
+per that document's own D1 note, and does not change shape here, only behaviour).
+
+### 3. Three gaps disclosed rather than silently patched over
+
+Per this repo's own "no decorative fake metrics" rule, applied to three places T6 touches where
+the honest answer is "this isn't built yet," not a fabricated value:
+
+1. **`ExportRequest.idempotency_key` is accepted and validated by the schema but not persisted.**
+   `Export` (`missions/models.py`, database-engineer's schema) has no column for it. A second
+   `POST /export` with the same key currently produces a second `Export` row rather than
+   replaying the first response — this task did not add a migration to fix it, since schema
+   changes are the database-engineer's call, not something to make unilaterally mid-task.
+   Flagged as an open question for CTO/database-engineer: worth a migration, or is "every export
+   is a fresh row" acceptable given the tarball bytes themselves are already deduplicated?
+2. **`ExportRequest.include_artifacts=True` does not copy raw stage artifacts into the bundle's
+   `artifacts/` directory.** No function anywhere in this codebase resolves an `ArtifactRef.uri`
+   generically back to bytes under `ARTIFACT_ROOT` (checked directly). The flag is honoured as
+   far as writing an empty `artifacts/` directory with a `NOTE.txt` stating this plainly, rather
+   than silently ignoring the flag or fabricating file contents.
+3. **`EvidenceBundle.isolation_mode` reflects a deployment-level constant (`packages.sandbox.
+   ISOLATION_MODE`), not a per-mission-per-stage measurement.** No stage today persists which
+   isolation backend actually ran a given mission's commands (`BaselineOutcome.isolation_mode`
+   exists on the dataclass `workers/baseline/run.py` produces but is dropped before reaching
+   `BaselineReport` — checked directly, that model has no such column). Since `SUBPROCESS_JAIL`
+   is the only backend wired into this checkout today (`packages.sandbox`'s own `__init__.py`
+   imports `ISOLATION_MODE` only from `jail.py`, never `container.py`), this is a true statement
+   for every mission until #15 lands, not a per-run guess — but it is a real, disclosed gap that
+   a future per-stage isolation record would need to close properly.
+
+Also implemented, not a gap: `EvidenceBundle.gates_not_run`'s architecture-spec §5.4 point 4
+fix ("[Δ #51] make it derived, not hand-set") is applied at bundle-*assembly* time
+(`orchestrator/evidence_bundle.py::_gates_not_run`, computed from the same `verifications` list
+the bundle carries, never independently) rather than as a `contracts/schemas/evidence.py`
+`model_validator`. The schema itself is untouched — that fix, if wanted structurally rather than
+by convention, is `contracts/`'s to make (cto/software-architect own that file, per this
+project's role boundaries and D-060's own precedent), not this task's to add unilaterally.
+
+**Final approval authority** — CTO (technical) for whether any of the three gaps above are worth
+closing before the 2026-08-20 deadline; none of the three blocks #168 from closing (a mission
+still gets a real, honestly-labelled evidence bundle either way).
+
+
+---
+
+## D-081 — SEC-48/SEC-49 fix on PR #187 (#168 T6, evidence-bundle export): an independent, allowlist-based redaction pass at the export boundary, and unconditional tarball cleanup · 2026-08-17 · `backend-developer` seat
+
+**Trigger** — `cybersecurity`'s D-071b ruling BLOCKED (Critical) PR #187 on SEC-48
+(`GateResult.detail` reaches every exported file with zero independent redaction at
+the export boundary) and filed SEC-49 (MEDIUM, `EVIDENCE_BUNDLE_MAX_BYTES` enforced
+too late and its own failure path orphans the oversized tarball) alongside. This
+entry records the fix, on the same branch/PR (`feat/168-t6-export`, #187), per
+D-071b's own instruction that findings route back to this task's owning developer.
+
+**Decision** — Added `orchestrator/redaction.py`, a new module exposing one function,
+`sanitize_detail(detail: str) -> str`, called at every location SEC-48 named
+(`evidence_bundle.py::_gates_not_run`; `evidence_export.py::render_gate_matrix` and
+`_render_gate_table` directly; and, for the `EvidenceBundle.model_dump_json()` leak
+specifically — which walks the object graph directly and never goes through either
+renderer — a new `_sanitize_bundle_for_export` step `export_mission` runs on the
+assembled bundle before any file is written). Also restructured `export_mission`'s
+tar/gzip/ingest sequence: the byte-ceiling is now checked immediately after the
+tarball is created and before `store.ingest_from_path` ever opens it, and both
+`tar_path`/`tar_gz_path` are unlinked inside an unconditional `finally`, not just on
+the happy path.
+
+**Options considered (SEC-48 redaction shape)** — (a) a denylist: regex for
+`KEY=VALUE`, `postgresql://`, `redis://`, and similar named secret shapes; (b) an
+allowlist: treat every `detail` as unsafe by default, and only pass through a value
+that is structurally safe (narrow character set, no newline, no unscoped `=`, no
+scheme separator, under a length ceiling), replacing anything else with a fixed
+placeholder — mirroring T5's own SEC-45 fix (`orchestrator.verification._summarize`,
+still unmerged on `feat/168-t5-verify-executor`), which already builds `detail` from
+an explicit known-safe vocabulary (tool name, `exit=<code>`, hand-written literals,
+bare regex-captured integers) rather than filtering raw output after the fact; (c) do
+nothing here and block purely on #175 merging/rebasing, on the theory that fixing the
+leak at its source makes a second check redundant.
+
+**Pros and cons** — (c) is exactly what D-071b's ruling rejected: T6 is the last code
+that runs before a value leaves the system for an external judge, and a single point
+of failure that depends on every future contributor honoring a docstring is the thing
+this review exists to close, not just this session's one reproduced leak. (a) is
+cheaper to write but shares the structural weakness D-071b's own reasoning named for
+SEC-44/SEC-45 — it only catches secret shapes someone thought to name in advance, and
+a new secret shape later (a different provider's connection-string scheme, a
+differently-named credential env var) sails through unredacted with no code change
+anywhere flagging that gap. (b) costs a slightly larger, better-documented module (one
+file, one function, unit-tested directly) in exchange for closing that class of gap
+structurally: anything that is not on the safe list is redacted, including a shape
+nobody has thought of yet, at the cost of also redacting some theoretically-safe but
+unusually-shaped legitimate text (mitigated by testing directly against the two real
+shapes in this codebase most likely to trip a naive allowlist — a raw ctest failure
+summary, and `contracts/verdict.py`'s own `_CUT_REASON`, present on every
+`GateMatrix` by default — both pass through unredacted, see `orchestrator/redaction.py`'s
+own "Known limitation" section for the one false positive an earlier draft produced
+and how it was resolved).
+
+**Recommendation / ruling** — (b), implemented as `orchestrator/redaction.py`. The
+allowlist is deliberately layered, not a single regex: no newline/carriage-
+return/tab; a length ceiling (300 chars); every well-formed `exit=<code>` token
+stripped before checking for any *other* `=` (closing `KEY=value`-shaped leaks
+independent of whether a scheme separator is present — verified directly with a test
+carrying a bare `AWS_SECRET_ACCESS_KEY=...`-shaped assignment and no `://` anywhere);
+a `://` scheme-separator ban (closing every connection-string shape this review
+named, and any future one sharing the same separator); a `-----BEGIN` PEM-marker ban;
+and a narrow final character-class allowlist. Applied at three independent layers per
+D-071b's own "don't rely on a single point" reasoning: once via
+`_sanitize_bundle_for_export` (covers `report.json`'s `model_dump_json()` path, which
+no per-renderer call could reach), and again directly inside `render_gate_matrix` and
+`_render_gate_table` (so both stay safe even if a future caller invokes either
+directly against an unsanitized bundle). `evidence_bundle.py::_gates_not_run` gets
+its own call to the same sanitizer, since by the time its output reaches
+`evidence_export.py` the `detail` value is already spliced into a plain string with
+no field boundary left for a later pass to find.
+
+**SEC-49 fix** — `export_mission`'s tar/gzip/ingest sequence now checks
+`tar_gz_path.stat().st_size` against `settings.EVIDENCE_BUNDLE_MAX_BYTES`
+immediately after the gzip write and before `store.ingest_from_path` is ever called,
+raising the identical `UnreadableArchiveError` `ingest_from_path` would raise on the
+same condition (one consistent failure shape regardless of which check catches it).
+`tar_path.unlink(missing_ok=True)` and `tar_gz_path.unlink(missing_ok=True)` both now
+run inside a `finally` wrapping the whole tar/gzip/cap-check/ingest sequence, so a
+failure at any point in that sequence — not only the happy path the previous version
+handled — leaves nothing behind in `EXPORT_WORKSPACE_ROOT`. This does not move the
+cap earlier than "after the tarball exists on disk" (streaming/capping the tar or
+gzip write itself would be a larger change to `authorization.archive`, out of this
+fix's scope and flagged as a possible follow-up in `evidence_export.py`'s own module
+docstring); it closes the gap between "an oversized tarball exists on disk" and
+"someone notices and cleans it up," which is what SEC-49 named as the actual finding.
+
+**Proof, not argument** — `orchestrator/tests/test_evidence_export.py` (17 new
+tests, all run for real): three adversarial SEC-48 tests carry a poisoned
+`GateResult.detail` (a fabricated `DATABASE_URL=postgresql://...` line embedded in
+subprocess-shaped text, a bare `KEY=value` secret with no scheme, and a poisoned
+`ERROR`-status gate reaching only `_gates_not_run`'s path) through a real
+`record_verification` → `export_mission` round-trip, extract the actual tarball
+written under `ARTIFACT_ROOT`, and assert none of `report.md`/`report.json`/
+`gate-matrix.json` contain any fragment of the secret; a fourth asserts the
+sanitizer does *not* over-redact a benign `GateMatrix` (all-PASS, plus the default
+`_CUT_REASON` gates) — proving this is a fix, not a blunt instrument. Ten
+unit-level `sanitize_detail` tests cover both the poisoned and the benign shapes
+directly. Two SEC-49 tests force `EVIDENCE_BUNDLE_MAX_BYTES=10`, confirm
+`UnreadableArchiveError`, and confirm `EXPORT_WORKSPACE_ROOT` is left with zero
+files/directories afterward — including across three consecutive retries, the exact
+accumulation scenario the reviewer named. Full suite re-run after the fix:
+`apps/control-api` — **519 passed, 9 skipped** (502 baseline + 17 new, zero
+regressions); root `tests/` — 70 passed, 3 skipped, 1 pre-existing failure confirmed
+unrelated to this change (`tests/architecture/test_import_direction.py`'s
+`/.venv/`-only exclusion filter does not match this worktree's `.venv311` directory;
+reproduced identically with this fix's changes fully reverted). `python manage.py
+check` — `System check identified no issues (0 silenced)`. `ruff check`/`ruff
+format --check` on the four touched files — clean after one `ruff format` pass.
+
+**Cost implications** — none beyond developer time; no new dependency (`re` is
+stdlib), no infrastructure change.
+
+**Security implications** — this is the fix; SEC-48 and SEC-49 are addressed as
+D-071b required, independent of PR #175's own merge status. PR #175 (SEC-44/SEC-45)
+remains a separate, still-required fix for the leak's *root cause* — this entry does
+not supersede or substitute for that; #187 still needs to rebase onto #175 once it
+merges, per D-071b's "both parts, not either/or" requirement. Re-review by
+`cybersecurity` is still needed before merge; this task did not self-clear the
+BLOCKED verdict.
+
+**Scalability implications** — none; `sanitize_detail` runs on a small, schema-capped
+number of short strings (`GateResult.detail` itself is already `max_length=2000`,
+and a mission carries at most a handful of verifications) per export, not a
+per-request or per-byte cost on any hot path.
+
+**Recommendation / ruling** — implemented as described, pushed to
+`feat/168-t6-export` (same PR #187, no new PR opened per instruction). Re-review
+requested from `cybersecurity` before merge.
+
+**Final approval authority** — `cybersecurity` (re-verification of SEC-48/SEC-49,
+per D-071b's own closing line: "only a written CEO risk acceptance recorded in this
+file can override the block," and short of that, re-review is what lifts it); CTO for
+any dispute over the redaction shape chosen.
+
+---
+
+
+---
+
+## D-082 — SEC-50 fix on PR #187 (#168 T6, evidence-bundle export): move sanitization upstream into `assemble_evidence_bundle`, not a fourth per-consumer patch · 2026-08-17 · `backend-developer` seat
+
+**Trigger** — `cybersecurity`'s re-review of D-081's SEC-48/SEC-49 fix (commit
+`b1235f2`) confirmed both fixed, but found a new CRITICAL: SEC-50. `GET /missions/
+{mission_id}/evidence` (`api/routers/evidence.py::get_evidence`) calls
+`evidence_bundle.assemble_evidence_bundle` directly and returns it as the response
+body — it never calls `evidence_export.export_mission`, so none of D-081's three
+redaction layers (all inside `orchestrator/evidence_export.py`) ever ran on this
+path. Proven by the reviewer rebuilding the identical D-071b poisoned-`GateResult.
+detail` scenario and confirming the secret present verbatim in `assemble_evidence_
+bundle(...).model_dump_json()` — exactly what `get_evidence` returns. Blast radius:
+any `READ_ROLES` caller (includes `REVIEWER`, a read-only, apparently-external-
+facing role) gets the full unredacted bundle with one authenticated `GET`, no
+`POST /export` and therefore no `Export`/`Artifact` audit row at all — worse in that
+one respect than the tarball path D-081 fixed.
+
+**Decision** — Moved the sanitization point upstream, into `orchestrator/
+evidence_bundle.py::assemble_evidence_bundle` itself, per the reviewer's own
+recommended fix. `assemble_evidence_bundle` now calls a new `_sanitize_verifications`
+helper (which reuses `orchestrator.redaction.sanitize_detail`, the same function
+D-081 already introduced — no new redaction logic, no divergent second
+implementation) on `verifications` immediately after loading them from
+`repository.load_verifications`, before constructing the returned `EvidenceBundle`.
+Both of the bundle's only two consumers — `get_evidence` (direct return) and
+`export_mission` (`orchestrator/evidence_export.py`) — now receive an
+already-sanitized bundle from the one function both of them call.
+
+**Options considered** — (a) patch `get_evidence` itself, adding a fourth
+call-site-specific sanitization step alongside D-081's three; (b) sanitize inside
+`assemble_evidence_bundle`, upstream of both consumers, and keep D-081's three
+export-boundary layers as redundant defense in depth rather than removing them.
+
+**Pros and cons** — (a) is a smaller, more local diff, but repeats exactly the
+structural risk D-081's own module docstring already named for the export boundary:
+"two callers, one forgets." A fifth consumer of `assemble_evidence_bundle` added
+later (a background job, a CLI export tool, a future admin endpoint) would need to
+remember to sanitize too, with nothing in the code forcing that. (b) costs one small
+addition (a ~15-line helper plus one call) at the one point every current and future
+consumer already goes through to get a bundle at all, and removes the "remember to
+sanitize" burden from every call site entirely — the same property D-081 already
+established for `export_mission`'s three renderers, now extended one layer
+upstream to cover `assemble_evidence_bundle`'s callers generally, not just this one
+newly-discovered gap.
+
+**Recommendation / ruling** — (b), matching the reviewer's own explicit
+recommendation. D-081's three export-boundary redaction calls
+(`_sanitize_bundle_for_export`, `render_gate_matrix`, `_render_gate_table`) and
+`evidence_bundle.py::_gates_not_run`'s own call are kept, not removed or simplified
+— per D-081's own "don't rely on a single point" reasoning, now applied one layer
+further out. `sanitize_detail` is documented idempotent specifically so stacking
+these calls is always safe: none of the four now-redundant layers can double-mangle
+an already-sanitized value, and each stays independently correct if a future change
+ever weakens or bypasses the layer upstream of it.
+
+**Known limitation re-confirmed unchanged, not silently regressed** — D-081's module
+docstring on `orchestrator/redaction.py` already discloses that `sanitize_detail`'s
+allowlist does not catch a bare secret carrying no `=`, `://`, PEM marker, newline,
+or out-of-charset character (e.g. a raw AWS access key or an OpenAI/GitHub/Slack-
+shaped token pasted with no surrounding structure). The re-review actively probed
+nine such shapes (AWS access key ID, AWS secret key with no `KEY=` prefix, a
+space-separated `KEY VALUE` pair, OpenAI-shaped, GitHub PAT-shaped, and Slack-token-
+shaped tokens, an unpadded base64 blob, a JWT-shaped string, and `password: X`
+colon-style text) and confirmed all nine leak through unredacted, and judged that
+non-blocking — not the leak class SEC-44/45/48/50 ever reproduced or targeted, and
+closing it needs a materially different (entropy/token-shape) technique with its own
+disclosed false-positive risk. Moving the sanitization call site does not change
+`sanitize_detail`'s own logic at all, so this assessment cannot have changed by
+construction — re-run and locked in as an explicit, always-run regression test
+(`orchestrator/tests/test_evidence_export.py::test_bare_secret_probes_remain_a_
+disclosed_non_blocking_gap`, parametrized over all nine shapes, plus one full-
+pipeline confirmation) rather than left as an unverified claim.
+
+**Proof, not argument** — `orchestrator/tests/test_evidence_bundle.py`: two new
+tests call `assemble_evidence_bundle` directly (no `export_mission` involved at
+all) with the identical D-071b poisoned-connection-string scenario, serialize with
+`.model_dump_json()` the same way django-ninja does, and assert the secret is absent
+and the redaction placeholder is present — plus a benign-detail false-positive
+guard. `api/tests/test_evidence_endpoints.py::test_get_evidence_bundle_redacts_
+poisoned_gate_detail_for_a_reviewer`: an HTTP-level test hitting `GET
+/missions/{id}/evidence` as a `REVIEWER` token (the exact role/blast-radius the
+review named) with a poisoned verification on file, asserting the raw response body
+never contains the secret. `orchestrator/tests/test_evidence_export.py`: nine
+parametrized bare-secret-probe tests plus one full-pipeline probe, confirming the
+disclosed non-blocking gap is unchanged. Full suite re-run after the fix:
+`apps/control-api` — **532 passed, 9 skipped** (519 baseline + 13 new, zero
+regressions). `python manage.py check` — `System check identified no issues (0
+silenced)`. `ruff check`/`ruff format --check` on the seven touched files — clean.
+Root `tests/` — 73 passed, 1 pre-existing failure (same `.venv311`-vs-`.venv`
+`test_import_direction.py` artifact D-081 already documented and confirmed
+unrelated — reproduced identically before this change; not this fix's to resolve).
+
+**Cost implications** — none beyond developer time; no new dependency, no schema or
+infrastructure change.
+
+**Security implications** — this is the fix. Closes SEC-50 (CRITICAL): `GET
+/evidence` now returns a bundle sanitized at its source, safe for any `READ_ROLES`
+caller including `REVIEWER`. Does not change the disclosed, non-blocking
+bare-secret-shape limitation already on record for D-081 — confirmed, not
+regressed. PR #187 still separately requires the #175 rebase per D-071b's original
+ruling; unrelated to and not resolved by this fix. Re-review by `cybersecurity`
+requested for SEC-50 specifically before merge.
+
+**Scalability implications** — none; identical cost shape to D-081's own
+`sanitize_detail` calls (small, schema-capped number of short strings per bundle
+assembly), just called one function earlier in the same request/job.
+
+**Recommendation / ruling** — implemented as described, pushed to
+`feat/168-t6-export` (same PR #187, no new PR opened per instruction). Re-review
+requested from `cybersecurity` before merge.
+
+**Final approval authority** — `cybersecurity` (re-verification of SEC-50, same
+standing rule as D-081: only a written CEO risk acceptance recorded in this file
+overrides the block, short of that a fix + re-review is what lifts it); CTO for any
+dispute over the redaction-placement shape chosen.

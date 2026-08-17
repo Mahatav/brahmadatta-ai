@@ -14,11 +14,10 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.http import HttpRequest
-from ninja import Query, Router
+from ninja import Query, Router, Status
 
 from api.auth import OPERATOR_ROLES, READ_ROLES, require_role
 from api.errors import ERROR_RESPONSES
-from contracts.errors import NotImplementedYetError
 from contracts.schemas.common import Page
 from contracts.schemas.evidence import (
     BaselineReport,
@@ -31,11 +30,10 @@ from contracts.schemas.evidence import (
     PatchCandidate,
     VerificationRecord,
 )
-from orchestrator import evidence_repository
+from orchestrator import evidence_bundle, evidence_export, evidence_repository
 
 router = Router(tags=["evidence"])
 
-EVIDENCE_ISSUE = "#32 (evidence database)"
 VERIFICATION_ISSUE = "#28 (verification gates)"
 
 
@@ -52,9 +50,7 @@ def list_findings(
     offset: int = Query(default=0, ge=0),
 ):
     require_role(request, *READ_ROLES)
-    items, total = evidence_repository.list_findings(
-        mission_id, limit=limit, offset=offset
-    )
+    items, total = evidence_repository.list_findings(mission_id, limit=limit, offset=offset)
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -110,9 +106,7 @@ def list_patches(
     offset: int = Query(default=0, ge=0),
 ):
     require_role(request, *READ_ROLES)
-    items, total = evidence_repository.list_patch_candidates(
-        mission_id, limit=limit, offset=offset
-    )
+    items, total = evidence_repository.list_patch_candidates(mission_id, limit=limit, offset=offset)
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -136,19 +130,43 @@ def get_verification(request: HttpRequest, mission_id: UUID, patch_id: UUID):
     "/missions/{mission_id}/evidence",
     response={200: EvidenceBundle, **ERROR_RESPONSES},
     summary="The complete evidence bundle for a mission",
+    description=(
+        "SEC-50, D-071c: this handler returns `assemble_evidence_bundle`'s result "
+        "directly, without going through `orchestrator.evidence_export` at all — it "
+        "is safe *because* `assemble_evidence_bundle` itself now sanitizes every "
+        "`GateResult.detail` before returning (not because this handler does "
+        "anything extra), so this endpoint stays safe automatically if that function "
+        "is ever called from a new site in the future too."
+    ),
     operation_id="getEvidenceBundle",
 )
 def get_evidence(request: HttpRequest, mission_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(EVIDENCE_ISSUE)
+    return evidence_bundle.assemble_evidence_bundle(mission_id)
 
 
 @router.post(
     "/missions/{mission_id}/export",
     response={202: ExportReceipt, **ERROR_RESPONSES},
     summary="Export the Markdown/JSON evidence report",
+    description=(
+        "Exportable from any mission state (architecture spec §5.3: 'export is a "
+        "side-effect and an endpoint, not a privilege of the happy path'). Each call "
+        "is a fresh export (a new export_id/generated_at); the pipeline-driven "
+        "JobKind.EXPORT job that runs on entry to EXPORTING reuses a mission's "
+        "existing bundle instead of re-rendering one — see "
+        "orchestrator.evidence_export's module docstring for why the two callers "
+        "differ on that point, and the known gap around `idempotency_key` not yet "
+        "being persisted."
+    ),
     operation_id="exportEvidence",
 )
 def export_evidence(request: HttpRequest, mission_id: UUID, payload: ExportRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError("#30 (evidence report builder)")
+    outcome = evidence_export.export_mission(
+        mission_id,
+        formats=payload.formats,
+        include_artifacts=payload.include_artifacts,
+        reuse_existing=False,
+    )
+    return Status(202, outcome.receipt)

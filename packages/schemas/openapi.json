@@ -4435,6 +4435,7 @@
     },
     "/api/v1/missions/{mission_id}/evidence": {
       "get": {
+        "description": "SEC-50, D-071c: this handler returns `assemble_evidence_bundle`'s result directly, without going through `orchestrator.evidence_export` at all — it is safe *because* `assemble_evidence_bundle` itself now sanitizes every `GateResult.detail` before returning (not because this handler does anything extra), so this endpoint stays safe automatically if that function is ever called from a new site in the future too.",
         "operationId": "getEvidenceBundle",
         "parameters": [
           {
@@ -4553,6 +4554,7 @@
     },
     "/api/v1/missions/{mission_id}/export": {
       "post": {
+        "description": "Exportable from any mission state (architecture spec §5.3: 'export is a side-effect and an endpoint, not a privilege of the happy path'). Each call is a fresh export (a new export_id/generated_at); the pipeline-driven JobKind.EXPORT job that runs on entry to EXPORTING reuses a mission's existing bundle instead of re-rendering one — see orchestrator.evidence_export's module docstring for why the two callers differ on that point, and the known gap around `idempotency_key` not yet being persisted.",
         "operationId": "exportEvidence",
         "parameters": [
           {
