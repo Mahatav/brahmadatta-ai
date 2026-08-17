@@ -187,12 +187,17 @@ def test_a_naive_check_then_insert_loses_the_race(monkeypatch):
     """The injected violation, run first. A hand-rolled check-then-act
     implementation — `filter(idempotency_key=...).exists()` then `create()`, with a
     sleep standing in for scheduler interleaving to make the window reliable in a
-    test — either produces more than one `Mission` row for the same key, or an
-    unhandled `IntegrityError` (500) for the loser once the real database
-    constraint added by this PR's migration refuses the second insert. Either
-    outcome is the bug #154 exists to close; this test demonstrates the harness
-    below can actually see it before the next test trusts the harness to say the
-    real implementation does not have it.
+    test — loses this race. What that looks like depends on the backend: against
+    Postgres it is an unhandled `IntegrityError` (500) for the loser once the real
+    database constraint added by this PR's migration refuses the second insert;
+    against SQLite's coarser whole-database write lock it more often shows up as an
+    unhandled `OperationalError` ("database is locked") for whichever request loses
+    the race for the lock, or — if neither read raced past the other's write —
+    both requests succeeding but disagreeing, leaving two rows. All three are the
+    same underlying bug #154 exists to close: the naive path is not safe under
+    concurrency, on any backend. This test demonstrates the harness below can
+    actually see that before the next tests trust the harness to say the real
+    implementation does not have it.
     """
 
     def naive_create_mission(payload, *, now=None):
@@ -231,13 +236,42 @@ def test_a_naive_check_then_insert_loses_the_race(monkeypatch):
     )
 
 
+def _real_concurrent_writer_backend() -> bool:
+    from django.db import connection
+
+    return connection.vendor == "postgresql"
+
+
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(
+    not _real_concurrent_writer_backend(),
+    reason=(
+        "SQLite has no genuine concurrent-writer story: Django's shared-cache "
+        "in-memory test database lets two threads see the same rows, but SQLite "
+        "itself serializes writers on a single whole-database lock rather than "
+        "Postgres's row-level MVCC, so a second writer that cannot acquire that "
+        "lock inside the connection's busy-timeout window raises "
+        "'database is locked' (OperationalError) instead of exercising the real "
+        "code path under test (the unique-constraint IntegrityError catch in "
+        "missions.service.create_mission). That failure mode is a property of "
+        "SQLite's locking model, not of the implementation, and asserting "
+        "around it would make this test flaky for a reason unrelated to what it "
+        "claims to prove. Run explicitly against Postgres to exercise this: "
+        "DATABASE_URL=postgresql://... pytest "
+        "api/tests/test_create_list_get_missions.py -k concurrent_creates — "
+        "verified green there in the #154 PR. "
+        "test_a_naive_check_then_insert_loses_the_race and "
+        "test_replaying_a_create_with_the_same_key_returns_the_same_mission "
+        "cover the same mechanism deterministically on every backend."
+    ),
+)
 def test_concurrent_creates_with_the_same_idempotency_key_produce_exactly_one_mission():
-    """The property itself, on the real implementation: two concurrent creates
-    carrying the same `idempotency_key` must produce exactly one `Mission` row, and
-    both HTTP responses must reference it — not merely the sequential-replay case
+    """The property itself, on the real implementation, against a real
+    concurrent-writer database: two concurrent creates carrying the same
+    `idempotency_key` must produce exactly one `Mission` row, and both HTTP
+    responses must reference it — not merely the sequential-replay case
     `test_replaying_a_create_with_the_same_key_returns_the_same_mission` already
-    covers.
+    covers. Skipped on SQLite; see the `skipif` reason above.
     """
     responses = _fire_concurrent_creates(key="real-race-key")
 
