@@ -3545,3 +3545,172 @@ both is safe (idempotent), but is not this task's call to make either way.
 **Final approval authority** — CTO (technical), for the two open questions above; the four
 implementation decisions themselves are within backend-developer's scope per D-061's own
 task breakdown for T7.
+
+## D-066 — T1 (`JobKind.BASELINE` executor): the failure mapping, the cancellation gap, and a cross-package import fix D-061/D-062 did not anticipate · 2026-08-16 · `backend-developer`
+
+T1's own scope (D-062's staffing plan): wire `workers/baseline/run.run_baseline_stage` into
+`orchestrator/executors.py`'s `JobKind.BASELINE` executor and transition-policy contract
+(T0, already merged to this branch). Three calls made while doing that, none of them decided
+by D-061/D-062 explicitly.
+
+### 1. The failure mapping: `SUCCEEDED` only on a green baseline; `BASELINE_BUILD_FAILED` vs `BASELINE_FLAKY` split by which step failed
+
+**Decision** — `_baseline_executor` (`workers/baseline/dispatch.py`) reports
+`JobOutcome.SUCCEEDED` only when `BaselineOutcome.passed` is `True`. Every red baseline —
+configure/build failure *or* a build that succeeded but `ctest` reported any failure —
+reports `JobOutcome.FAILED`, `retry=False`, and one of two `ErrorCode`s:
+`BASELINE_BUILD_FAILED` when `configure_ok`/`build_ok` is `False`, `BASELINE_FLAKY`
+otherwise. `_baseline_transition_policy` mirrors this: `TRIAGE` only for a terminal
+`SUCCEEDED` job whose `result["passed"]` is `True`; `FAILED` for everything else except a
+`CANCELLED` job, which returns `None`.
+
+**Options considered** — (a) report `JobOutcome.SUCCEEDED` for any completed run regardless
+of pass/fail (since `run_baseline_stage` itself never raises on a red result — "a red
+baseline is a valid, complete result, not an exception," per its own docstring) and let the
+transition policy alone decide `TRIAGE` vs `FAILED`; (b) fold the pass/fail judgment into
+`JobOutcome` itself, per the option chosen.
+
+**Pros and cons** — (a) is defensible read literally against `run_baseline_stage`'s own
+docstring, and is exactly the shape `VERIFY`'s compile-gate failure uses elsewhere in this
+same module's docstring ("a legitimate `REJECTED` verdict... never `FAILED`... do not
+conflate 'our system broke' with 'the patch was bad'"). It is wrong here specifically because
+architecture spec §6.2 does not leave `BASELINE` the same latitude `VERIFY` gets: "`ctest` on
+the pristine tree reports any failure → `BASELINE_FLAKY` → `FAILED`. This is non-negotiable:
+without a green baseline, 'regression preserved' has no denominator." A red baseline is not a
+lesser verdict state the way a rejected patch is — the whole downstream pipeline (`D-009`'s
+denominator) is undefined without it, so `Mission.FAILED` is the only honest target, and
+`ExecutorResult.error_code`/`retry` exist specifically to carry *why* a `FAILED` outcome
+happened, which (b) uses and (a) would have to invent a second channel for. (b) also matches
+`MAX_ATTEMPTS_BY_KIND[BASELINE] == 1` and §6.2's own "Not retried: a build failure is a
+result, and retrying it hides it" — `retry=False` on a `FAILED` outcome says that directly,
+where a fabricated `SUCCEEDED` would have nothing to say it at all.
+
+**Cost implications** — none; same amount of code either way.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), as implemented. Documented at length in `workers/baseline/
+dispatch.py`'s own module docstring so a T2–T7 author skimming this module for a template
+does not copy the `VERIFY`-shaped judgment onto a stage architecture spec §6 treats
+differently.
+
+**Final approval authority** — CTO (technical) per D-061 §2's own closing line ("no contract
+changes required; each `JobKind` executor... is responsible for choosing the *stage* result
+correctly against the existing table") — flagging for confirmation since it is read from
+§6.2's prose rather than quoted verbatim.
+
+### 2. Cooperative cancellation: real for "not yet started," fake would be worse than absent for "already running"
+
+**Decision** — `_baseline_executor` checks `ctx.cancel_requested()` exactly once, before
+calling `run_baseline_stage`, and reports `JobOutcome.CANCELLED` without doing any real work
+if it is already set. No check exists once `run_baseline_stage` has been called; a
+cancellation requested mid-run has no effect until the stage finishes on its own.
+
+**Options considered** — (a) implement only the pre-flight check and document the mid-run gap
+plainly (chosen); (b) poll `cancel_requested()` from a spawned thread and call the private
+`Jail.cancel()` method (`packages/sandbox/jail.py:442`, which does exist) on the `Jail`
+`run_baseline_stage` opens internally; (c) claim full cooperative cancellation support without
+verifying it.
+
+**Pros and cons** — (b) is technically reachable — `Jail.cancel()` is real — but
+`run_baseline_stage(mission_id, source_dir, workspace_root, *, jail_policy=None)` neither
+accepts a cancel token nor returns the `Jail` it opens, so reaching it from outside means
+either monkeypatching `workers.baseline.run` internals from a different package (fragile,
+and exactly the kind of "invent a new isolation approach" the assignment says not to do) or
+editing that module's signature — which belongs to the compiler-toolchain-engineer seat, not
+this task, and D-061 §3's obligations here are about *this* executor's idempotency, not about
+extending someone else's already-tested module. (c) is the one genuinely unacceptable option:
+the assignment is explicit that a real gap must be reported honestly, not faked, and `CLAUDE.
+md`'s "no decorative fake" rule generalizes past UI metrics to this exact shape of claim.
+
+**Cost implications** — closing this for real costs a small, separate follow-up PR against
+`workers/baseline/run.py` (owned by compiler-toolchain-engineer): either accept a
+`cancel_requested: CancelToken` parameter threaded into `run_variant`/`Jail`, or return the
+open `Jail` so a caller can hold a reference and call `.cancel()` from its own heartbeat
+thread. Not costed here since it is out of T1's scope.
+
+**Security implications** — none; a `BASELINE` job that cannot be interrupted mid-run still
+respects `packages.sandbox`'s own wall-clock/CPU/memory limits, so "cannot cancel" degrades to
+"waits out the sandbox's own ceiling," not "runs unbounded."
+
+**Scalability implications** — none at one worker, one mission (D-061's own framing). Matters
+more once the worker deadline watchdog (T0, not yet built) is expected to guarantee prompt
+cancellation for the overnight contract (architecture spec §3.3) — flagged as a real
+follow-up need, not a blocker to T1 landing.
+
+**Recommendation** — (a), as implemented, with the gap named in `workers/baseline/dispatch.
+py`'s module docstring and in this record, and the follow-up (extend `run_baseline_stage`'s
+signature) left for whoever owns that module next.
+
+**Final approval authority** — CTO (technical) for accepting the gap as shipped; the follow-up
+itself is compiler-toolchain-engineer's call once scheduled.
+
+### 3. A real cross-package import gap, found by running the full suite: `apps/control-api` could not import `workers/`/`adapters`/`packages`, and fixing that collided with an existing namespace-package accident
+
+**Decision** — `apps/control-api/config/settings/base.py` now puts `BASE_DIR` (`apps/
+control-api`) at `sys.path[0]` and the repo root at the end of `sys.path`, both guarded by
+`if ... not in sys.path`, on every settings import (covers `manage.py`, `wsgi`/`asgi`, and —
+the path nothing previously covered — `pytest-django`, which imports this settings module
+directly). `apps/control-api/tools/__init__.py` was added (previously absent — that directory
+was an implicit PEP 420 namespace package) so it stops losing its own name to the unrelated
+`tools/` package at the repo root.
+
+**Why this needed deciding at all.** T0's `orchestrator/executors.py` docstring states
+`ExecutorContext.source_dir` handling "mirror[s] `workers.baseline.run.run_baseline_stage`'s
+existing signature" and D-061 T1's own scope is "wraps `workers/baseline/run_baseline_stage`"
+— both assume that import already works from inside the Django project. It did not: nothing
+before this branch ever ran `apps/control-api` code and top-level `workers`/`adapters`/
+`packages` code in the same Python process, so the gap was invisible until this task tried to
+do exactly that. D-026 moved `model-gateway`/`evidence-builder`/`telemetry` inside `apps/
+control-api/`; `workers/`, `adapters/` and `packages/` were never part of that move and still
+live as siblings of `apps/`, which is the layout T0/T1 inherited rather than chose.
+
+**Options considered** — (a) leave `workers/`/`adapters`/`packages` unreachable from
+`apps/control-api` and have T1's dispatch module do its own ad hoc `sys.path` surgery local to
+itself; (b) fix it once, centrally, in `config/settings/base.py`, so every Django entrypoint
+gets it for free; (c) physically move `workers/`/`adapters`/`packages` under `apps/
+control-api/` to match D-026's stated end state.
+
+**Pros and cons** — (a) is scoped to one file but means every future `JobKind` executor
+(T2–T7, all of which wrap similar top-level stage packages per D-062's staffing plan) has to
+rediscover and re-fix the same gap independently, or copy-paste the fix — the kind of
+per-module inconsistency that produces exactly one working import path and six broken ones.
+(b) fixes it once for every current and future consumer, at the cost of being a change to a
+shared settings file rather than something scoped to `workers/baseline/`. (c) is what D-026
+arguably implies should eventually happen, but is a real migration (import paths, `D-026`'s
+own import-direction test, six workers' packages, CI paths) far outside a `BASELINE`
+executor's scope — noted as a legitimate follow-up, not attempted here.
+
+**The collision, found by running the suite, not by inspection.** `apps/control-api/tools/`
+(holds `export_openapi.py`, consumed by `contracts/tests/test_openapi_dump.py`) has no
+`__init__.py` — an implicit namespace package. The repo-root `tools/` (`fallback_demo.py`,
+`verdict_report.py`) is a normal package with one, and shares the same bare name. Python's
+import system lets a regular package found *anywhere* on `sys.path` take priority over a
+namespace-package portion found earlier in path order — so simply appending the repo root
+(planned as the safe, order-respecting fix) still let the *wrong* `tools` win, breaking
+`contracts/tests/test_openapi_dump.py` with `ModuleNotFoundError: No module named
+'tools.export_openapi'`. `apps/control-api/tools/__init__.py` (added, empty save for a
+docstring) turns it into an ordinary regular package, which restores plain sys.path-order
+precedence — and `BASE_DIR` sorts first — closing the collision without touching the
+repo-root `tools/` package at all.
+
+**Cost implications** — none; no new dependency, one new near-empty `__init__.py`, ~25 lines
+in `base.py`.
+
+**Security implications** — none; this only affects what is importable within the already-
+trusted `control-api`/`worker` codebase, not any external input path.
+
+**Scalability implications** — none.
+
+**Recommendation** — (b), as implemented, with (c) flagged as a real but out-of-scope
+follow-up for whoever next revisits D-026's layout (candidate: T0's author, since `run_worker`
+will need this same reachability and may prefer to resolve it structurally rather than via
+`sys.path`).
+
+**Final approval authority** — CTO (technical); this is infrastructure shared by every
+`JobKind` executor task (T2–T7), not something scoped to `BASELINE` alone, so flagging for
+awareness beyond this task's own reviewer.
+
+---
