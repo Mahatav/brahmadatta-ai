@@ -5033,3 +5033,477 @@ already names, not an unscoped change to shared infrastructure.
 line for calls within a task's implementation; item 2's ASGI-import discipline and item 3's
 idempotency-key reinterpretation are flagged above for explicit confirmation since they
 revise or extend named clauses of D-061/D-028 rather than merely filling in unscoped detail.
+
+## D-067 — T5 (`JobKind.VERIFY` executor + transition policy): fan-out-aware idempotency and
+routing, and an unsandboxed-execution risk flagged for cybersecurity · 2026-08-16 ·
+`backend-developer`
+
+Implements the T5 slice of D-061/D-062 against `orchestrator/executors.py`'s interface
+contract (T0, already merged on this branch) and the two already-built, already-tested
+functions D-061 §4 named: `orchestrator/verification.py::run_verification` and
+`orchestrator/candidates.py::record_verification`. New code:
+`apps/control-api/orchestrator/verify_dispatch.py`,
+`apps/control-api/orchestrator/tests/test_verify_dispatch.py`, one `ready()` hook added to
+`apps/control-api/missions/apps.py`.
+
+### 1. Idempotency key is the candidate (`job.payload["patch_id"]`), not the mission and not `job.attempt`
+
+**Decision** — Key the pre-execution existence check on `VerificationRecord.objects.filter
+(patch_id=...)`, not on "does this mission have any verification record" and not on
+`job.attempt`.
+
+**Options considered** — (a) mission-scoped, mirroring `BASELINE`'s check against D-061 §3
+rule 1 as literally stated; (b) attempt-scoped, mirroring `PATCH_GENERATE`, the one named
+exception in that same rule; (c) candidate-scoped, keyed on `job.payload["patch_id"]`.
+
+**Pros and cons** — (a) is wrong by construction once `VERIFY` fans out one job per
+policy-accepted `PatchCandidate` (architecture spec §2.3, decision (b), confirmed live by
+`orchestrator/tests/test_fan_out.py`): the first candidate's `VerificationRecord` existing
+would make the check skip verifying every sibling candidate, silently dropping them from the
+mission's evidence bundle. (b) is wrong for a different reason — `MAX_ATTEMPTS_BY_KIND
+[JobKind.VERIFY]` is 1 (`missions/models.py`, asserted by
+`missions/tests/test_models.py::test_verify_jobs_are_not_retryable`), so `job.attempt` is
+always `1` and carries no information to key on; two different candidates verified by two
+different jobs would both read as "attempt 1" and be indistinguishable. (c) matches the real
+per-unit uniqueness constraint already in the schema: `VerificationRecord.patch` is a
+`OneToOneField` (`missions/models.py`), the same shape `BaselineReport`'s per-mission
+constraint has, just scoped one level narrower. A worker that died after
+`record_verification` committed but before its `Job` row reached `SUCCEEDED` reports the
+existing record instead of retrying into `IntegrityError`.
+
+**Cost implications** — none; one indexed filter, no schema change.
+
+**Security implications** — none. Does not change authorization, mission-binding, or the
+D-046 candidate-set freeze — all three are still enforced by `record_verification` itself.
+
+**Scalability implications** — none at one mission at a time.
+
+**Recommendation / ruling** — (c), implemented. D-061 §3 rule 1 should be read as naming the
+general principle ("check for your stage's own terminal artifact before re-running") with two
+worked examples (mission-scoped, attempt-scoped), not an exhaustive enumeration — `VERIFY` is
+a third shape. Flagging so whoever writes T1-T4/T6/T7's own idempotency checks does not treat
+the rule as a closed set of two options.
+
+**Final approval authority** — CTO (technical), since this is a reading of D-061 rather than a
+new rule; no objection expected but recorded per this role's decision-record obligation.
+
+### 2. Transition policy waits for the full candidate set before leaving `VERIFY`, and never returns `HUMAN_REVIEW` directly
+
+**Decision** — `_verify_transition_policy` compares
+`PatchCandidate.objects.filter(mission_id=..., policy_status=ACCEPTED).count()` against
+`VerificationRecord.objects.filter(mission_id=...).count()` on every terminal `SUCCEEDED`
+`VERIFY` job, and returns `MissionState.EXPORTING` only once they are equal — `None`
+otherwise. It never returns `MissionState.HUMAN_REVIEW`, even though
+`contracts.state_machine.TRANSITIONS[MissionState.VERIFY]` legally allows it.
+
+**Options considered** — (a) route every terminal `SUCCEEDED` `VERIFY` job straight to
+`EXPORTING`, once per job; (b) wait for the full candidate set, as implemented; (c) route a
+job whose own verdict is `HUMAN_REVIEW_REQUIRED` (a required gate `NOT_RUN`/`ERROR`,
+`contracts.verdict.derive_verdict`) straight to `MissionState.HUMAN_REVIEW`.
+
+**Pros and cons** — (a) is what `test_fan_out.py`'s own committed shape rules out: two
+candidates each finishing their own `VERIFY` job would each attempt `VERIFY -> EXPORTING`,
+and the second attempt 409s (`InvalidStateTransitionError`, since `EXPORTING` is not a legal
+target from `EXPORTING`) — survivable per the orchestrator's own "log and retry next tick"
+behavior (`orchestrator/executors.py` module docstring), but the same docstring calls a
+policy that regularly returns an illegal target "a bug in the policy, not a safety net to
+lean on." (c) is the `VERIFY`-shaped mirror of the trap D-061 §2 names for `FUZZ`/
+`STRESS_TEST`: the mission's terminal verdict is `derive_mission_outcome` over the *whole*
+candidate set (architecture spec §2.3), evaluated only on transitions *out of* `EXPORTING`
+(`contracts.state_machine.assert_verdict_is_evidenced`); deciding `HUMAN_REVIEW` from one
+job's own inconclusive gates — especially when it is the mission's only candidate so far, the
+strongest pull toward doing so — pre-empts that reduction and is exactly the kind of
+shortcut D-046 exists to close, on the losing side instead of the winning one. (b) is the only
+option consistent with both `test_fan_out.py`'s existing shape and D-061 §2's reasoning.
+
+**Cost implications** — two indexed count queries per terminal job; negligible at this scale.
+
+**Security implications** — closes a route to a "generate until pass"-adjacent shortcut
+symmetric with D-046 (see options analysis above), rather than opening one.
+
+**Scalability implications** — none at one mission at a time; the two counts are cheap even
+at the ten-candidate ceiling D6 exercises.
+
+**Recommendation / ruling** — (b), implemented and tested
+(`test_succeeded_job_waits_for_sibling_candidates_before_routing_onward`,
+`test_transition_policy_never_returns_human_review_directly`). Any non-`SUCCEEDED` terminal
+`VERIFY` job (`FAILED`/`TIMED_OUT`) routes to `MissionState.FAILED` — per D-061 §2's own
+example, a legitimate gate failure is always a `SUCCEEDED` job with a failing `GateResult`
+inside it, so a job that reaches `FAILED`/`TIMED_OUT` at all means the gates never ran to
+completion, an infrastructure fault the mission must not be left waiting on forever (`MAX_
+ATTEMPTS_BY_KIND[VERIFY]` is 1 — no retry is coming). `CANCELLED` returns `None` deliberately,
+deferring to the mission-level cancel path rather than racing it.
+
+**Final approval authority** — CTO (technical), same basis as D-061 §2's original ruling on
+the `FUZZ`/`STRESS_TEST` case this mirrors.
+
+### 3. Flagged, not decided: `VERIFY` executes a patched binary unsandboxed on the worker host
+
+**Decision** — Not made here. `_verify_executor` calls `run_verification` with its shipped
+default (a real `subprocess` runner, no isolation) rather than wrapping it in
+`packages.sandbox.Jail`.
+
+**Why this needed a decision and didn't get one from me** — `Jail` is built and tested for
+exactly this shape of work (`packages/sandbox/jail.py`'s own docstring: "build and test the
+demo target," confirmed working against this same repository by
+`packages/sandbox/tests/test_baseline_in_jail.py`). But `Jail.run()` has no `stdin`
+parameter, and `run_verification`'s `git apply --whitespace=nowarn -` step depends on piping
+the candidate diff over stdin — wiring the two together means changing how
+`orchestrator/verification.py` invokes `git apply` (write the diff to a file and pass it as
+an argument instead), which is a change to code D-061 §4 named as "already-built,
+already-tested" and assigned to no one to modify as part of T5. Rewriting another task's
+signed-off module under this task's own deadline pressure, to make a security property true
+that nothing in this task's brief asked for by name, is exactly the kind of unilateral call
+this role's own operating rules say not to make.
+
+**Options considered** — (a) ship as-is (`verification.py`'s existing subprocess runner,
+unsandboxed) and flag the gap; (b) modify `orchestrator/verification.py` to write the diff to
+a file instead of stdin, so a `Jail`-backed `CommandRunner` adapter becomes possible, and wire
+it in this task; (c) extend `packages.sandbox.Jail.run()` to accept `stdin`, then wire it.
+
+**Pros and cons** — (a) ships something real and correctly attributes the gap rather than
+hiding it; the risk is real (a patched binary — potentially model-generated — is compiled and
+executed on the worker host with no isolation) but is not new: it is `verification.py`'s
+existing, already-reviewed shape, not something T5 introduced. (b) and (c) both close the gap
+but touch modules this task does not own (`verification.py` is D-061 §4's "already-tested,
+wire it in, don't rebuild it" instruction; `packages/sandbox/jail.py` carries its own
+extensive security-review history — SEC-35, SEC-38 — that a same-day, unreviewed `stdin`
+addition should not bypass).
+
+**Cost implications** — (a) costs nothing now, a real security review and a `verification.py`
+change later. (b)/(c) cost review time this task's scope does not budget for.
+
+**Security implications** — HIGH, flagged as a risk in this task's handoff, not silently
+shipped. `VERIFY` is the one stage in the whole pipeline that compiles and runs code from a
+diff whose provenance may be `MODEL_GENERATED` — the same trust boundary `packages/sandbox`
+exists to enforce for `FUZZ` (`#28`, gated on `#15`'s rootless-container isolation per that
+module's own docstring) is currently unenforced for `VERIFY`.
+
+**Scalability implications** — none either way.
+
+**Recommendation** — cybersecurity and software-architect decide whether `VERIFY` needs the
+same isolation posture `FUZZ` is gated on before this ships past a demo, and if so, whether
+the fix is `verification.py`'s `git apply` invocation, `Jail.run()`'s `stdin` support, or a
+different adapter — not decided here.
+
+**Final approval authority** — cybersecurity (security posture) and software-architect /
+CTO (whether this blocks release), per this role's own stated boundaries.
+
+### 4. Wiring: registration lives in `missions/apps.py::MissionsConfig.ready()`, not a hand-picked import list
+
+**Decision** — Added one import line (`from orchestrator import verify_dispatch`) to
+`MissionsConfig.ready()` rather than leaving the wiring as a note for T0's
+`run_worker`/`run_orchestrator` to pick up later.
+
+**Options considered** — (a) leave a comment noting where the import should go once
+`run_worker`/`run_orchestrator` exist (matching the letter of this task's own instructions,
+"note the follow-up wiring needed"); (b) add the import to `missions/apps.py`'s `ready()`
+hook, which Django's app registry guarantees runs for *every* entry point that loads it —
+management commands (including the two not yet built), ASGI/WSGI boot, `manage.py check`, and
+the test suite.
+
+**Pros and cons** — (a) does the minimum the task asked for but leaves a real gap open until
+T0's commands exist and someone remembers to add the import. (b) closes the gap now, for
+every current and future entry point, at the cost of one import line and a precedent other
+`JobKind` tasks (T1-T4, T6, T7) should follow rather than each inventing a separate mechanism.
+Verified directly: `manage.py check` and a fresh `django.setup()` both populate
+`EXECUTOR_REGISTRY[JobKind.VERIFY]` / `TRANSITION_POLICY_REGISTRY[JobKind.VERIFY]` with the
+real functions, with no `run_worker` in existence yet.
+
+**Cost implications** — none.
+**Recommendation / ruling** — (b), implemented. Left an explicit note in
+`missions/apps.py::ready()` asking T1-T4/T6/T7 to add their own dispatch module's import
+alongside this one (or for T0 to consolidate all seven into one list) rather than leaving six
+more ad hoc wiring mechanisms to reconcile later.
+
+**Final approval authority** — engineering-manager / CTO, since this sets a convention other
+tasks are asked to follow rather than being purely local to T5.
+
+
+### 5. Fixing cybersecurity's PR #175 review — SEC-44/SEC-45/SEC-47 all closed; a separate, more urgent Docker-packaging gap found along the way and flagged, not fixed here
+
+Follow-up to §3 above, which flagged the unsandboxed-execution risk without deciding it.
+Cybersecurity's review (PR #175 comment) confirmed it as **SEC-44 (CRITICAL)** — no `env=`
+on any of `run_verification`'s five `subprocess.run` calls, so a patch under verification
+(including an operator-authored one per D-008) inherits the worker's full environment,
+`DATABASE_URL` included — plus **SEC-45 (HIGH)**, `GateResult.detail`'s "never raw target
+output, never secrets" contract already violated by embedding raw stdout/stderr, and
+**SEC-47 (HIGH)** — no `packages.sandbox.Jail` isolation on `run_verification`'s
+build/run/ctest steps. All three are fixed on this branch. This entry was drafted once
+already, concluding SEC-47 was genuinely blocked (not merely deferred) by an import-boundary
+gap — that conclusion turned out to be **stale by the time of writing**, not wrong when
+written: merging `origin/main` mid-task (this branch had fallen behind #168 T1's and T7's
+already-merged PRs) pulled in T1's own fix for the exact gap that was blocking SEC-47.
+Recorded here in full, including the reversal, rather than quietly rewritten as if SEC-47
+had been straightforward from the start.
+
+**Decision (SEC-44)** — Explicit env allowlist (`_ENV_ALLOWLIST`), imported directly from
+`packages.sandbox.policy.DEFAULT_ENV_ALLOWLIST`, passed via `env=` to every subprocess this
+module spawns. First implemented as a **locally duplicated** tuple (see the superseded
+reasoning below); switched to a direct import once SEC-47's work resolved the same import
+boundary that made duplication necessary in the first place.
+
+**Options considered (as originally decided, before the import boundary was resolved)** —
+(a) `from packages.sandbox.policy import DEFAULT_ENV_ALLOWLIST` (the review's stated
+preference: "reuse... rather than inventing a second list"); (b) duplicate the tuple locally
+with a comment cross-referencing the source of truth.
+
+**What actually happened** — (b) was implemented first. Verified directly, twice, at that
+point: (1) `python -c "import packages.sandbox"` from `apps/control-api` with only that
+directory on `sys.path` raised `ModuleNotFoundError`; (2) a throwaway pytest test doing the
+same import, collected and run the way CI actually invokes this suite (`cd apps/control-api
+&& pytest`, no `PYTHONPATH` override), failed to collect with the same error. Root cause at
+the time: `infrastructure/compose/images/control-api.Dockerfile`'s build context is
+`apps/control-api/` only, and `apps/control-api/config/settings/base.py` put nothing but
+`BASE_DIR` itself on `sys.path`. Both were true when checked. What was **not** accounted for:
+`origin/main` had, by that point, already merged #168 T1's PR (`e937933`), which added exactly
+the missing piece — `config/settings/base.py` now appends the repository root to `sys.path`
+on every Django entrypoint including `pytest-django` (D-066 §3, this same document, filed the
+day before this one) — and this branch had not yet merged that commit. Merging `origin/main`
+into this branch and re-running the same probe test (`import packages.sandbox` from
+`apps/control-api`) now **passes**. (a) was then implemented for real: `_ENV_ALLOWLIST` is now
+`DEFAULT_ENV_ALLOWLIST` imported directly, no duplication.
+
+**The lesson, stated plainly rather than only fixed** — this branch (`feat/168-t5-verify-executor`)
+was opened before T1/T7 merged and was not rebased before this fix session started. A security
+finding's "is X importable from this runtime path" answer is a property of the *merged* tree
+at fix time, not of the branch's point of divergence — verifying against a stale base and
+reporting the answer as current is exactly the kind of thing that reads as diligence
+(re-verified directly, twice!) while still being wrong. Re-verified a third time, against
+`origin/main` merged in, before writing this revision.
+
+**Cost implications** — none now; the branch is merged current, the import works, no
+duplicated allowlist to drift.
+
+**Security implications** — closes SEC-44. `Jail.run()` (see SEC-47 below) also scrubs to this
+same allowlist independently, so the property now holds twice over on the default runner path.
+
+**Scalability implications** — none.
+
+**Recommendation / ruling** — (a), implemented for real once the blocker was actually gone.
+
+**Final approval authority** — CTO (technical).
+
+**Decision (SEC-45)** — Unchanged from the first pass, and not affected by the SEC-47
+reversal. `GateResult.detail` is built from only known-safe values: the tool name, the exit
+code, a fixed hand-written prefix, and — for the regression gate's failure case — two bare
+integers ("N of M tests failed") extracted by a regex capture group that can only ever contain
+digits. `result.stdout`/`result.stderr` are read nowhere in `_summarize`. No new "sensitive
+log" persistence channel was added; `verification.py` still has no evidence/artifact store
+wired into it as a pure function, and inventing one under deadline pressure risked recreating
+the exact leak this fix closes, just moved to a new field. Options considered, cost/security/
+scalability reasoning, and ruling are exactly as in the superseded draft of this entry — see
+the PR discussion on #175 for the full text; not repeated here since nothing about it changed.
+
+**Decision (SEC-47)** — Wrapped `run_verification`'s `git apply`/`cmake` configure/`cmake`
+build/`ctest` steps in exactly one `packages.sandbox.Jail` per call, mirroring
+`workers/baseline/run.py`'s pattern for BASELINE. Concretely: `run_verification` now opens
+`Jail.create(JailPolicy(wall_clock_seconds=float(baseline.timeout_seconds)))` for the whole
+call; `_copy_source_tree`'s destination moved from a bare `tempfile.TemporaryDirectory` to
+`jail.root / source.name`, so `jail.resolve()`'s containment check is checking something real;
+the candidate diff is written to a file inside the jail (`jail.root / ".brahmadatta-candidate.patch"`)
+and applied via `git apply --whitespace=nowarn <path>` instead of piping it over stdin, since
+`Jail.run()` hardcodes `stdin=subprocess.DEVNULL`; a new `_jail_command_runner(jail)` adapts
+`Jail.run()` to this module's existing `CommandRunner` shape and is the default runner when a
+caller does not inject one — `_subprocess_runner` (SEC-44's env-scrubbed bare `subprocess.run`)
+remains available and tested as an explicit, non-jailed alternative, not deleted.
+
+**Options considered** — (a) leave SEC-47 open as a follow-up once the import-boundary gap
+resolved itself (i.e., merge `origin/main` for SEC-44's sake only, and stop); (b) implement the
+`Jail`-wrap now, using the exact pattern the review named and the exact one `workers/baseline/run.py`
+already established; (c) extend `packages.sandbox.Jail.run()` to accept `stdin` directly instead
+of working around the gap in `verification.py`.
+
+**Pros and cons** — (a) would have been the honest, defensible choice if the import blocker
+had genuinely still been open (see the immediately-preceding, now-superseded SEC-47 decision
+in this same section's edit history) — but leaving a HIGH finding open once the reviewer's own
+"a few hours" estimate turned out to be accurate, on a task that explicitly asked "if you get
+it done cleanly, great," would have been under-delivering against the actual, current state of
+the repo, not a defensible stop. (c) modifies a module (`packages/sandbox/jail.py`) with its
+own extensive, independent security-review history (SEC-33 through SEC-41) for a workaround
+`git apply`'s own CLI already supports natively (a path argument) — no reason to touch
+already-reviewed isolation code for that. (b) is what the review itself recommended and what
+BASELINE already proved out.
+
+**Cost implications** — none beyond the implementation time already spent; no new runtime
+dependency (`packages.sandbox` was already a dependency of this Django project via T1's merge).
+
+**Security implications** — `run_verification`'s build/run/ctest steps now run under real,
+measured CPU/address-space/process-count/wall-clock ceilings, closing the resource-exhaustion/
+blast-radius gap SEC-44 alone does not touch (per the review's own words, "`Jail` alone would
+not [stop credential exfiltration]" — the inverse is also true: SEC-44 alone does not bound
+resource exhaustion). `Jail`'s own docstring caveat still applies verbatim: it "does not
+constrain what the command does once running" beyond those ceilings, and has no network
+namespace — this pairs with, does not replace, SEC-44's env allowlist.
+
+**Scalability implications** — none; one `Jail` per `VERIFY` job, matching the existing
+one-mission-at-a-time design.
+
+**Recommendation / ruling** — (b), implemented and tested: `test_run_verification_opens_exactly_one_jail_sized_from_the_baseline_timeout`
+(spies on the real `Jail.create`, asserts exactly one call, sized from
+`VerificationBaseline.timeout_seconds`), `test_run_verification_default_runner_actually_invokes_jail_run`
+(spies on the real `Jail.run`, against a real trivial CMake target, asserts every command —
+`git`, `cmake` configure, `cmake --build`, `ctest` — actually routes through it; regression-
+checked to fail when the default runner is reverted to `_subprocess_runner`), and
+`test_real_wall_clock_limit_stops_a_hung_build` (a real build whose step sleeps 300s completes
+in seconds against a real, unmodified `run_verification` call — labelled honestly in its own
+docstring as evidence of "does not hang forever," not exclusively of `Jail`, since a bare
+`subprocess.run(timeout=...)` would also have passed it; the `Jail.run`-spy test is the one
+that actually discriminates).
+
+**Final approval authority** — cybersecurity (to confirm the fix matches what SEC-47 asked
+for) / CTO (technical).
+
+**A separate, more urgent finding surfaced while investigating this: `main` may not currently boot in either Docker profile.** Not decided here — flagged for immediate DevOps/CTO attention, filed as its own item because it is broader than SEC-47 and predates this PR.
+
+While tracing exactly why `packages.sandbox` became importable, I checked whether the *deployed
+container* — not just the local/CI pytest invocation — actually has `packages/` available.
+It does not, and the gap is live on `main` today, independent of anything in this PR:
+`infrastructure/compose/images/control-api.Dockerfile`'s build context is still
+`apps/control-api/` only (`COPY --chown=app:app . /app` copies nothing outside it), and neither
+`docker-compose.yml` nor `docker-compose.finale.yml` mounts or bakes `packages/`, `workers/`, or
+`adapters/` into the `control-api` or `worker` image — confirmed by diffing those three infra
+files between this branch's fork point and current `origin/main`: zero changes. Meanwhile,
+`origin/main`'s `missions/apps.py::MissionsConfig.ready()` (T1's merge, `e937933`) now
+unconditionally runs `from workers.baseline import dispatch` at Django app-startup — not
+guarded by `try/except ModuleNotFoundError` the way `orchestrator/teardown.py`'s pre-existing,
+narrower use of the same import is — and `workers/baseline/dispatch.py` → `workers/baseline/run.py`
+→ `from packages.sandbox import ISOLATION_MODE, Jail, JailPolicy` is a hard, module-level import
+chain. `ready()` runs on every Django entrypoint, including the actual container `CMD` in both
+`control-api.Dockerfile` targets (`dev` and `runtime`). If `packages/` genuinely is not on that
+container's filesystem, this reads as: **the control-api and worker containers, in both compose
+profiles, would fail to start** (`ModuleNotFoundError` inside `ready()`, which Django does not
+tolerate) — a live regression, not a hypothetical one, that predates this PR (introduced by T1's
+merge) and that this PR's own SEC-47 fix adds a second, identical dependency onto rather than
+introducing fresh. Not independently reproduced by actually building and running the container
+in this session (out of this task's scope and time budget) — reported as "reads as" from reading
+the Dockerfile/compose diff directly, not as a confirmed incident, and should be verified by
+running `docker compose up control-api` against current `main` before being treated as certain.
+If confirmed, this is a CRITICAL-shaped operational gap (the product does not run at all) that
+needs a DevOps/CTO-owned fix — bring `packages/`, `workers/`, `adapters/` into the `control-api`/
+`worker` build context (mirroring `docker-compose.finale.yml`'s existing `additional_contexts:
+demo-repositories` pattern is the most direct precedent already in the repo) — before the next
+deploy of either profile, independent of and likely more urgent than this PR's own merge.
+
+### 6. Fixing engineering-manager's functional re-review (commit `8ffdccd`) — `Jail.memory_bytes` not sized for VERIFY's own default sanitizer build, silently zeroing out `VERIFIED` on real Linux · 2026-08-17 · `backend-developer`
+
+Follow-up to §5's SEC-47 fix. Engineering-manager's functional re-review of `8ffdccd`
+(PR #175 comment) found that §5's `Jail` construction —
+`JailPolicy(wall_clock_seconds=float(baseline.timeout_seconds))` — overrides only the wall
+clock. `memory_bytes` stays at `JailPolicy`'s generic 2 GiB `RLIMIT_AS` default, but
+`VerificationBaseline.configure_args` defaults to `-DPKTCFG_SANITIZE=ON`, and
+`adapters/cpp/variants.py`'s module docstring already documents — with a measured Linux
+repro — that AddressSanitizer's shadow-memory reservation needs on the order of tens of
+TiB regardless of actual usage, which is exactly why every sanitizer `VariantSpec` there
+sets `min_jail_memory_bytes = MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS` and why
+`workers/replay/run.py` builds its own `Jail` from that value
+(`JailPolicy(memory_bytes=spec.min_jail_memory_bytes)`). §5's rewrite drives
+`cmake`/`ctest` directly against `VerificationBaseline.configure_args` rather than through
+`adapters.cpp.pipeline.run_variant`/`VariantSpec`, and missed carrying this sizing rule
+over. The failure mode is silent, not loud: `Jail.run()` returns an ordinary
+`JailResult` with a nonzero exit code (no exception), which `_fail`/`derive_verdict` turns
+into a completely normal-looking `REJECTED` — on real Linux (`RLIMIT_AS` is unenforced on
+Darwin, which is why this passed locally in §5 without being caught), VERIFY could not
+produce a `VERIFIED` verdict for any candidate, correct or not.
+
+**Decision** — Added `orchestrator/verification.py::_sanitizers_enabled(configure_args)`,
+which inspects `VerificationBaseline.configure_args` for either a raw `-fsanitize=...`
+compiler flag or a CMake `-D<...SANITIZE...>=<truthy>` cache entry (pktcfg's own
+`-DPKTCFG_SANITIZE=ON` is the second case). `run_verification` now builds its `JailPolicy`
+with `memory_bytes=MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS` (imported from
+`adapters.cpp.variants`, not a second constant) whenever that check is true, leaving every
+other `JailPolicy` field — including `memory_bytes` itself when no sanitizer is on — at
+its generic default.
+
+**Options considered** — (a) detect sanitizers from `configure_args` (the raw strings
+`run_verification` actually builds with, since it does not route through `VariantSpec`);
+(b) route `run_verification` through `adapters.cpp.pipeline.run_variant`/`VariantSpec`
+instead, so `Variant.ASAN_UBSAN.min_jail_memory_bytes` is available directly, no detection
+needed; (c) always size the `Jail` at `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`, unconditionally,
+regardless of whether sanitizers are actually on for a given call.
+
+**Pros and cons** — (b) is the more structurally "correct" long-term shape (one source of
+truth for a variant's whole configuration, matching how BASELINE and the replay stage both
+work) but is a materially larger change: `run_verification` builds its own configure/build
+argv directly against `VerificationBaseline.configure_args`, applies its own
+`ignored_names`/worktree-copy logic, and returns `GateMatrix`/`GateResult` shapes distinct
+from `BuildResult`/`ReproducerResult` — swapping the whole execution model under a
+same-day fix risks a second silent regression, and the engineering-manager's own review
+explicitly asked to reuse the constant, not restructure the pipeline. (c) is simpler code
+but wrong on the merits: `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`'s own docstring is explicit
+that "this is not a memory budget," and paying a 64 TiB `RLIMIT_AS` unconditionally —
+including for the (currently hypothetical, since `VerificationBaseline`'s only shipped
+default has sanitizers on) case of a caller passing `configure_args` with no sanitizer —
+would silently mask a future regression in the *other* direction: a caller relying on
+`RLIMIT_AS` actually bounding a non-sanitized build's address space would get no such
+bound and no signal that it was gone. (a) is scoped to the actual regression, keeps the
+fix inside the file the review pointed at, and is directly testable without a real
+toolchain (see below).
+
+**Cost implications** — none; no new runtime dependency (`adapters.cpp.variants` was
+already importable from this runtime path, confirmed directly — see §5's D-066 §3
+cross-reference).
+
+**Security implications** — none negative; this closes a functional gap in SEC-47's own
+fix, not a new attack surface. `_sanitizers_enabled` only ever widens `RLIMIT_AS`, never
+narrows the env allowlist (SEC-44) or `GateResult.detail`'s no-raw-output guarantee
+(SEC-45), both untouched by this change.
+
+**Scalability implications** — none; one `Jail` per `VERIFY` call, unchanged shape.
+
+**Recommendation / ruling** — (a), implemented and verified on real Linux, not just
+inferred from the docstring or macOS-passing tests (macOS does not enforce `RLIMIT_AS` at
+all, which is exactly how this shipped in §5 without being caught):
+
+1. **Reproduced the original bug directly**, in a bare `ubuntu:24.04` container (no
+   Django/pytest involved — the same reproduction shape the review itself used): built
+   real pktcfg with `-DPKTCFG_SANITIZE=ON`, ran its real `ctest` suite under
+   `ulimit -v 2097152` (2048 MiB, `JailPolicy`'s exact unpatched default). Output matched
+   the review's report exactly: `AddressSanitizer failed to allocate 0x200001000
+   (8589938688) bytes ... ReserveShadowMemoryRange failed ... 0% tests passed, 8 tests
+   failed out of 8`.
+2. **Confirmed the fix on the same real Linux container**, via a full `pytest` run of
+   `apps/control-api` (Python 3.12.3, real `cmake`/`ctest`/`git`, real venv from this
+   repo's own `requirements.txt`): `orchestrator/tests/test_verification.py` —
+   33 passed, 0 skipped (the two new Linux-only tests below ran for real, not skipped, on
+   this platform); full `apps/control-api` suite — 527 passed, 9 skipped (pre-existing
+   SQLite-vs-Postgres skips), 0 failed; `adapters/cpp packages/sandbox workers/baseline
+   tests/architecture` (unchanged by this fix, run for regression coverage) — 180 passed,
+   18 skipped, 0 failed; `manage.py check` — `System check identified no issues
+   (0 silenced)`.
+3. New tests in `orchestrator/tests/test_verification.py`: `test_sanitizers_enabled_detects_pktcfgs_default_configure_args`,
+   `test_sanitizers_enabled_is_false_when_no_sanitizer_is_turned_on` (5 cases),
+   `test_sanitizers_enabled_recognises_every_documented_spelling` (6 cases) — unit-level,
+   no toolchain needed, run everywhere including macOS;
+   `test_run_verification_sizes_jail_memory_for_the_default_sanitizer_configure_args` and
+   `test_run_verification_leaves_jail_memory_at_the_generic_default_without_sanitizers` —
+   spy on the real `Jail.create`, assert the exact `memory_bytes` `run_verification`
+   builds, both directions; `test_real_verify_achieves_verified_under_sanitizers_on_linux`
+   (Linux-only, `skipif(sys.platform == "darwin")` mirroring
+   `adapters/cpp/tests/test_sanitizer.py`'s existing convention) — the real,
+   unmodified `run_verification`, real toolchain, real pktcfg, reaches `VERIFIED`;
+   `test_real_verify_without_sanitizer_memory_sizing_fails_every_gate_on_linux`
+   (same Linux-only guard) — monkeypatches `_sanitizers_enabled` to always report `False`
+   (simulating the exact pre-fix behaviour) against the same real pipeline and asserts
+   every gate FAILs while `derive_verdict` still reads as an ordinary `REJECTED` —
+   pinning the silent-failure shape the review specifically warned about, not just the
+   allocation error itself.
+
+Also fixed, same commit: `orchestrator/verify_dispatch.py`'s module docstring ("## What
+this module deliberately does not do") still described the pre-§5 state (no `Jail` at
+all) — stale since §5 moved the wrap inside `verification.py`, flagged non-blocking by
+cybersecurity's re-review of `8ffdccd` with an explicit "please fix before merge."
+Updated to describe the current, sized state accurately.
+
+**Left alone, per the functional review's own instruction** — neither `_subprocess_runner`
+nor `_jail_command_runner` sets `ASAN_OPTIONS`/`UBSAN_OPTIONS` the way
+`adapters/cpp/variants.py`'s `VariantSpec.runtime_env` does for BASELINE/replay. The review
+named this explicitly as a separate, pre-existing, non-blocking gap ("neither the old nor
+new runner sets ASAN_OPTIONS/UBSAN_OPTIONS... that gap predates this PR and isn't new")
+and asked that it not be bundled into this fix. Not touched here; worth its own follow-up
+so sanitizer exit-code/halt behaviour is pinned for `VERIFY` the way it already is for
+BASELINE and replay.
+
+**Final approval authority** — engineering-manager (to confirm this closes the specific
+finding raised) / CTO (technical).
+

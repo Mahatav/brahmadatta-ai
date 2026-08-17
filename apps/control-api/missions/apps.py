@@ -26,5 +26,6 @@ class MissionsConfig(AppConfig):
             correlate_executor,  # noqa: F401
             patch_generate_executor,  # noqa: F401
             teardown_executor,  # noqa: F401
+            verify_dispatch,  # noqa: F401
         )
         from workers.baseline import dispatch  # noqa: F401
