@@ -3463,3 +3463,85 @@ decision) remain entirely unbuilt and unclaimed by T0.
 **Final approval authority** — CTO (technical); flagged for T2/T3 to confirm or
 correct the provisional `job.result` shape in code review rather than silently
 inherit it as frozen.
+
+
+## D-068 — T7 (`JobKind.TEARDOWN` executor + transition policy) implementation choices
+
+Posted while implementing #168 T7, against D-061 §4's brief ("smallest of the seven ... not
+new teardown logic") and the live `#50` gate evidence (`.project/evidence/
+d7-gate-50-live-run-2026-08-17.md`, the `CANCELLING → CANCELLED` gap).
+
+**Decision 1 — reuse `orchestrator/teardown.py` verbatim; wrap it, do not re-implement it.**
+`teardown.teardown_started_compute` (#72) already releases sandbox/model-host resources,
+already emits one `TEARDOWN_CONFIRMED` event per resource (success or failure, never
+swallowed), and is already idempotent by construction (`DockerSandboxReaper`/
+`ModelHostReaper` both return `()` when there is nothing left to release; a fully-empty
+outcome set reports a synthetic `no-started-compute` receipt). `orchestrator/
+teardown_executor.py` is a thin `Executor`/`TransitionPolicy` pair over it — no new
+resource-release code. Confirmed by reading `orchestrator/teardown.py` and its existing test
+file (`orchestrator/tests/test_teardown.py`) before writing anything.
+
+**Options considered** — (a) new resource-release logic scoped to the `JobKind.TEARDOWN`
+executor, independent of `teardown.py`; (b) call `teardown.teardown_started_compute`
+directly and translate its return value into `ExecutorResult`.
+
+**Pros and cons** — (a) would duplicate real, tested, already-idempotent cleanup code for no
+benefit and risks the two mechanisms (the existing synchronous `_run_teardown_after_commit`
+hook in `orchestrator/transitions.py`, and a new job-based one) disagreeing about what "safe
+to release" means. (b) has exactly one moving part to keep correct and inherits the existing
+mechanism's idempotency and honest-disclosure guarantees for free.
+
+**Recommendation / ruling** — (b). Matches D-061 §4's explicit instruction.
+
+**Decision 2 — the transition policy owns architecture-spec §2.2 R3, verbatim.**
+`CANCELLING → CANCELLED` only when the terminal `TEARDOWN` job both `SUCCEEDED` and its
+`result` shows zero failed resources (a real receipt); otherwise `CANCELLING → FAILED`. Every
+other teardown-triggering target (`VERIFIED`/`REJECTED`/`HUMAN_REVIEW`/`FAILED`/`CANCELLED`)
+already has an empty outgoing edge in `contracts.state_machine.TRANSITIONS`, so the policy
+returns `None` for those — nothing further to route, mirroring how `_fuzz_transition_policy`
+(T0's reference implementation) treats a job outcome that does not, by itself, justify a
+transition.
+
+**Decision 3 — `ExecutorResult.result` carries the itemised per-resource receipt; `outcome`
+stays a single FAILED bit for a partial failure, never a silent SUCCEEDED.** `JobOutcome` has
+no "partially succeeded" member and none was added (would be a breaking change to a contract
+T0 owns). Honesty under that constraint means: `outcome=FAILED` the moment any resource
+fails, `error_code=ErrorCode.INTERNAL_ERROR` (no dedicated teardown/leak code exists in
+`contracts.enums.ErrorCode` — flagged below, not decided unilaterally), and `result` carries
+`outcomes` (one dict per resource, `released` flag included), `released_count`,
+`failed_count`, `total`, so nothing downstream — the transition policy, a future export step,
+an operator reading `Job.result` — has to guess which resource, if any, might still be
+running.
+
+**Decision 4 — no query-based idempotency guard; rely on the mechanism's own no-op
+behaviour.** D-061 §3's rule ("check for your stage's terminal artifact before doing real
+work") does not have a literal equivalent for `TEARDOWN` — there is no `TeardownReport` row
+with a uniqueness constraint. Re-running `teardown_started_compute` is already a safe no-op
+(proved by `test_second_teardown_run_is_a_safe_no_op`), so no pre-execution existence check
+was added. Flagged explicitly rather than silently treated as "does not apply", per D-061
+§3's own instruction to name this obligation for every executor.
+
+**Cost implications** — none; zero new runtime dependencies, no schema change.
+
+**Security implications** — none beyond what SEC-16/#72's existing review already covers;
+this module never writes `Mission.state` directly (enforced structurally by
+`missions/lifecycle.py`) and never calls `orchestrator.transitions.transition()`.
+
+**Scalability implications** — none; single-mission-at-a-time, matching D-061/D-062.
+
+**Open question flagged for CTO, not decided here** — `ErrorCode.INTERNAL_ERROR` is used for
+"a resource failed to release." Architecture spec §6's failure table does not name a
+teardown/leaked-compute code, and D-061 §2 rules "no new contract work is needed" against the
+codes that table *does* name — TEARDOWN was outside that table's scope. A dedicated code
+(e.g. `TEARDOWN_INCOMPLETE`) would be more precise for an operator or the eventual evidence
+bundle to key off of, but adding one to `contracts.enums.ErrorCode` is a shared-contract
+change outside T7's authority.
+
+**Also flagged, not decided here** — whether `transitions._requires_teardown`'s existing
+synchronous call (`_run_teardown_after_commit`) should be replaced by, kept alongside, or
+made to also enqueue, a `Job(kind=TEARDOWN)` once `orchestrator/queue.py` (T0) exists. Running
+both is safe (idempotent), but is not this task's call to make either way.
+
+**Final approval authority** — CTO (technical), for the two open questions above; the four
+implementation decisions themselves are within backend-developer's scope per D-061's own
+task breakdown for T7.
