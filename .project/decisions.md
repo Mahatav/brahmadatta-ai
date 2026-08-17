@@ -3143,3 +3143,184 @@ an immediate re-open of this scope conversation rather than a Day 3 discovery.
 closing line. The T4-lite deferral specifically needs CTO sign-off, since it deviates from
 D-061 §4's explicit recommendation to complete the D-026 move inside T4 — posted as an open
 question on #168, not decided unilaterally here.
+
+## D-063 — T0b: snapshot-archive extraction (#168), and where it lives · 2026-08-16 · `backend-developer` seat
+
+Numbered assuming **D-061** (CTO brief for #168) and **D-062** (staffing plan) land from
+`docs/d061-d062-driver-brief` ahead of this branch merging; renumber on conflict, the
+content is what matters. D-061 §4 named this task directly: `authorization/archive.py`
+has `enumerate_members` and `build_tar_from_directory` but no function that safely
+extracts a stored snapshot archive back into a scratch directory, and every stage
+executor from `BASELINE` onward needs one. This record covers the two calls D-061 left
+to the implementer: which module the extractor and its Django-aware caller live in,
+and how the two halves divide the work.
+
+**Decision** — Two functions in two modules, not one:
+
+1. `authorization.archive.extract_archive(archive_path, dest_dir)` — the actual,
+   safety-checked extraction. Pure filesystem I/O, no Django import, sibling of
+   `build_tar_from_directory` in the same module and reusing its `_is_safe_member_name`
+   guard exactly as D-061 asked. Takes two paths, returns an `ArchiveInfo`, knows
+   nothing about missions, artifacts, or settings.
+2. `orchestrator.snapshot.materialize_snapshot(mission_id, *, workspace_root=None)` —
+   the Django-aware wrapper: resolves a mission's latest `Snapshot` row to a real file
+   under `ARTIFACT_ROOT` (checked against the filesystem directly, not inferred from
+   the `Artifact` index row alone), allocates a fresh
+   `<workspace_root>/<mission_id>/<uuid4>` directory, and calls `extract_archive`.
+
+**Options considered** — (a) one Django-aware function directly in
+`authorization/archive.py`, matching D-061's literal suggestion of "alongside its
+sibling `build_tar_from_directory`"; (b) the two-module split above; (c) a new
+top-level `workers`-style package (`workers/materialize/`), mirroring `workers/
+baseline`'s "no Django" boundary (D-026) more strictly than (b) does.
+
+**Pros and cons** — (a) is the smallest diff and matches D-061's suggested location
+literally, but couples `authorization/archive.py` — a module every archive-handling
+code path already imports, including `authorization.service`'s synchronous request
+handlers — to Django ORM queries it does not otherwise need, and makes the safety-
+critical extraction logic itself harder to unit-test in isolation from a database. (c)
+keeps the Django boundary D-026 draws for `workers/*` maximally clean, but
+`workers/baseline/run_baseline_stage` never queries the database itself either — it
+receives an already-resolved `source_dir: Path` — so there is no actual caller inside
+`workers/` that would import a Django-aware materializer; putting it there would just
+relocate the Django-vs-not question without resolving it, and `orchestrator/` already
+owns exactly this shape of work (`orchestrator/verification.py` takes a resolved
+`worktree: Path`, `orchestrator/repository.py` already has `latest_snapshot_sha256`,
+which this function reuses directly). (b) keeps `extract_archive` importable and
+testable with zero database dependency — the round-trip, malicious-member, and
+corrupt-archive tests in `authorization/tests/test_archive.py` need no `django_db`
+marker at all — while giving the mission/`ARTIFACT_ROOT`-resolving half a home
+(`orchestrator/`) that already owns the equivalent resolution step for verification's
+worktree, and that a future `JobKind` dispatch table (T0's `orchestrator/queue.py`,
+per D-061 §1) can call directly without importing `authorization.service`.
+
+**Cost implications** — none; no new dependencies, no new settings beyond
+`SNAPSHOT_WORKSPACE_ROOT` (a plain path setting, same shape as `ARTIFACT_ROOT`/
+`SNAPSHOT_STAGING_ROOT` it sits beside in `config/settings/base.py`).
+
+**Security implications** — `extract_archive` re-validates every member independently
+of whether its caller already ran the archive through `enumerate_members` (it does
+not assume that happened), applying three checks per member before anything is
+written for *any* member in the archive: `_is_safe_member_name` (path-traversal /
+zip-slip), member-type refusal (symlinks and hardlinks per SEC-26's existing
+reasoning, plus device nodes and FIFOs, which `enumerate_members` does not currently
+special-case but have the identical "no legitimate reason to exist in a snapshot"
+justification), and a resolved-path containment check independent of and in addition
+to the lexical name check (`_resolved_target_or_raise`) — defense in depth against
+anything the lexical check's `PurePosixPath`-based reasoning does not catch (a
+Windows-drive-qualified name is not recognized as absolute by `PurePosixPath` and
+would otherwise slip past check 1 alone, though it is harmless on this project's
+Linux-only deployment target either way). Extracted file/directory modes are never
+taken from the archive header — fixed to `0644`/`0755` regardless of what a
+(potentially hostile) archive's own metadata claimed, closing off a setuid-bit or
+world-writable-directory smuggling path `tarfile.extractall`'s default behavior would
+otherwise allow through on this project's target interpreter (3.12; PEP 706 filtering
+does not default on until 3.14, same gap `enumerate_members`'s own docstring already
+names). `materialize_snapshot` fails closed on both points where "recorded" and
+"actually present" can diverge: no `Snapshot` row, and a `Snapshot` row whose digest
+has no file under `ARTIFACT_ROOT` — checked against the filesystem directly rather
+than trusting the `Artifact` index row's mere existence as a proxy for it.
+
+**Scalability implications** — none; one archive extracted into one fresh directory
+per call, no shared or reused state between calls.
+
+**Recommendation / ruling** — (b), implemented as described. `SnapshotExtractionFailedError`
+added to `authorization/errors.py` reusing `ErrorCode.INTERNAL_ERROR` — D-030's frozen
+vocabulary rule, same pattern `contracts.errors.MissionStateWriteError` already uses —
+for the one failure class that is neither a caller mistake nor an unsafe archive: a
+genuine `OSError` while writing an already-validated member to disk (disk full,
+permission denied). Both new error classes reuse existing `ErrorCode` members; no
+contract change.
+
+**Final approval authority** — CTO (technical), per D-061's own closing line that
+staffing/sequencing calls for #168 are engineering-manager/CTO's, not a downstream
+engineer's; flagged here rather than decided unilaterally, since the module-location
+call is exactly the kind of thing D-061 left open for "your call."
+
+## D-064 — T0b: extraction-size ceiling for `extract_archive`, fixing the round-4 review's HIGH-1 decompression-bomb finding · 2026-08-16 · `backend-developer` seat
+
+**Decision** — `authorization.archive.extract_archive` (and its `_extract_tar`/
+`_extract_zip` helpers) now takes a required `max_bytes: int` keyword argument and
+enforces it two ways: (1) a cheap pre-check against each member's *declared* size
+(`member.size` / `info.file_size`) before any byte is read, and (2) a running total
+of bytes *actually written*, tracked cumulatively across every member in the call
+(`_copy_within_budget`), checked on every fixed-size chunk during the write pass
+itself and raising `UnreadableArchiveError` the instant it would cross `max_bytes`.
+`orchestrator.snapshot.materialize_snapshot` — the only caller — passes
+`max_bytes=settings.SNAPSHOT_MAX_BYTES`, reusing the existing 512 MiB ingest-side
+ceiling rather than introducing a second, independently-chosen number.
+
+**Trigger** — cybersecurity's adversarial review of PR #170
+(https://github.com/Mahatav/brahmadatta-ai/pull/170#issuecomment-5312674678) built a
+real `tar.gz` (one zero-filled member, 2 GiB declared/actual, ~2 MB on disk, ~1029:1
+ratio) and confirmed `extract_archive` wrote the full 2 GiB to disk with no ceiling,
+no warning, no refusal (HIGH-1, not Critical — no containment/path/symlink boundary
+broken, pure availability impact). Not exploitable today through the only wired
+snapshot source (`source="git"`, which writes an uncompressed tar with no ratio to
+exploit) but live the moment `materialize_snapshot` — already called directly by T1,
+being built in parallel — reaches any non-server-built archive.
+
+**Options considered**
+
+(a) Declared-size pre-check only (reject if `member.size`/`info.file_size` alone
+exceeds `max_bytes`, nothing else).
+(b) Running actual-bytes-written check only, no pre-check.
+(c) Both, layered — pre-check as a cheap first pass, running check as the binding
+enforcement during the write loop.
+
+**Pros and cons of each**
+
+(a) Cheap, no change to the write loop. But insufficient alone against the review's
+own PoC shape in principle (a member could under-declare its size while the
+decompressor produces more) — though investigation in this session found CPython's
+`tarfile`/`zipfile` both already bound `.read()` to the header's declared size
+internally (`_FileInFile.read`, `ZipExtFile._read1`), so a *single* member cannot
+currently defeat (a) alone via the stdlib's own read path. Still leaves the
+cross-member case wide open: many individually-honest, individually-under-cap
+members can sum past the ceiling, and a per-member check never sees a total.
+(b) Correct and sufficient on its own, but wastes decompression work on an archive
+whose very first member header already declares more than the ceiling — no reason
+to start reading before refusing.
+(c) Strictly better than either alone: cheap rejection for the common/obvious case,
+binding enforcement (cumulative, checked against actual bytes) for the case (a)
+structurally cannot see, and does not depend on relying on `tarfile`/`zipfile`'s
+current internal truncation behavior continuing to hold across future Python
+versions — the task's own instruction (item 3) called for exactly this, and it
+matches the "layered, not either-or" shape the rest of this module already uses for
+its other checks (name-safety + resolved-path containment, independently).
+
+**Cost implications** — none. No new dependency, no new setting — `SNAPSHOT_MAX_BYTES`
+already existed for the ingest side; this reuses it rather than adding a second
+number. Runtime cost is one comparison per chunk already being read/written, and the
+declared-size pre-check is a single integer comparison per member before any I/O.
+
+**Security implications** — closes HIGH-1. Verified live in this session against a
+600 MiB zero-fill `tar.gz` (~1029:1 ratio, ~600 KiB on disk) using the real
+production default (`max_bytes=536_870_912`): refused in 0.35s, `dest_dir` not left
+behind. Also verified the cross-member case in isolation (three honestly-declared,
+individually-under-cap 900,000-byte members whose sum exceeds a 2,000,000-byte cap)
+is refused only by the running check, confirming the pre-check alone would have
+missed it — see `test_extract_archive_refuses_when_no_single_declared_size_exceeds_the_cap_but_their_sum_does`
+in `authorization/tests/test_archive.py`. Two Low findings from the same review
+(missing dedicated tests for a zip symlink member and a tar FIFO member on the
+*extraction* path specifically — the property was already independently verified by
+the reviewer's own manual attack, and by `enumerate_members`'s existing tests for the
+zip-symlink case) closed as test-coverage gaps:
+`test_extract_archive_refuses_a_zip_symlink_member`,
+`test_extract_archive_refuses_a_tar_fifo_member`.
+
+**Scalability implications** — none; the ceiling bounds worst-case disk usage per
+extraction call to `SNAPSHOT_MAX_BYTES`, which is a scalability *improvement* over
+the prior unbounded behavior (the shared-blast-radius disk-exhaustion risk the review
+flagged: extraction happens on the control-api host's own filesystem, ahead of any
+sandbox, so one hostile snapshot could previously have taken down Postgres and the
+whole control plane, not just its own mission).
+
+**Recommendation / ruling** — (c), implemented as described. `UnreadableArchiveError`
+reused for the size-ceiling refusal (its own docstring in `authorization/errors.py`
+already anticipated this: "...or is larger than the ceiling") rather than a new
+sibling error class — no `ErrorCode` contract change, consistent with D-063's own
+"both new error classes reuse existing `ErrorCode` members" precedent.
+
+**Final approval authority** — CTO (technical), same routing as D-063; this is a
+fix to code D-063 already put through that process, not a new architectural call.
