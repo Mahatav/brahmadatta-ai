@@ -40,6 +40,14 @@ INGRESS = {"nginx"}
 # an exception nobody wrote down becomes an exception nobody notices.
 DEV_ROUTABLE_EXCEPTIONS = {"command-center-deps"}
 
+# Reviewed exception, development profile only (D-073's Postgres-reachability follow-up):
+# `db` publishes 127.0.0.1:${POSTGRES_PORT:-5432} so `fuzz-worker`, a bare-metal host
+# process with no route onto the `backend` network, can reach it. Loopback-only, and
+# `docker-compose.finale.yml` deliberately does NOT carry this — see that decision's
+# own text on why the finale profile is left alone. `_host_port_bindings` below checks
+# the exception is actually loopback-bound, not just present by name.
+DEV_HOST_PORT_EXCEPTIONS = {"db"}
+
 # Services that must never be routable in any profile. These are the ones that hold
 # repository content, assemble prompts, or hold credentials.
 #
@@ -83,6 +91,16 @@ def _services_on_routable(doc: dict) -> set[str]:
         if routable.intersection(names):
             out.add(service)
     return out
+
+
+def _host_port_bindings(cfg: dict) -> list[str]:
+    """Raw `ports:` entries for one service, as compose's short syntax strings.
+
+    Only the short `"HOST_IP:HOST_PORT:CONTAINER_PORT"` form is used anywhere in these
+    compose files (checked directly), so this does not handle the long mapping form —
+    it would need extending, not silently passing, if that ever changes.
+    """
+    return [str(p) for p in (cfg or {}).get("ports") or []]
 
 
 def _tmpfs_size_mib(service: dict, mountpoint: str = "/tmp") -> int:
@@ -230,17 +248,33 @@ def test_only_the_ingress_publishes_a_host_port(path: Path) -> None:
     docker-compose.yml's own header comment on the `nginx` service already states the
     invariant this enforces: "the single published surface: nothing else maps a host
     port." This was previously true by convention only, unchecked by any test.
+
+    `db` (dev profile only) is a reviewed exception, not a hole this test missed —
+    D-073's Postgres-reachability follow-up publishes it for `fuzz-worker`, but only
+    loopback-bound. The allowlist alone would not have caught the `model-host-auth`
+    PoC above if it degenerated into "any published port is fine once one exception
+    exists", so this also asserts every allowed publish is actually `127.0.0.1:...`,
+    not `0.0.0.0` or unbound.
     """
     doc = _load(path)
     services = doc.get("services") or {}
     published = {name for name, cfg in services.items() if (cfg or {}).get("ports")}
-    assert published == INGRESS, (
+    allowed = INGRESS | (DEV_HOST_PORT_EXCEPTIONS if path is DEV else set())
+    assert published == allowed, (
         f"{path.name}: {sorted(published)} publish a host port via `ports:`. "
-        f"Only {sorted(INGRESS)} may — a `ports:` entry on any other service exposes "
+        f"Only {sorted(allowed)} may — a `ports:` entry on any other service exposes "
         "it to the host/LAN directly, bypassing every `internal: true` network "
         "boundary this file otherwise enforces. See D-075/SEC-50 in "
         ".project/decisions.md."
     )
+    for name in published - INGRESS:
+        bindings = _host_port_bindings(services[name])
+        not_loopback = [b for b in bindings if not b.startswith("127.0.0.1:")]
+        assert not not_loopback, (
+            f"{path.name}: {name}'s host-port exception is only reviewed as "
+            f"loopback-only, but publishes {not_loopback} — LAN-reachable is a "
+            "different, unreviewed exposure. See D-073 in .project/decisions.md."
+        )
 
 
 @pytest.mark.parametrize("path", [DEV, FINALE], ids=["dev", "finale"])
