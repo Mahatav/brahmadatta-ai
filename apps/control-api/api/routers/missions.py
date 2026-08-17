@@ -1,15 +1,16 @@
 """Mission API.
 
-Most operations below are contract-frozen and return 501 until the orchestrator's
-transition-driving endpoints land (issue #12 landed the state machine itself; wiring
-`create`/`start`/`pause`/`cancel` etc. through it is separate, later work). The
-request and response schemas are real and complete — that is the point of the
-freeze: the Command Center can be built and typed against this surface today, and
-the pipeline fills it in behind.
+#154 is wiring the seven stubs this file froze at D1, split across two engineers and
+sequenced (not parallel) because both touch this file: `create`/`list`/`get` below
+delegate to `missions.service`; `preflight`/`start`/`pause`/`cancel` are the other
+half, still `NotImplementedYetError` stubs here until that PR lands on top of this
+one. The request and response schemas were real and complete from the freeze — that
+is what let the Command Center be built and typed against this surface before either
+half existed.
 
-The event log is not one of those stubs: `GET .../events` (SSE) and
+The event log was never one of the stubs: `GET .../events` (SSE) and
 `GET .../events/replay` (#13) are fully implemented against the persisted
-`MissionEvent` table, independent of whether the rest of the lifecycle is wired up.
+`MissionEvent` table, independent of the rest of the lifecycle.
 
 Authorization is checked before anything else in every handler, so the 403 path is
 exercised now rather than being retrofitted around working code later.
@@ -43,6 +44,7 @@ from contracts.schemas.missions import (
     SnapshotRequest,
     StartRequest,
 )
+from missions import service as mission_service
 from missions.models import Mission
 from missions.models import MissionEvent as MissionEventRow  # avoid shadowing the schema
 
@@ -80,7 +82,8 @@ SSE_OPENAPI = {
 )
 def create_mission(request: HttpRequest, payload: MissionCreateRequest):
     require_role(request, *OPERATOR_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    summary = mission_service.create_mission(payload)
+    return Status(201, summary)
 
 
 @router.get(
@@ -95,7 +98,7 @@ def list_missions(
     offset: int = Query(default=0, ge=0),
 ):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    return mission_service.list_missions(limit=limit, offset=offset)
 
 
 @router.get(
@@ -106,7 +109,7 @@ def list_missions(
 )
 def get_mission(request: HttpRequest, mission_id: UUID):
     require_role(request, *READ_ROLES)
-    raise NotImplementedYetError(ORCHESTRATOR_ISSUE)
+    return mission_service.get_mission(mission_id)
 
 
 @router.post(
