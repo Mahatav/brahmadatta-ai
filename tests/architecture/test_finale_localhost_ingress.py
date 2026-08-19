@@ -4,13 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# D-088 (T0): conf.d.finale/brahmadatta.conf became a template, rendered by the nginx
+# image's own envsubst entrypoint step at container start (see
+# templates.finale/brahmadatta.conf.template's header comment) — the properties this
+# test asserts on are unaffected, since the ${CONTROL_API_OPERATOR_TOKEN} substitution
+# never touches any of the text these assertions check for.
 CONF = (
     Path(__file__).resolve().parents[2]
     / "infrastructure"
     / "compose"
     / "nginx"
-    / "conf.d.finale"
-    / "brahmadatta.conf"
+    / "templates.finale"
+    / "brahmadatta.conf.template"
 )
 
 

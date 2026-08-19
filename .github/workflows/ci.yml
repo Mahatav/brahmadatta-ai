@@ -407,12 +407,21 @@ jobs:
 
       # `docker compose config` for both profiles. This is a distinct check from `nginx
       # -t`: it validates the YAML, the interpolation, and the network/volume/profile
-      # graph — none of which nginx -t ever looks at. The six variables below are every
+      # graph — none of which nginx -t ever looks at. The eight variables below are every
       # `${VAR:?...}` in docker-compose.finale.yml — it refuses to default them on
       # purpose (fail loud rather than silently run with a blank secret). CI has no .env
       # at all (see the top of this file), so they are supplied inline, same as every
       # other CI-only value in this workflow. None of these values are used to start
       # anything — `config` only resolves and validates, it does not run a container.
+      # `docker compose config` interpolates EVERY service's environment, including
+      # profile-gated ones (`model-host-auth`'s `profiles: ["model"]` is a runtime
+      # filter, not a config-resolution one), so a required var on a profile-gated
+      # service still has to be supplied here even though `--profile model` is never
+      # passed. CONTROL_API_OPERATOR_TOKEN was added by D-088 (T0): the finale nginx
+      # service now requires it too, same fail-loud reasoning as the rest.
+      # MODEL_HOST_BEARER_TOKEN was ALREADY required by docker-compose.finale.yml's
+      # model-host-auth service (D-075/SEC-50) before D-088 — missing here independently
+      # of this change, found and fixed while verifying this step still passes.
       - name: docker compose config validates (dev + finale)
         env:
           DATABASE_URL: "postgresql://ci:ci-only-not-a-real-password@db:5432/ci"
@@ -421,6 +430,8 @@ jobs:
           POSTGRES_PASSWORD: "ci-only-not-a-real-password"
           REDIS_PASSWORD: "ci-only-not-a-real-password"
           REDIS_URL: "redis://:ci-only-not-a-real-password@redis:6379/0"
+          CONTROL_API_OPERATOR_TOKEN: "ci-only-not-a-real-token-0123456789abcdef01"
+          MODEL_HOST_BEARER_TOKEN: "ci-only-not-a-real-token-fedcba9876543210fe"
         run: |
           set -euo pipefail
           docker compose -f infrastructure/compose/docker-compose.yml config --quiet

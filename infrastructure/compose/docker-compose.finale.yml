@@ -12,7 +12,7 @@
 # Recorded as D-019 in .project/decisions.md.
 #
 # Every difference from docker-compose.yml, in full:
-#   1. nginx mounts conf.d.finale/ and profile/admin-deny.conf  -> /admin returns 404
+#   1. nginx mounts templates.finale/ and profile/admin-deny.conf  -> /admin returns 404
 #   2. control-api uses the `runtime` image target; the source is baked in, not mounted
 #   3. no Astro dev server; nginx serves the built static output
 #   4. redis requires a password
@@ -49,7 +49,33 @@ services:
       - /tmp:size=640m
       - /var/cache/nginx
       - /var/run
+      # D-088 (T0): NGINX_ENVSUBST_OUTPUT_DIR default — see the matching
+      # development-profile comment for the full reasoning (`mode=1777`, uid 101
+      # ownership). Same idiom model-host-auth already uses in docker-compose.yml.
+      - /etc/nginx/conf.d:mode=1777
     cap_drop: ["ALL"]
+    environment:
+      # D-088 (T0): required, not defaulted, unlike the dev profile — the finale stack
+      # already fails loud rather than silently running with a blank secret for every
+      # other required credential in this file (DATABASE_URL, REDIS_PASSWORD, ...); an
+      # unset operator token here would otherwise mean every proxied request 401s
+      # through the whole stage run with no obvious cause. See
+      # templates.finale/brahmadatta.conf.template's header comment for where this is
+      # consumed.
+      #
+      # Deliberately NOT via the `*env-file` (`x-env`) anchor control-api uses below —
+      # see the matching development-profile comment in docker-compose.yml for the full
+      # reasoning (cybersecurity review of T0: `env_file:` would give nginx, the ONLY
+      # container with a route off the host, every credential in `.env`, not just the
+      # one its own config reads). `${VAR}` interpolation below resolves from
+      # `--env-file`/the process environment at compose-parse time regardless of
+      # whether `env_file:` is also declared, so this one line is sufficient on its own.
+      CONTROL_API_OPERATOR_TOKEN: ${CONTROL_API_OPERATOR_TOKEN:?CONTROL_API_OPERATOR_TOKEN must be set for the finale stack}
+      # Restricts the entrypoint's envsubst call to this ONE variable name — see the
+      # long comment at the top of templates.finale/brahmadatta.conf.template for why an
+      # unrestricted envsubst pass would corrupt nginx's own `$host`/`$request_uri`/etc.
+      # variable syntax in that file.
+      NGINX_ENVSUBST_FILTER: "^CONTROL_API_OPERATOR_TOKEN$"
     ports:
       # Published on loopback: the stage browser runs on the same machine. Keep the
       # finale origin plain HTTP so there is no browser TLS warning on stage.
@@ -60,7 +86,11 @@ services:
       # THE PROFILE SWITCH — this is the whole finale admin control at the proxy.
       # admin-deny.conf returns 404 for /admin and /django-admin.
       - ./nginx/profile/admin-deny.conf:/etc/nginx/profile/admin.conf:ro
-      - ./nginx/conf.d.finale:/etc/nginx/conf.d:ro
+      # D-088 (T0): templates, not a pre-rendered conf.d/ bind mount any more — see
+      # templates.finale/brahmadatta.conf.template's header comment and the matching
+      # development-profile compose comment for why this mounts at
+      # /etc/nginx/templates, not /etc/nginx/conf.d.
+      - ./nginx/templates.finale:/etc/nginx/templates:ro
       # The Astro build output. Produced by `npm run build` in apps/command-center before
       # this stack starts; finale-up.sh refuses to start without it.
       - ../../apps/command-center/dist:/usr/share/nginx/html:ro

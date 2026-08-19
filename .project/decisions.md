@@ -8320,3 +8320,472 @@ PR.
 
 **Final approval authority** — `cybersecurity` (security severity/verdict, per this
 project's standing rule); this entry is that determination.
+
+---
+
+## D-094 — T0 (Command Center auth): implementing D-088's nginx-layer credential
+injection, ruling 2 — envsubst templates, `x-env` scoping correction found in review, and
+the cybersecurity verdict · 2026-08-19 · `devops-engineer` seat
+
+**What this implements.** D-088 (CTO seat, ruling 2, "the Command Center browser has no
+way to authenticate to the control API at all") — recorded in `.project/decisions.md` on
+the branch/session that ruled it; numbering here may be reconciled at merge since several
+parallel tasks are appending to this file concurrently. Summary of the ruling this closes:
+nginx-layer credential injection — `CONTROL_API_OPERATOR_TOKEN` attached by nginx itself to
+every request it proxies to `control-api`'s mission/evidence endpoints, so the browser never
+holds or attaches a bearer token at all, fixing `fetch()` and the `EventSource`-based SSE
+connection uniformly (the latter cannot carry a custom header by spec, so no client-side fix
+could have worked for it regardless).
+
+**Implementation, verified for real, not narrated.**
+
+- `infrastructure/compose/nginx/conf.d.dev/brahmadatta.conf` and `conf.d.finale/
+  brahmadatta.conf` → `infrastructure/compose/nginx/templates.{dev,finale}/
+  brahmadatta.conf.template`, consumed by the `nginxinc/nginx-unprivileged` image's own
+  `docker-entrypoint.d/20-envsubst-on-templates.sh` (standard mechanism already
+  established in this repo by `nginx/model-host-auth/templates/`, D-075 — not hand-rolled).
+  `proxy_set_header Authorization "Bearer ${CONTROL_API_OPERATOR_TOKEN}";` added to exactly
+  the three control-api-proxied locations (SSE, snapshot upload, `/api/`) in both profiles,
+  never to the static-asset locations, the Astro/dev-server `location /`, or the Django
+  admin location (which authenticates by session cookie, not `BearerTokenAuth` — this
+  credential is meaningless there).
+- Both compose files: nginx service gets `NGINX_ENVSUBST_FILTER: "^CONTROL_API_OPERATOR_
+  TOKEN$"` (restricts the entrypoint's substitution to that one variable name — without it,
+  the entrypoint substitutes every environment variable name it finds textually anywhere in
+  the template, which would corrupt nginx's own `$host`/`$request_uri`/`$control_api`/etc.
+  variable syntax); `/etc/nginx/conf.d:mode=1777` added to the existing `tmpfs` list
+  (`read_only: true` root fs, same idiom `model-host-auth` already uses, same reason: uid
+  101 needs to write the rendered config, a bare tmpfs mount comes back `root:root`).
+- `apps/control-api/api/auth.py` — untouched, as directed. Nothing about `BearerTokenAuth`
+  changed; this is purely a request-shaping change on the sending side.
+- Real `docker run`/`nginx -t` proof, not just `docker compose config`: rendered the dev AND
+  finale templates through the actual image, grepped the OUTPUT — confirmed exactly three
+  `proxy_set_header Authorization "Bearer <token>"` lines in each rendered file, at the SSE/
+  snapshot/`/api/` locations only, and confirmed `$host`, `$request_uri`, `$control_api`,
+  `$command_center`, `$http_upgrade` all survived untouched (the filter working as intended).
+  `nginx -t` passed for both profiles against the real rendered output.
+- Brought up the real dev compose stack (`db`, `redis`, `control-api`, `nginx` — Astro's own
+  `command-center-deps` failed on `npm ci` in this sandbox for reasons unrelated to this
+  change, exit 228, not investigated further since nothing in this task depends on the Astro
+  dev server actually running). Ran a real `curl -sk https://127.0.0.1:8443/api/v1/missions`
+  through nginx with **zero** `Authorization` header supplied by curl: **200**, with real
+  mission data from an existing dev DB (two missions from the #50 D7 rehearsal). The same
+  request direct to `control-api:8000` with no header, from inside the nginx container,
+  returned **401** — confirmed nginx, not the app, is the one authenticating this request.
+- Response headers for that same request captured and inspected: no `Authorization`, no
+  `WWW-Authenticate`, no token substring anywhere in the response.
+- Log-leak check, done directly rather than trusting D-088's claim about the log format:
+  `docker logs brahmadatta-nginx` (the image's `access.log` is `/dev/stdout`, confirmed by
+  `ls -la` inside the container) grepped for the literal token value and for any
+  case-insensitive `authoriz` substring across the full log history, including the
+  successful `/api/v1/missions` request's own access-log line — zero matches both times.
+  `nginx.conf`'s `json_combined` log format was independently confirmed to have no
+  `$http_authorization` field, matching D-088's own claim, not taken on its word alone.
+- SSE proof: real `EventSource`-shaped request (`curl -N --http1.1`, no client
+  `Authorization` header) against a real mission's real events endpoint
+  (`/api/v1/missions/{id}/events`) through nginx — **200**, `Content-Type:
+  text/event-stream`, and the real `MISSION_AUTHORIZED` event streamed back, proving nginx's
+  injected header authenticated the connection the browser's own `EventSource` cannot.
+- `infrastructure/scripts/nginx-validate.sh`, `infrastructure/scripts/smoke-sse.sh` (the
+  actual CI `ingress` job script — all four cases, including the two that inject a violation
+  and must fail, ran and passed for real) updated to mount the new `templates.{dev,finale}/`
+  directories and supply a fake `CONTROL_API_OPERATOR_TOKEN` so the entrypoint's envsubst
+  step has something to render; both re-run after every subsequent edit in this session.
+  `infrastructure/scripts/testing/verify-live-sse-through-nginx.sh` (NOT CI-wired, "run by
+  hand") updated the same way for consistency but not itself re-run to a real pass — its
+  `docker build --target runtime` step failed on a **pre-existing, unrelated** bug (missing
+  `--build-context` flags for `control-api.Dockerfile`'s `additional_contexts`, which only
+  `docker compose build` translates automatically; confirmed present before this task by
+  reading the script's own header, "not wired into CI... run by hand", and by the failure
+  mode having nothing to do with nginx or auth). Flagged, not fixed — out of this task's
+  scope and not something this session broke.
+- CI workflow (`.github/workflows/ci.yml`) `docker compose config validates (dev + finale)`
+  step: added `CONTROL_API_OPERATOR_TOKEN` (this task's new required finale var). Also found
+  and fixed a **second, pre-existing** bug unrelated to this task while verifying the same
+  step: `MODEL_HOST_BEARER_TOKEN` (D-075/SEC-50's `model-host-auth` sidecar) was already
+  `:?`-required in `docker-compose.finale.yml` but never supplied by this CI step — `docker
+  compose config` on the finale profile would already fail on `main` before this branch's
+  changes, confirmed by checking `git show HEAD` on both files. Fixed in the same commit
+  since it blocked verifying the very step this task's change also touches; flagged here
+  rather than silently folded in.
+- `tests/architecture/test_finale_localhost_ingress.py` — read `conf.d.finale/
+  brahmadatta.conf`, which no longer exists after the rename to a template. Updated the path
+  to `templates.finale/brahmadatta.conf.template`; both assertions still pass (the
+  `${CONTROL_API_OPERATOR_TOKEN}` substitution never touches the text they check for). Full
+  `tests/architecture/` suite run: 67 passed, 6 pre-existing skips, 0 failures.
+
+**Decision — narrowing D-088's literal compose-wiring instruction (self-reviewed, then
+independently re-verified — see cybersecurity verdict below).**
+
+- **Options considered.** (a) D-088's literal text: add the `nginx` service to the existing
+  `x-env` anchor (`env_file: .env`), same as `control-api`/`command-center`. (b) Add only an
+  explicit `environment: CONTROL_API_OPERATOR_TOKEN: ${CONTROL_API_OPERATOR_TOKEN:-}` (dev)
+  / `${CONTROL_API_OPERATOR_TOKEN:?...}` (finale) entry, with no `env_file:` on the nginx
+  service at all.
+- **Finding.** Implemented (a) first, per D-088's literal instruction, then checked it with
+  `docker compose config nginx` before considering the task done — the rendered
+  `environment:` block for nginx showed all 44 variables from `.env` (`DJANGO_SECRET_KEY`,
+  `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `CONTROL_API_ADMIN_TOKEN`,
+  `CONTROL_API_REVIEWER_TOKEN`, `MODEL_HOST_BEARER_TOKEN`, ...), not just the one nginx's own
+  config reads. `env_file:` loads the whole file into the container's process environment
+  regardless of which keys the process actually consumes — confirmed directly, not assumed.
+- **Why this matters.** nginx is the **only** container in this stack with a route off the
+  host (C4) — the single highest-exposure process here. Before this change it held zero
+  secrets. Under (a), a full compromise of the nginx process (an nginx CVE, a request-
+  smuggling bug, a misconfigured location) would additionally hand an attacker every other
+  service's credential, none of which nginx's own config ever touches. This is the exact
+  ambient-secret-exposure shape this same codebase already treats as worth actively
+  engineering around: `.env.example`'s own comment on `MODEL_HOST_BEARER_TOKEN` explains at
+  length why that token is declared in a way that keeps it OUT of `fuzz-worker`'s process
+  environment even though `fuzz-worker` never reads it either — the identical property, on
+  the identical file (`.env`), on a container with *more* external exposure than
+  `fuzz-worker` has, not less.
+- **Fix.** Switched to (b). `${VAR}` interpolation inside a service's `environment:` block
+  resolves from Compose's own `--env-file`/process-environment resolution at parse time —
+  confirmed directly: `docker compose config nginx` after the change shows exactly
+  `CONTROL_API_OPERATOR_TOKEN` and `NGINX_ENVSUBST_FILTER` and nothing else, for both
+  profiles. Re-ran the full live proof (curl through nginx with zero client auth header,
+  SSE, log-leak grep, `nginx exec env`) against this narrower wiring — identical 200/stream
+  results, and `docker exec brahmadatta-nginx env` confirmed only the two expected variables
+  plus base-image vars (`NGINX_VERSION`, `PATH`, `HOME`, ...) are present, none of the other
+  42 secrets in `.env`.
+- **Cost implications.** None — same number of compose lines, no new service, no new infra.
+- **Security implications.** Strictly reduces blast radius of an nginx-level compromise with
+  zero functional cost; the token nginx actually needs still reaches it identically.
+- **Scalability implications.** None.
+- **Recommendation.** (b), as implemented.
+- **Final approval authority.** This is an implementation-detail correction within D-088's
+  already-approved architecture (nginx-layer injection via envsubst, `CONTROL_API_OPERATOR_
+  TOKEN`), not a change to the ruling itself — D-088's own text names cybersecurity review as
+  non-substitutable regardless of confidence, which is exactly the process that surfaced
+  this. CTO retains authority over the architecture choice; this note is filed for the
+  record, not for re-approval of ruling 2 itself.
+
+**Cybersecurity review.** No separate `Task`/`Agent`-spawning tool was available in this
+session; conducted directly by reading `~/.claude/agents/cybersecurity.md` and following its
+review process (auth flow, secrets, infrastructure) rather than skipping it, per this
+session's explicit instruction. Findings:
+
+1. **Ambient-secret exposure via the `x-env` anchor on `nginx`** — found and fixed during
+   this same review pass, detailed above. Would have been **MEDIUM** had it shipped as
+   D-088's literal text described; **CLOSED**, verified fixed by direct inspection of both
+   `docker compose config` output and the running container's real process environment
+   (`docker exec brahmadatta-nginx env`), not by re-reading the compose YAML alone.
+2. **Credential-in-logs** — re-verified independently rather than trusting either D-088's
+   claim or this task's own earlier implementation pass: grepped the real, running nginx
+   container's actual log output (both the `json_combined` access-log format definition in
+   `nginx.conf` AND a live log line from a real authenticated request) for the literal token
+   value and for `authoriz` case-insensitively. Zero matches both times. **PASS.**
+3. **Credential exposed to the browser** — inspected real HTTP response headers and body
+   from a real authenticated `/api/v1/missions` request through nginx (curl with no client
+   Authorization header): no `Authorization`, no `WWW-Authenticate`, no token substring
+   anywhere in the response. The token exists only in nginx's process environment (now
+   scoped to that one variable, per finding 1) and the tmpfs-rendered, never-disk-persisted,
+   never-bind-mounted-out config file inside a container the browser has no filesystem
+   access to. **PASS.**
+4. **Injection scope** — grepped the ACTUAL RENDERED OUTPUT of both templates (not just the
+   source `.template` files) after running them through the real image's envsubst step:
+   exactly three `proxy_set_header Authorization` lines in each profile, at the SSE/
+   snapshot-upload/`/api/` locations only. Confirmed absent from `location /` (Astro/static),
+   `location ^~ /_astro/`, the hashed-asset regex location, and the Django admin location (in
+   both `admin-allow.conf` and the finale `admin-deny.conf` — the admin routes use session-
+   cookie auth, not `BearerTokenAuth`, so this credential does not belong there and is not
+   present there). **PASS.**
+5. **`auth.py` untouched** — confirmed via `git status`/diff: `apps/control-api/api/auth.py`
+   does not appear among the changed files. **PASS.**
+6. **Dependency/audit tooling** — not applicable; no new package, no new dependency,
+   no `npm`/`pip` surface touched by this change. Not reviewed because there is nothing to
+   review here.
+
+**Verdict: PASS.** No critical or high findings. One medium finding raised during this same
+review pass, fixed in this same commit, and independently re-verified against the fix (not
+just against the intent) before this verdict was recorded.
+
+**Assumptions.** `command-center-deps`'s `npm ci` failure (exit 228) in this sandbox is
+unrelated to this change (no file this task touched is anywhere near that service's
+definition or the npm registry path) and was not investigated further — flagged as a risk
+below, not silently ignored.
+
+**Risks.**
+- **LOW** — `infrastructure/scripts/testing/verify-live-sse-through-nginx.sh`'s pre-existing
+  `docker build --target runtime` bug (missing `--build-context` flags) means this script
+  cannot currently be run by hand at all, on `main`, independent of this change. Flagged for
+  whoever next needs it; not fixed here (out of T0's scope).
+- **LOW** — `command-center-deps` failed to `npm ci` in this sandbox; unverified whether this
+  reproduces outside it. If it does, the full Command Center UI (not just nginx/control-api,
+  which this task fully verified) cannot be visually proven against a live backend yet — the
+  next role picking up Command Center panel-wiring work should confirm `npm ci` succeeds in
+  their environment before assuming T0 alone unblocks them.
+- **LOW** — comment-only stale references to the old `conf.d.dev`/`conf.d.finale` directory
+  names remain in `apps/control-api/api/api.py`, `apps/control-api/config/settings/
+  finale.py`, and several `docs/` files (grepped, confirmed prose-only, not path-dependent).
+  Not fixed here — those are other roles' owned files and the references are cosmetically
+  stale, not functionally broken. Fixed the two files this session directly owns
+  (`nginx/includes/tls.conf`, `nginx/includes/hsts.conf`) for internal consistency.
+
+**Open questions.** None blocking. Whoever next touches `verify-live-sse-through-nginx.sh`
+should fix its `docker build` invocation (add `--build-context demo-repositories=demo/
+repositories --build-context workers-source=workers --build-context packages-source=
+packages --build-context adapters-source=adapters`, mirroring `docker-compose.finale.yml`'s
+`additional_contexts` block) before relying on it.
+
+**Recommended next action.** Merge coordination is explicitly owned by the orchestrating
+session per this task's instructions — not decided here. Once merged, engineering-manager to
+confirm Command Center panel-wiring work (D-086/D-088's "T-0 unblocks D7 rehearsal panel
+work") can proceed against a live backend using this fix.
+
+**Final approval authority.** CTO (architecture, already given in D-088). Cybersecurity
+verdict above is this task's own closing gate per CLAUDE.md's standing rule — PASS, recorded
+here as the review artifact since no separate PR thread exists yet for this branch.
+
+---
+
+## D-095 — Independent `cybersecurity` review of T0 (Command Center auth, D-088/D-094):
+D-088 conformance re-verified point-by-point, one real MEDIUM finding the implementer's own
+self-review missed, verdict PASS WITH CONDITIONS · 2026-08-19 · `cybersecurity` seat
+
+**Numbering note.** This branch's local copy of `decisions.md` had the implementer's own
+entry recorded as `## D-094` at fork time. `origin/main`, fetched fresh at review time, has
+since landed an unrelated `D-094` (T9 singleton-lock review) and a `D-092` — different
+branch, different content, confirmed by reading both. Taking the next free number after what
+is actually on `origin/main` right now, per this task's own instruction: **D-095**. Not a
+renumbering of the implementer's `D-094` entry — that stays as this branch wrote it; merge-
+time reconciliation is explicitly out of scope for this review, same convention D-094's own
+text already anticipated ("numbering here may be reconciled at merge").
+
+**Context.** This review exists specifically to close the gap the task brief named: T0's
+worktree forked *before* the real D-088 existed anywhere on `origin/main`, acted on a task
+prompt's *description* of D-088 rather than on independently verified content (confirmed:
+`git show <T0's original commit>:.project/decisions.md | grep '^## D-088'` returns nothing),
+and — unlike the sibling T-1 task, which correctly refused to proceed until the real ruling
+was verifiable — went ahead anyway. D-088 has since landed for real and, on inspection,
+matches what T0 built. That match had not been confirmed by anyone who could see both
+artifacts at once until this review. Every check below was performed by reading the real
+D-088 (lines 7228–7485 of this file, `origin/main`'s copy, fetched fresh this session) and
+the actual implementation side by side — not by re-reading T0's own D-094 narrative and
+trusting its account.
+
+**1. D-088 conformance — point-by-point, independently re-verified.**
+
+- Envsubst-template mechanism (`nginxinc/nginx-unprivileged`'s
+  `docker-entrypoint.d/20-envsubst-on-templates.sh`), `NGINX_ENVSUBST_FILTER` scoping,
+  `/etc/nginx/conf.d:mode=1777` tmpfs addition, injection on exactly the SSE/snapshot-
+  upload/`/api/` locations, `api/auth.py` untouched — all match D-088's ruling 2 text.
+  Confirmed by reading `infrastructure/compose/nginx/templates.{dev,finale}/
+  brahmadatta.conf.template` directly (not the implementer's description of them) and by
+  bringing up the real dev stack and inspecting the rendered output inside the running
+  container (below).
+- D-088 named `CONTROL_API_OPERATOR_TOKEN` as "already exists... nothing new needs
+  generating" — confirmed: `apps/control-api/config/settings/base.py` line 166,
+  `.env.example` line 82, unchanged by this branch.
+- D-088's stated log-format claim ("`json_combined` does not include
+  `$http_authorization`") — independently re-derived from `nginx.conf`'s real
+  `log_format json_combined` block (reproduced below in finding 4), not taken from either
+  D-088's or D-094's word.
+- **Verdict on this check: conforms.** No daylight found between the real ruling's text and
+  what got built, on any point the ruling was specific about.
+
+**2. Injection scope — verified against real rendered output, not source templates.**
+Brought up the real dev compose stack (`db`, `redis`, `control-api`, `nginx`; `command-
+center-deps` failed `npm ci` in this sandbox too, exit 243 — same class of pre-existing,
+unrelated environment gap D-094 already flagged with exit 228, not investigated further,
+`nginx` started directly with `docker start` since nothing in this review needs the Astro
+dev server). Ran real migrations. Inside the live container:
+`docker exec brahmadatta-nginx grep -n Authorization /etc/nginx/conf.d/brahmadatta.conf` —
+exactly three `proxy_set_header Authorization "Bearer <token>";` directive lines, at the
+SSE (`^/api/v1/missions/[^/]+/events/?$`), snapshot-upload
+(`^/api/v1/missions/[^/]+/snapshot/?$`), and `/api/` locations, in both profiles. End-to-end
+proof, not just static grep: `GET /django-admin/` through nginx returned a real **302** to
+Django's own session login page (not bypassed by the injected bearer token — confirmed the
+credential is genuinely absent from that location, not merely present-but-ignored), `GET
+/api/v1/missions` and `POST /api/v1/missions` both authenticated successfully with zero
+client `Authorization` header, and static-asset locations carry no `proxy_set_header`
+directive at all per the rendered-config grep. **PASS.**
+
+**3. `x-env` scoping correction — independently re-run, not trusted from D-094's own
+`docker exec` output.** Built a fresh test `.env` from `.env.example` with every one of the
+45 variables given a distinct, greppable placeholder value (not the implementer's session —
+a new one, so no value from any prior run could be mistaken for confirmation). `docker
+compose --env-file .env -f docker-compose.yml config` (dev) and the finale equivalent, both
+parsed independently with `python3 -c "import yaml..."` rather than eyeballing YAML text:
+nginx's resolved `environment:` block is exactly `{CONTROL_API_OPERATOR_TOKEN: ...,
+NGINX_ENVSUBST_FILTER: ...}` in both profiles, `env_file: None`. Then actually brought the
+dev stack up and ran `docker exec brahmadatta-nginx env`: `CONTROL_API_OPERATOR_TOKEN`,
+`NGINX_ENVSUBST_FILTER`, and base-image vars only (`NGINX_VERSION`, `PATH`, `HOME`,
+`HOSTNAME`, `PKG_RELEASE`, `NJS_*`) — none of the other 43 secrets from `.env`, including
+`DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`, `CONTROL_API_ADMIN_TOKEN`, which were all given
+distinguishable values in the test `.env` specifically so a leak would have been impossible
+to miss. Independently assessed, not just re-confirmed: yes, this is the safer choice — the
+`env_file:` anchor loads the whole file into the container process environment regardless of
+what the process reads, and nginx is this stack's one internet/browser-adjacent container
+(C4), so minimizing what ambient credential material a compromise of that one process could
+exfiltrate is strictly correct engineering, at zero functional cost (`${VAR}` interpolation
+in an `environment:` block resolves from the same `--env-file`/process-environment source
+regardless of whether `env_file:` is also present). **PASS**, and independently re-derived,
+not merely re-read.
+
+**4. Log leakage — re-verified against a live container's real log output.** Read
+`nginx.conf`'s `log_format json_combined` directly: no `$http_authorization` field. Then,
+independent of that static read, drove real traffic through the live stack (GET
+`/api/v1/missions` → 200, POST `/api/v1/missions` → 422 validation error, GET
+`/django-admin/` → 302, GET `/api/v1/missions/{id}/events` → 200 SSE stream) and grepped
+`docker logs brahmadatta-nginx` for the literal test-token value
+(`SECVERIFY_OPTOKEN_9f3a7c2e1b`, chosen specifically to be unmistakable in a grep) and for
+`authoriz` case-insensitively, across the full log history including every one of the real
+requests above. Zero matches, both greps. **PASS.**
+
+**5. Response leakage — re-verified against real HTTP responses, not assumed from the
+proxy design.** Captured full response headers and bodies for the unauthenticated-from-the-
+client `GET /api/v1/missions` (200, real mission-list JSON) and `POST /api/v1/missions`
+(422) requests above. No `Authorization`, no `WWW-Authenticate`, no token substring, in
+either response's headers or body. **PASS.**
+
+**6. Real end-to-end bypass proof — done for real, not narrated.**
+`curl -sk https://127.0.0.1:8443/api/v1/missions` through nginx with **zero** client
+`Authorization` header: **200**, real mission data (empty list, then a real created mission
+after a `POST`). The comparable request run *from inside the nginx container* directly to
+`control-api:8000` with no header: **401**. Structural check, not just convention: grepped
+`docker-compose.yml` — **`control-api` has no `ports:` block at all**, confirmed live with
+`docker port brahmadatta-control-api` (empty output) and a host-level `curl -m3
+http://127.0.0.1:8000/...` (hit an unrelated local process on that port, not the container —
+confirmed via `lsof`, then confirmed `docker ps`'s own `PORTS` column shows `8000/tcp` with
+no host-side mapping for `control-api`, unlike `nginx`'s `127.0.0.1:8080->8080/tcp,
+127.0.0.1:8443->8443/tcp`). control-api is not reachable from outside the compose network by
+construction, not merely by convention — there is no bypass path for an external caller
+regardless of what header they send. **PASS.**
+Also independently exercised the SSE path specifically, since that is the connection type
+the whole ruling exists to unblock: `curl -N --http1.1` with no client header against a real
+mission's real `/events` endpoint returned **200**, `Content-Type: text/event-stream`, and a
+real `: brahmadatta stream open` frame. **PASS.**
+
+**7. CI workflow change — confirmed config-validation-only, no real secret material.**
+`.github/workflows/ci.yml`'s diff adds `CONTROL_API_OPERATOR_TOKEN: "ci-only-not-a-real-
+token-0123456789abcdef01"` and `MODEL_HOST_BEARER_TOKEN: "ci-only-not-a-real-token-
+fedcba9876543210fe"` — both self-evidently placeholder strings, used only as inputs to
+`docker compose config --quiet`, which resolves and validates the compose graph without
+starting anything. Independently reproduced the pre-existing `MODEL_HOST_BEARER_TOKEN` gap
+myself, not taken on the implementer's word: ran `docker compose -f
+docker-compose.finale.yml config` with a test `.env` that had every other required var set
+but `MODEL_HOST_BEARER_TOKEN` blank (`.env.example`'s own shipped default) — it failed with
+`required variable MODEL_HOST_BEARER_TOKEN is missing a value`, reproducing exactly the
+gap D-094 describes finding independently of this task, before I supplied a value and the
+config resolved cleanly. **PASS**, both halves of this check.
+
+**8. New finding, not caught by the implementer's self-review — MEDIUM, real, independently
+demonstrated. The token leaks into the RENDERED config's own comments, not just its
+directives, contradicting T0's own explicit invariant and its own explicit "exactly three"
+verification claim.**
+
+- Both `templates.dev/brahmadatta.conf.template` and `templates.finale/
+  brahmadatta.conf.template` contain the literal string `${CONTROL_API_OPERATOR_TOKEN}` at
+  **five** locations each, not three: the three intended `proxy_set_header Authorization`
+  directives, **plus two header-comment lines** (line 12, "ONLY `${CONTROL_API_OPERATOR_
+  TOKEN}` is interpolated..."; line 22, "The literal variable reference
+  (`${CONTROL_API_OPERATOR_TOKEN}`) appears EXACTLY ONCE below..."). `NGINX_ENVSUBST_FILTER`
+  matches the variable name as text anywhere in the file — inside a comment is not exempt —
+  so envsubst substitutes the real secret into both comment lines too, at container start.
+- Demonstrated on the real running system, not inferred from source: brought up the real
+  container with a distinct, greppable test token
+  (`CONTROL_API_OPERATOR_TOKEN=SECVERIFY_OPTOKEN_9f3a7c2e1b`) and ran `docker exec
+  brahmadatta-nginx grep -n SECVERIFY_OPTOKEN_9f3a7c2e1b /etc/nginx/conf.d/
+  brahmadatta.conf`: five matches, at lines 12, 22, 136, 158, 172 — the two comment lines
+  and the three directive lines. Confirmed identically in the finale profile's rendered
+  output.
+- **Why this contradicts T0's own record, not just a new observation.** The template's own
+  header comment states, verbatim: "Do not add a second mention elsewhere in this file
+  (including in a comment) — the filter matches anywhere in the file, so a second mention
+  would get the real secret substituted into it too." That sentence correctly describes the
+  exact mechanism of the bug present two lines above and ten lines below it, in the same
+  file, written by the same author, and the bug went undetected through T0's own "grepped
+  the OUTPUT... confirmed exactly three `proxy_set_header Authorization "Bearer <token>"`
+  lines" claim — a claim about directive lines specifically, which is true and was not the
+  full picture; the file's *total* real-secret occurrence count is five, not three, and
+  nothing in T0's own verification narrative checked the total.
+- **Severity reasoning.** Not CRITICAL/HIGH: the rendered file is tmpfs-only, never disk-
+  persisted, never bind-mounted out, and not served by any nginx `location` (checked: no
+  `location` block anywhere in either template references its own config path). Anyone who
+  can already read this file (container filesystem access, `docker exec`) already sees the
+  real token in the three operative directives regardless of the two extra comment
+  occurrences — this is not a new class of attacker gaining access they did not already
+  have. It is MEDIUM, not LOW, because it is a real, concretely-reproduced credential-
+  handling defect that specifically undermines the human-review/redaction path this kind of
+  system realistically leaks through: an operator debugging "why is auth failing" who runs
+  `nginx -T` or `cat`s the rendered config into a support channel, bug report, or screenshot
+  and redacts the three lines that visibly look like credentials (`proxy_set_header
+  Authorization "Bearer ..."`) has no reason to also redact two lines that read as plain
+  descriptive prose ("ONLY `<token>` is interpolated...") — those two lines carry the exact
+  same secret and would not get the same instinctive redaction. This is precisely the class
+  of self-referential-invariant violation this review exists to catch: the file states its
+  own safety property and violates it, undetected by its own author's self-review.
+- **Required fix, small and bounded.** Reword the two header-comment lines in both templates
+  to describe the mechanism without using the literal `${CONTROL_API_OPERATOR_TOKEN}`
+  interpolation syntax (e.g., "ONLY the operator-token variable is interpolated" / "the
+  literal variable reference appears exactly once below" — naming it by role rather than by
+  its exact substitutable text), then re-render both profiles through the real image and
+  confirm the real secret appears exactly three times in the output, not five. Does not
+  touch compose files, `x-env` scoping, or any of findings 1–7 above, all of which are
+  unaffected and already independently confirmed clean.
+
+**Verdict: PASS WITH CONDITIONS.**
+
+No critical or high findings. Findings 1–7 above are clean, independently re-derived (not
+re-read from D-094's own account), and confirm D-088's ruling was implemented as actually
+written, including the one deliberate, disclosed, and correctly-reasoned deviation from its
+literal `x-env` text. One new MEDIUM finding (§8) — a real, reproduced credential-in-rendered-
+comment leak inside the container's own tmpfs config, not exposed to the browser or any
+external caller, but a genuine defect in a component whose entire job is keeping this
+credential server-side-only, and one the implementer's own self-review's stated invariant
+should have caught and did not.
+
+**Condition for merge.** Fix §8 in both templates (`templates.dev/` and `templates.finale/`)
+before merge — small, mechanical, no design change. Re-verification after the fix does not
+require a full second review pass: re-render both templates through the real
+`nginxinc/nginx-unprivileged` image (`infrastructure/scripts/nginx-validate.sh` already does
+this) and confirm the real secret value appears exactly three times in each rendered output,
+matching the three intended `proxy_set_header` directive lines and nowhere else. Whoever
+lands the fix (recommend: devops-engineer, same seat that owns these files) should paste
+that grep count into the PR thread; a second full cybersecurity pass is not required for a
+comment-wording-only change, per this project's own proportionality convention (D-094's own
+`x-env` finding was closed the same way, same commit, same review pass).
+
+**Assumptions.** `command-center-deps`'s `npm ci` failure in this sandbox (exit 243 this
+session, exit 228 in T0's) is environmental and unrelated to this change — same conclusion
+D-094 already reached, independently re-confirmed by this session hitting the same class of
+failure for an unrelated reason (this sandbox, not T0's). Not investigated further; flagged
+as a standing risk below, not silently ignored.
+
+**Risks.**
+- **MEDIUM** — §8 above. Blocks merge until fixed, per the condition stated.
+- **LOW** — `command-center-deps` cannot `npm ci` in at least two independent sandboxes now
+  (this session's and T0's). If this reproduces on the actual finale/demo host, Command
+  Center panel-wiring work cannot be visually verified against a live backend regardless of
+  T0 being otherwise correct — worth a `devops-engineer` look before it blocks a later task
+  the way D-088 itself warned against (`#12`/`#154`'s pattern).
+- **LOW** — `infrastructure/scripts/testing/verify-live-sse-through-nginx.sh`'s pre-existing
+  `docker build --target runtime` gap (missing `--build-context` flags), already flagged by
+  D-094, confirmed still present and still out of scope for this review.
+
+**Open questions.** None blocking beyond the §8 fix itself.
+
+**Recommended next action.** devops-engineer applies the §8 comment-wording fix to both
+`templates.dev/brahmadatta.conf.template` and `templates.finale/brahmadatta.conf.template`,
+re-renders both through the real image, confirms the real secret appears exactly three times
+in each output, and reports the grep count on this branch. Once that lands, this review's
+verdict upgrades to a clean **PASS** without a further full review pass, per the
+proportionality note above. Merge coordination remains owned by the orchestrating session.
+
+**Final approval authority.** CTO retains authority over the architecture (already given,
+D-088); this entry is cybersecurity's independent closing gate per CLAUDE.md's standing
+rule. PASS WITH CONDITIONS — the one MEDIUM finding blocks merge until fixed; it does not
+require CEO risk acceptance to close, since the fix is straightforward and does not trade
+off against any other requirement.
+
+
+**Condition closed (orchestrating session, same day).** Both templates' header comments
+reworded to name the variable without a leading `$`/`${...}`, which envsubst's substitution
+syntax does not match. Verified against the real entrypoint, not just by inspection: both
+templates rendered through a real `nginxinc/nginx-unprivileged` container running its own
+`20-envsubst-on-templates.sh` with a real sentinel value (`REAL-SECRET-VALUE-XYZ`) in place
+of the token — rendered output grepped for the sentinel: **exactly 3 occurrences in each
+file**, all three in `proxy_set_header Authorization` lines, none elsewhere. Verdict upgrades
+to **PASS**, per this entry's own proportionality note — no further review pass required.
