@@ -7483,3 +7483,225 @@ holds the merge-blocking review per CLAUDE.md's standing rule — this ruling pi
 approach, it does not substitute for that review. Engineering-manager to schedule the new
 task (recommended: T-0, devops-engineer-led, backend-developer-consulted) on the task board
 ahead of any Command Center panel-wiring work.
+
+---
+
+## D-089 — Finale air-gap audit: the deployment path is genuinely offline-safe once six
+things are pre-staged; one real preflight gap found and fixed (`finale-up.sh` now verifies
+every image is locally cached before attempting `up`) · 2026-08-19 · `devops-engineer` seat
+
+**Context.** New operational constraint from the user, not previously written down as a
+concrete deployment checklist anywhere in this repo: the finale demo host has **no internet
+access at demo time**. (`docs/09-company/10-fallback-ladder.md` §7 item 5 already gestures at
+this — "play the #49 capture... with the network off" — and `docs/09-company/04-design-system.md`
+records a prior, already-resolved instance of the same class of risk, self-hosted fonts over a
+Google Fonts CDN, specifically because "the finale machine may have no internet." Neither is a
+deployment-path audit.) Audited `infrastructure/scripts/finale-up.sh`,
+`infrastructure/compose/docker-compose.finale.yml`, the model-host workflow, the command-center
+build, and a broad grep for outbound calls, against six specific questions. Findings below are
+empirically checked with real Docker commands in this session, not read-and-assumed, except
+where marked UNVERIFIED.
+
+**Finding 1 — `finale-up.sh`: verified, one real gap found and fixed.** The script does not
+pull or build anything itself; it assumes every image is already local and fails fast on a
+missing `.env`/`dist/`. What it did **not** do, until this fix: confirm the assumption "every
+image this stack needs is already in the local Docker image store" before calling
+`docker compose up`. Without that check, a missing image (this repo's own `control-api`/
+`worker`/`db` builds, or an unpulled pinned upstream image) would surface as a raw network
+error mid-`up`, on stage, offline — instead of a clear preflight failure with the fix named.
+**Fixed**: added a preflight block (between the existing `nginx -t` check and `docker compose
+up`) that runs `docker compose config --images` and `docker image inspect`s each one, failing
+with an explicit "pull/build this while online" message if anything is missing. Verified for
+real in this session: extracted the exact loop and ran it standalone against
+`docker-compose.finale.yml` — with this session's leftover `brahmadatta-finale-control-api`/
+`brahmadatta-finale-db` images (built during a prior rehearsal, `docker images` confirms
+`2026-08-17` build timestamps) it reports all-present and `missing_images=0`; separately
+confirmed `docker image inspect` on a nonexistent name returns exit 1, exercising the failure
+branch. Also confirmed `docker compose config --images` correctly restricts to only the
+always-on services by default and correctly adds `worker`/`model-host`/`model-host-auth` when
+`--profile model --profile worker` is supplied — the same `"$@"` forwarding the script already
+uses for `up`. `bash -n infrastructure/scripts/finale-up.sh` passes. **Not run end to end**
+(a full `docker compose ... up -d` was deliberately not exercised in this audit — it would
+start the whole demo stack as a side effect of an infra audit, which is out of scope here).
+
+**Finding 2 — `docker-compose.finale.yml` image references: no gap.** Every non-built `image:`
+is pinned by digest (`nginx-unprivileged@sha256:...`, `redis@sha256:...`,
+`ollama/ollama@sha256:...`). Confirmed directly, not assumed: `docker compose config --images`
+resolves these without contacting a registry when the digest is already in the local image
+store (`docker image inspect <digest>` succeeds with zero network calls) — Docker always
+checks the local store by reference before attempting any pull, and `docker compose up` does
+not force a pull unless `--pull always`/`--pull missing`-with-a-gap is used, neither of which
+`finale-up.sh` passes. No gap; the pattern is correct by construction. The one thing this
+depends on that isn't visible in the compose file itself: the images must have been pulled
+onto **this exact Docker daemon** beforehand — see the cross-cutting risk below.
+
+**Finding 3 — model-host / `codellama:7b-instruct`: confirmed genuinely "pull once online,
+volume persists offline," empirically, not just by reading D-084's prose.** Re-ran the actual
+mechanism live in this session: started `ollama/ollama@sha256:f478...` with `--network none`
+against the existing pre-staged `ollama-models` volume (from the dev-profile rehearsal
+D-084/D-085 already ran) — `ollama list` returned `codellama:7b-instruct` and `ollama serve`'s
+own boot log shows `total blobs: 6`, `Listening on 127.0.0.1:11435`, and two successful local
+API calls, all with **zero network egress possible** (`--network none`). This is direct proof
+the image does not re-pull, phone home, or need any route out at `ollama serve` start — the
+model ships inside the volume, not fetched at boot. Separately confirmed the model actually is
+present via the manifest path (`/root/.ollama/models/manifests/registry.ollama.ai/library/
+codellama/7b-instruct`), not just a name match. **What is still open, and is exactly what
+D-084 flagged and left undecided**: this proof used the **dev**-profile `ollama-models` volume
+(compose project `brahmadatta`). The **finale**-profile volume
+(`brahmadatta-finale_ollama-models`, a distinct named volume under the `brahmadatta-finale`
+compose project — confirmed by `docker volume ls`: only `brahmadatta_ollama-models` exists
+today, no `brahmadatta-finale_*` volume has ever been created) has **never been pre-staged**.
+The mechanism is proven; the actual finale volume is not yet populated. `services/model-gateway/
+gateway/tools/model_prep.py plan` already prints the correct operator recipe (`ollama pull
+codellama:7b-instruct` against a networked `ollama serve`, before switching to the isolated
+volume) but nothing wires that recipe to the **finale**-named volume specifically — this is a
+runbook step, not a code gap; see the checklist below.
+
+**Finding 4 — command-center build: no gap; the architecture is already exactly the
+"pre-built artifact, not built at deploy time" shape.** `docker-compose.finale.yml`'s `nginx`
+service does **not** build from `images/command-center.Dockerfile` at all (grepped: that
+Dockerfile is referenced only in a `docker-compose.yml` comment explaining why the *dev*
+profile deliberately avoids it). It bind-mounts `../../apps/command-center/dist:/usr/share/
+nginx/html:ro` — a directory on the host filesystem, built once by a human running `npm ci &&
+npm run build` beforehand. `finale-up.sh` enforces this is not skipped: it hard-fails before
+`docker compose up` if `apps/command-center/dist` does not exist, with the exact remediation
+command in the error message. No `npm` step exists anywhere in the finale compose file itself
+(the file's own header comment states this explicitly: "no Astro dependency-installer service
+— the finale has no npm step at all"). The one real requirement this creates — `npm ci` needs
+the npm registry, so the build must happen before the host disconnects — is a runbook item, not
+a code gap; captured in the checklist below. (`apps/command-center/astro.config.mjs`'s
+`configureServer` Ollama-status probe defaults to `127.0.0.1:11434` and only runs under the
+Vite **dev** server, never during `astro build`/the static `dist/` output the finale profile
+actually serves — confirmed by reading the plugin: `configureServer` is a Vite dev-server-only
+hook, not part of the static build pipeline.)
+
+**Finding 5 — outbound calls: none found outside dev/test tooling.** Broad grep across
+`infrastructure/`, `apps/command-center/`, `apps/control-api/config/` for `curl`/`wget`/
+`requests.get`/`fetch(` against non-local hosts turned up exactly one deliberate,
+already-known category: `infrastructure/scripts/egress-test.sh`, `finale-egress-evidence.sh`,
+and `infrastructure/scripts/testing/egress-probe.py`, which intentionally dial
+`api.openai.com`, `api.anthropic.com`, `1.1.1.1`, and `registry.npmjs.org` — but only to *prove
+they are unreachable* from inside the sandbox network, as a security control (D-050/SEC-family
+isolation verification), and confirmed **not** called from `finale-up.sh` or any compose
+healthcheck — they are a manually-run pre-flight tool per the fallback ladder §7, not part of
+the automated startup path. Every `fetch(` inside `apps/command-center/src/` targets a
+same-origin relative path (`/api/v1/...`, `/__local/...`). No telemetry/analytics/Sentry
+integration exists (grep for `sentry|telemetry|analytics|posthog|amplitude` returned only
+unrelated matches: a schema field literally named "telemetry" meaning mission metrics, and an
+`amplitude` variable in a particle-animation shader). No `ssl_stapling`/OCSP/ACME/certbot step
+runs in the finale profile: `finale-up.sh` states outright "no TLS certificate is required,"
+the finale nginx conf.d never includes `tls.conf`, and `tls.conf` itself sets
+`ssl_stapling off` regardless. Fonts are self-hosted (`.woff2` in the build), not a Google
+Fonts CDN import — confirmed by grep (no `@import`/`googleapis`/`gstatic` anywhere in
+`apps/command-center`) and cross-checked against the existing decision record for that exact
+call (the D-018-adjacent entry above: "(d) load from Google Fonts CDN... rejected outright,"
+citing this identical offline-machine risk).
+
+**Finding 6 — `build-fuzz-image.sh` / fuzz-toolchain image: confirmed "build once online, run
+offline forever after," empirically.** The script only ever runs `docker build` once and hands
+back a digest; nothing in the finale path re-invokes it. Verified live: `docker run --rm
+--network none --user 10001:10001 brahmadatta-fuzz-toolchain:local sh -c 'clang --version;
+cmake --version'` succeeded with zero network access, printing `clang 18.1.3` / `cmake 3.28.3`
+— the toolchain is fully baked into the image at build time (`apt-get install` ran once, during
+`docker build`, which the Dockerfile's own comments already document as needing network); the
+container never touches `apt` again after that. No gap.
+
+**The one cross-cutting risk every one of the above depends on, named explicitly because no
+single finding above states it on its own.** All six "fine" verdicts share one unstated
+assumption: **the finale host that runs offline is the same Docker daemon/filesystem that did
+the pulling/building/`npm run build` while online.** If the finale rig is provisioned fresh
+(new machine, reformatted disk, a different cloud instance) between the "prepare" pass and the
+"go dark" moment, every mechanism above breaks simultaneously — local image cache, the
+`ollama-models` volume, and `apps/command-center/dist` are all host-local state with no backup
+described anywhere in this repo. This is not fixed here: it is an operational/staging decision
+(does the finale rig get provisioned once and stay untouched, or does state need to be
+archived/restorable — e.g. `docker save`/`docker load` tarballs, a volume export, a `dist.tar.gz`
+committed as a release artifact) that is bigger than a compose/script tweak and belongs to
+whoever owns the actual finale hardware plan.
+
+---
+
+### Pre-offline checklist — run all of this on the finale host, in this order, before the
+network is disconnected. Recorded here because nothing in this repo previously stated it as a
+single ordered list.
+
+1. `git checkout` the frozen release tag on the finale host (whatever release process names
+   it — outside this audit's scope).
+2. `cd apps/command-center && npm ci && npm run build` — needs the npm registry. Confirm
+   `apps/command-center/dist/` exists afterward; `finale-up.sh` already refuses to start
+   without it, but that check cannot tell "never built" apart from "built, then deleted."
+3. `docker compose --env-file .env -f infrastructure/compose/docker-compose.finale.yml build`
+   — builds `control-api`, `worker`, `db` from source (needs the Python package index for
+   `pip install`, the Debian/Postgres apt mirrors for `postgres-tls.Dockerfile`, and the base
+   image registries).
+4. `docker compose --env-file .env -f infrastructure/compose/docker-compose.finale.yml pull`
+   (or a full `up -d` once) — resolves and caches the pinned-by-digest images: nginx, redis,
+   ollama. All three are already pinned by digest in the compose file (D-019/D-024 discipline);
+   this step just ensures the digest is in the *local* store, not merely correct on paper.
+5. `infrastructure/scripts/build-fuzz-image.sh` — builds the fuzzing-toolchain image and
+   prints the digest for `SANDBOX_FUZZ_IMAGE` in `.env`. Needs the Ubuntu apt mirrors. Do this
+   even if `--profile worker` is not planned for the demo script, since `fuzz-worker` (bare
+   metal, `run-fuzz-worker.sh`) reads `SANDBOX_FUZZ_IMAGE` independent of the compose `worker`
+   profile.
+6. Pre-stage the model onto the **finale**-named volume specifically — not the dev volume.
+   The mechanism (D-084, re-verified live in this session): start `ollama serve` on a
+   **normally-networked** container mounting the same named volume the finale `model-host`
+   service will use (`brahmadatta-finale_ollama-models` — confirm the exact name with
+   `docker compose -f infrastructure/compose/docker-compose.finale.yml config --volumes` or
+   `docker volume ls` after step 3/4, since Compose derives it from the project name), then
+   `ollama pull codellama:7b-instruct` against it, then stop that container. `services/
+   model-gateway/gateway/tools/model_prep.py plan` prints the exact command shape. Confirm
+   with `ollama list` (or inspect `models/manifests/registry.ollama.ai/library/codellama/
+   7b-instruct` inside the volume directly, as this session did) before disconnecting —
+   do not trust "the pull command exited 0" alone.
+7. `infrastructure/scripts/finale-up.sh` itself, now with this fix, will refuse to start if
+   any image from steps 3–4 is missing from the local store — run it once while still online
+   as the final confirmation, then `docker compose ... down` before the real demo run if a
+   clean state is wanted, since steps 3–6 already did the expensive part and `down` does not
+   evict the image/volume cache.
+8. Do **not** run `infrastructure/scripts/egress-test.sh` / `finale-egress-evidence.sh` /
+   `testing/egress-probe.py` as a truthful "is isolation working" check after the host is
+   already offline — they dial real external hosts to prove those dials get refused, and once
+   there is no route out at all, every dial fails identically whether the container's own
+   network isolation is doing anything or not. Run them (per the fallback ladder §7 item 1)
+   while still online, before this checklist's last step.
+
+**Decision** — fix the one concrete, cheaply-scoped code gap (`finale-up.sh`'s missing
+local-image preflight) directly; document the rest as an explicit pre-offline runbook rather
+than touching compose files or other roles' application code.
+
+**Options considered** — (a) the fix above, scoped to `finale-up.sh` only; (b) additionally
+have `finale-up.sh` attempt to auto-build/pull missing images itself; (c) do nothing beyond
+documentation, since every gap except the preflight check was either already correct by
+construction or already flagged in D-084.
+
+**Pros and cons of each** — (a) is small, testable in isolation (done, see Finding 1), and
+turns a confusing mid-`up` network failure into a named, actionable preflight message — exactly
+this session's mandate ("small, well-scoped... fix"). (b) would make the offline failure mode
+worse, not better: a script that tries to build/pull on a host with no network either hangs on
+DNS timeouts or fails with a generic network error at the exact moment on stage this audit
+exists to prevent — the whole point is these steps must happen *before* disconnecting, and a
+script that silently attempts them again invites relying on that instead of doing it properly
+ahead of time. (c) leaves operators discovering a missing image live, which is the actual
+failure mode this task was commissioned to find and close where cheap.
+
+**Cost implications** — none; no new infrastructure, no new service.
+
+**Security implications** — none; the check only reads (`docker image inspect`), never pulls,
+builds, or grants new capability to anything.
+
+**Scalability implications** — none; single-host, single-run tooling.
+
+**Recommendation** — merge the `finale-up.sh` fix; assign the finale-specific model-volume
+pre-staging (checklist item 6) and the cross-cutting "same host end to end" question to whoever
+owns the physical/cloud finale rig, as a staffing/logistics decision, not a code change.
+
+**Final approval authority** — CTO (technical, for the `finale-up.sh` diff); CEO/whoever owns
+the finale hardware logistics (for the cross-cutting "is the prepare-host the same as the
+demo-host" question, since that is a venue/staging decision, not an engineering one).
+
+**Not pushed.** This branch (`wt/airgap-check`) has one commit pending
+(`fix(infra): finale-up.sh preflight-checks that every image is already local before docker
+compose up`) — held back per instruction, since `.project/decisions.md` is a live merge-conflict
+hotspot with five other parallel branches in flight; the orchestrating session coordinates
+merge order.
