@@ -191,3 +191,93 @@ Closed since the last version of this file: #2 (deadline), #3 (competition rules
 (visual references), #63 (bisect stays cut), #154 (2026-08-17) — all resolved earlier in
 the build (or today, for #154) and already reflected in
 `docs/09-company/03-seven-day-plan.md` / the evidence file above.
+
+## Reconciliation, 2026-08-19 — everything since this file's last update
+
+This file went stale again: an entire autonomous session landed between the last update
+above and today, none of it reflected here. Reconciled by reading `git log`, `gh pr list`,
+`gh issue list`, and `.project/decisions.md` (now D-085 plus D-060 through D-084) rather
+than trusting this file's own account of where things stood.
+
+**#168 (mission-stage driver) is closed.** All 7 executors (T1–T7) merged and reviewed:
+`#175` (T5/VERIFY), `#186` (T3/CORRELATE), `#187` (T6/EXPORT, two rounds of cybersecurity
+findings — SEC-48/49/50 — fixed and independently re-confirmed), `#188` (T2/FUZZ+MINIMIZE),
+`#196` (T4/PATCH_GENERATE), plus prerequisite topology work `#189`/`#192` (pinned fuzzing
+image, closed) and `#197`/`#201` (fuzz-worker split topology + model-host bearer auth,
+D-073/D-075). GitHub Actions CI was down for a billing reason for most of this window;
+every merge was gated on real local test runs (several with a second, independent
+reviewer re-running the same tests) instead, per an explicit user decision to not block on
+it — not a lowered bar, a different one.
+
+**#50 was attempted live three times this session, each run closing exactly one real
+blocker and finding the next:**
+- **Run 2** (D-084): confirmed, empirically, that #168's fix works — a mission now
+  advances `VALIDATING → BASELINE → FAILED → teardown` fully unattended, zero HTTP calls
+  after `start`. Found a new blocker: the compose `worker` image had no C/C++ toolchain
+  (`BASELINE` runs `cmake`/`make`/`ctest` as a direct subprocess via `packages.sandbox.Jail`,
+  not `ContainerJail` — the rootless-container backend, #15, was never built), so `BASELINE`
+  failed in 0.034s, `cmake: not found`.
+- Fixed in `#205` (`build-essential cmake patch libasan8 libubsan1` added to
+  `control-api.Dockerfile`'s shared base stage), cybersecurity-reviewed (CLEARED — doesn't
+  worsen the already-known/accepted Jail isolation gap; `policy.py`'s own env allowlist
+  already assumed a compiler on PATH).
+- **Run 3** (D-085): confirmed the fix is real — a genuine `cmake configure && make &&
+  ctest` cycle against `pktcfg` now passes inside the built image, first time ever. But a
+  live mission couldn't reach it: `pktcfg`'s snapshot archive is byte-for-byte
+  deterministic, so every mission hashes identically, and the content-addressed artifact
+  claim (SEC-27) has no release path on any terminal state — the prior `FAILED` mission
+  owns the digest permanently. **This directly conflicts with the project's own Week 2 kill
+  criterion** ("reproduced twice consecutively") — as built, a second consecutive attempt
+  against an unmodified fixture is structurally impossible without a database reset.
+  Reported, not routed around (the fix requires a destructive dev-DB action, correctly
+  outside a devops-engineer's or this orchestrator's unilateral authority) — filed as
+  **`#207`**, decision on the actual fix (release path vs. mission-scoped claiming) owned
+  by CTO/backend-developer. A live database reset + run 4 needs the user's go-ahead, not
+  yet given.
+
+**Both required verdicts (`Verified` + `Rejected`) have never been reached live.** Also
+newly confirmed by run 2/3: `demo/repositories/pktcfg/patches/` already ships fixtures
+designed to produce both (`candidate-a`, `candidate-b`), but there is no HTTP-reachable
+operator-supplied-candidate endpoint anywhere — `patch_generate_executor.py` only ever
+calls the live model. Getting both verdicts in one run likely depends on the live model
+spontaneously producing both a good and a bad patch, or on adding that endpoint — not
+decided or attempted yet.
+
+**Fallback recording**: the D6 recording (`fallback-demo-d6.html`, referenced above) still
+exists and was hash-verified as of the last check before this session. No agent this
+session had screen-recording capability, so it was not re-attempted or re-verified — this
+remains a human task, flagged plainly in all three rehearsal write-ups rather than faked.
+
+**Command Center UI received zero attention this entire session** — confirmed by reading
+`apps/command-center/src/` directly rather than assuming: it is NOT a blank slate (a real
+Astro build exists, `dist/` is populated, and `src/components/` has `MissionCommandCenter`,
+`AIParticleCore` — the radial Core — `LiveEventStatus`, `VerdictComparePanel`,
+`ModelGatewayStatus`, `LocalRepositoryIntake`, `SystemStatus`: 18 source files), but nothing
+in it has been touched since 2026-08-16, before this session's entire backend/orchestration
+push. Whether it's wired to the now-much-more-complete API surface, and whether it can
+actually render a live mission end to end, is unverified and is the most important open
+question for the next phase of work.
+
+**16 non-blocking findings remain open, filed during this session's review rounds**
+(`#163`–`#207` range, `SEC-NN`/`QA-NN` labels, no milestone): concurrency/correctness gaps
+(`#176` no unique constraint on `Job(mission,kind)`, `#177` no orchestrator singleton
+guard), cleanup/hygiene (`#180` snapshot workspace GC, `#184` intermittent
+`PermissionError` in `Jail._kill_group`), already-accepted-as-known isolation posture
+(`#181`, same class as the extensively-discussed SEC-44/47 Jail-vs-ContainerJail gap — not
+new information, tracked correctly), and several drift/robustness findings from the last
+two PR review rounds (`#191`, `#193`, `#194`, `#198`, `#199`, `#203`, `#207`). None block
+`#50`; all are real and worth scheduling, not clearing on sight.
+
+**User-provided context update, 2026-08-19**: the deadline is 10 days out from today, not
+the 3-day emergency compression this file and `docs/09-company/03-seven-day-plan.md` were
+written under — those documents are stale on this point and need reconciling (not treated
+as authoritative for pacing going forward). This materially changes the calculus on the
+CUT milestone (18 open items — several UI/UX-shaped: `#25` analysis rail, `#26` git-history
+panel, `#31` fuzzing telemetry panel, `#52` presentation mode, `#56` keyboard operability)
+and is a CEO-scope call, not an engineering one — routed to the `ceo` role, not decided
+here.
+
+**Current phase, corrected**: still phase 5 (implementation) for the backend/orchestration
+engine, which is now genuinely feature-complete for the D7 happy path modulo `#207`; but
+the Command Center frontend has not yet had a phase-5 pass against the now-real API surface
+at all. Both need to run concurrently for the remaining runway, not sequentially.

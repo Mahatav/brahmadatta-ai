@@ -357,6 +357,76 @@ the rest needs an owner assigned per row, which is the PM's to do.
 
 ---
 
+## 7. Runway re-scope, 2026-08-19 — reopening part of the P1 cut
+
+**Status: DECIDED, CEO, `.project/decisions.md` D-086. This section is the current,
+authoritative scope statement for the remaining build. Where it conflicts with §2's P1/P2
+tables above or with `docs/09-company/03-seven-day-plan.md`, this section wins — those are
+left unedited as the historical record of the original 3-day-compression call, not
+corrected in place.**
+
+The user told the orchestrating session directly, 2026-08-19, that the real runway is
+~10 days from that date (deadline ≈2026-08-29), not the 2026-08-20 date the seven-day plan
+and `CLAUDE.md` were compressed against — roughly 7x the runway D-014's emergency
+compression assumed. At the same time, the backend/orchestration engine reached genuine
+feature-completeness for the D7 happy path (all seven mission-stage executors merged and
+reviewed, `#168` closed) modulo one open bug (`#207`, routed to CTO/backend-developer, not
+a CEO call), while the Command Center frontend has had zero attention this session and is
+unverified against the now-complete API. Full reasoning for everything below is in D-086.
+
+**This does not reopen the whole `CUT` milestone.** Two already-committed priorities outrank
+every CUT item: (1) `#207` fixed and a real live E2E rehearsal reached; (2) a real phase-5
+verification pass on the Command Center's five P0 panels (P0-13, above) against the complete
+API — not new scope, work this session skipped entirely. **No CUT-reopen work below is
+staffed until both of those, plus `#50` passing live once, are real.**
+
+**Reopened from `CUT`, into `D8 — Hardening & rehearsal (extended)`, staffed only after the
+gate above:**
+
+| Item | Was | Now | Why |
+|---|---|---|---|
+| `#25` — Analysis rail (findings by severity, dependency/compiler health) | CUT | **D8** | Cheapest reopen — spec and shared component (`NotRunCoverageRow`) already exist (`D-057`). Reinforces the product's actual differentiator: disclosing what was *not* checked, not hiding it. |
+| `#56` — Keyboard operability | CUT | **D8** | Cheap by design (`D-059`: tab-order only, no palette, no new key layer). Reduces real operational risk for the solo operator during the scored run. |
+| `#52` — Presentation mode | CUT (P1-7) | **D8, rehearsal-only** | Re-scoped as rehearsal-enablement, not demo scope — architecturally excluded from the finale build (`D-058`). Lets the demo operator rehearse narration while backend stabilization continues; `#50` has failed three live attempts in a row, so this has real near-term value. `cybersecurity` to confirm the build-time exclusion is tested, per `D-058`'s own recommendation. |
+| `#40` — Renewed-fuzzing gate after patch | CUT (P1-3) | **D8, contingent on CTO** | The strongest anti-overfit argument in the product's own story; expected to be cheap "once P0-7 exists" — it now does (`T2`/`FUZZ`, `#188`). Reopened contingent on CTO confirming it's genuinely cheap now and doesn't threaten the `#50`/`#57` critical path. |
+| `#31` — Fuzzing telemetry panel | CUT | **D8, contingent on PM scoping** | Visually reinforces "our own fuzzing found it," but cost is unclear pending whether the FUZZ executor already emits progress events on the existing SSE stream. PM scopes a cheap (reuse-only) version before any engineering time is committed; if it needs new backend instrumentation, it waits. |
+
+**Left in `CUT`, explicitly re-evaluated and declined, not merely un-reopened:**
+
+| Item | Was | Reasoning |
+|---|---|---|
+| `#26` — Git history summary + bisect timeline panel | CUT (P1-1/P1-8) | There is already a standing, closed decision on this — `#63`, "bisect stays cut." More runway does not by itself overturn a decision already deliberately made once, and reopening it needs real new backend capability (automated `git bisect` + a seeded history with a known-bad commit), a materially bigger lift than any item reopened above, for a demo scenario this document's own §3 already ranked additive, not load-bearing. PM/CTO may bring a case to reopen `#63` itself if circumstances genuinely warrant it — not done unilaterally here. |
+| `#44`/`#46`/`#47`/`#48` — GPU escalation set | CUT (P2-1 family) | `D-015`'s reasoning (cost, external-provider dependency, schedule risk, "the only real money in the project") is not a function of calendar days. Attempting a never-yet-tested rented-GPU escalation for the first time in the same window as an already-fragile live-E2E gate (`#50` has failed three live attempts) is a *worse* risk now than on the original calm schedule. Stays cut. |
+| `#5`, `#22`, `#23`, `#24`, `#30`, `#62` | CUT | Not ruled on — no descriptions were available to this decision. Default: stay cut. Delegated to product-manager/engineering-manager to triage against the priority order below and bring back anything clearly cheap and clearly load-bearing for items 1–3, not decoration. |
+
+**Priority order for the remaining runway** (see D-086 for full reasoning; this is what
+PM/EM build a task breakdown from): fix `#207` and run a real phase-5 Command Center
+verification pass **concurrently**; get `#50` to pass live once; run the three `#57`
+rehearsals; only then staff the reopened CUT items in order `#25` → `#56` → `#52` → `#40`
+(CTO-gated) → `#31` (PM-scoped); confirm or re-record the fallback demo against the
+now-complete pipeline; hold a real reserve before `#60` code freeze ahead of the actual
+~2026-08-29 deadline. Separately: the 16 non-blocking findings filed during this session's
+review rounds (`#176`, `#177`, `#180`, `#184`, and others in the `#163`–`#207` range) are
+real correctness/hygiene gaps, not scope, and engineering-manager should triage that
+backlog as part of "hardening" for anything that poses genuine risk to a live rehearsal or
+the finale — this is already the priority this section sets, not a separate ask.
+
+**Day-numbering.** D7/D8/D9 are not renumbered — they remain the correct conceptual labels
+(D7 = evidence/freeze gate, D8 = hardening & rehearsal, D9 = submission & freeze). What's
+stale is the calendar mapping in `03-seven-day-plan.md` (Aug 6–20); engineering-manager
+should re-anchor D7/D8/D9 to real dates inside the ~10-day window from 2026-08-19 and hold
+a genuine reserve before ~2026-08-29 — not a repeat of the original plan's reserve, which
+sat inside a deadline that turned out to be wrong anyway.
+
+**§5.3 (finale roster / `#59`) reaffirmed, not re-opened.** Option C stands: agent roster
+for the build, 1–2 recruited humans for the in-person finale only, covering the
+incident-lead/demo-operator/evidence-lead split. What's still missing — actual human names,
+availability, registration and travel logistics — is not derivable from this repository and
+needs the user directly. 10 days instead of 3 makes this more achievable, not less urgent to
+start now.
+
+---
+
 ## Constraints reaffirmed
 
 Nothing in this document relaxes any of these. Every tier, cut, and kill criterion above is
@@ -371,5 +441,5 @@ subordinate to them:
 
 ---
 
-*Decision records for the non-trivial calls in this document: D-006 … D-012 in
+*Decision records for the non-trivial calls in this document: D-006 … D-012 and D-086 in
 [`.project/decisions.md`](../../.project/decisions.md).*
