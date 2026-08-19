@@ -5081,3 +5081,261 @@ alongside, more than one process:
 Recommend filing both against the `orchestrator` compose-wiring follow-up devops already owns
 per D-061/D-062 (the same ticket that will first make SEC-42's precondition reachable), so the
 fix lands before the precondition does rather than after.
+
+---
+
+## 22. Re-verification — 2026-08-19 · T-2, `#207`/SEC-27 mission-scoped claiming (D-087/D-088)
+
+T-2 in `docs/09-company/14-runway-task-plan-2026-08-19.md`: independent cybersecurity review of
+T-1's implementation of D-087 (engineering-manager scoping) as approved by D-088 (CTO ruling).
+SEC-27 (§16/§18.2 above) is cybersecurity-authored, so this is a required merge gate per the
+standing `CLAUDE.md` rule, not a courtesy pass. D-087 and D-088 already did the full threat
+analysis in `.project/decisions.md`; the brief for this round was explicit not to rubber-stamp
+either record's reasoning but to re-derive it against the actual current code. Read both records
+in full before touching the diff.
+
+### 22.0 What changed
+
+`git diff` on `authorization/service.py`, `authorization/errors.py`,
+`api/tests/test_authorize_snapshot.py`. `create_mission_snapshot` no longer refuses a snapshot
+with `409 SnapshotArtifactClaimedError` merely because another mission already owns the
+`Artifact` row for the computed digest — that row is now reused as a legitimate content-dedup
+hit, and this mission still gets its own independent `Snapshot` row and re-runs its own full
+pipeline. The one check kept, factored into a new helper
+(`_require_consistent_artifact_metadata`): if the existing `Artifact` row's `kind`/`size_bytes`
+disagree with what this mission's own materialized source just produced for the same digest,
+that is still refused via the same, unchanged `SnapshotArtifactClaimedError`. The same helper is
+called from both the direct-read path and the post-`IntegrityError` TOCTOU-race path, so the two
+can't drift.
+
+### 22.1 Claim 1 (D-087/D-088) — `Artifact.mission` is not read as an authorization/access-control
+gate anywhere downstream. Independently re-grepped, not taken on either record's word.
+
+```
+grep -rn "Artifact" apps/control-api --include="*.py" | grep -v "/tests/\|/migrations/"
+```
+
+Every read site, checked directly:
+
+- `orchestrator/snapshot.py::_resolve_archive_path` — read in full. Resolves the digest to
+  extract via `orchestrator.repository.latest_snapshot_sha256(mission)`, which reads
+  `mission.snapshots.order_by("-created_at").first().archive_sha256` — the calling mission's
+  *own* `Snapshot` rows, never `Artifact` at all — then checks the bytes exist on disk via
+  `store.path_for(ARTIFACT_ROOT, sha256)` against the filesystem directly. `Artifact.mission` is
+  never referenced in this function or anywhere else in `orchestrator/snapshot.py`. This is the
+  one function that turns a recorded snapshot back into bytes on disk for every later stage
+  (`BASELINE`, `FUZZ`, `VERIFY`, ...) to consume — the one place a mission-scoping bug here would
+  actually bite — and it is scoped by `Snapshot`, which this change does not touch.
+- `orchestrator/evidence_export.py:221` — `Artifact.objects.get_or_create(sha256=..., defaults={
+  "kind": BUNDLE_ARTIFACT_KIND, "size_bytes": ..., "mission": mission})`. This corroborates
+  D-087/D-088's claim rather than merely being consistent with it: `get_or_create` on a hit does
+  **not** update `mission` to the calling mission — so on today's `main`, before this diff, an
+  `Artifact` row's `mission` field for an export bundle can already be stale relative to whoever
+  is currently reading it, and nothing downstream cares. `BUNDLE_ARTIFACT_KIND = "evidence_bundle"`
+  is a distinct string from the snapshot path's hardcoded `kind="snapshot"`, so there is no
+  cross-purpose collision between the two `Artifact` kinds sharing one `sha256` primary-key space
+  (moot anyway under collision resistance, but worth confirming the two call sites can't step on
+  each other's `kind` invariant).
+- `missions/service.py` — only a comment cross-referencing this exact race pattern for the
+  unrelated `idempotency_key` case; no `Artifact` read.
+- `missions/models.py` (`Artifact` itself) — `sha256` primary key, `mission` a plain
+  `ForeignKey(..., on_delete=models.CASCADE)`, no `unique_together`/`Meta.constraints` involving
+  `mission`, confirming nothing at the schema layer treats `(sha256, mission)` as jointly unique
+  or otherwise exclusive.
+
+No read site anywhere in `apps/control-api` gates access, authorization, or evidence resolution
+on `Artifact.mission`. **Claim 1 independently confirmed**, against the current worktree, not
+against D-087/D-088's description of it.
+
+### 22.2 Claim 2 — the collision/second-preimage-resistance argument
+
+D-088's own record already self-corrected D-087's language (second-preimage/collision
+resistance is the right property; preimage resistance is not, since nothing here inverts a
+hash) — I agree with that correction and don't re-litigate it. The angle worth checking
+independently is whether the argument is *complete*, not just correctly named. Three things had
+to hold for "this needs a practical SHA-256 break" to be true, and I checked each against the
+actual code rather than the record's description of it:
+
+1. **The digest must be server-recomputed from real bytes, never trusted on the caller's
+   assertion.** Confirmed: `result = store.ingest_from_path(...)` hashes the bytes actually
+   written to disk, and `create_mission_snapshot` raises `SnapshotDigestMismatchError` three
+   lines above the artifact-claim check if `result.sha256 != payload.archive_sha256` — unaffected
+   by this diff, still present, still runs before the artifact-claim logic on every request.
+2. **The stored path must be keyed by the recomputed hash, never the caller's claimed one**, so a
+   caller can't just assert a digest it doesn't have bytes for and get the dedup hit for free.
+   Confirmed: `store.ingest_from_path` computes and returns `result.sha256` from the bytes it
+   just wrote; `Artifact.objects.filter(pk=result.sha256)` — the server's own value — is what's
+   queried, never `payload.archive_sha256` directly at that point. An attacker asserting a
+   digest for content they don't actually possess never reaches the reuse branch at all, because
+   `SnapshotDigestMismatchError` fires first if the bytes they uploaded don't hash to what they
+   claimed.
+3. **Reuse must not inherit any trust beyond the shared bytes** — i.e. mission B reusing mission
+   A's `Artifact` row must not let B's evidence chain silently borrow A's verification history.
+   Confirmed: `Snapshot` (the real per-mission provenance unit, `AppendOnlyModel`, one row per
+   mission) is created fresh for every mission regardless of whether the `Artifact` row was
+   reused or newly created — read directly at `service.py:246-252`, unconditional, outside the
+   `if/else` that branches on artifact reuse. Every mission that reuses a digest still
+   independently runs `BASELINE`/`FUZZ`/`VERIFY`/`EXPORT` against the shared bytes; nothing about
+   `orchestrator.transitions` or the verification gates reads `Artifact.mission` (confirmed in
+   §22.1) to shortcut that.
+
+All three legs hold against the current code, not just against the records' description of it.
+**No angle D-087/D-088 missed here** — the one thing worth naming explicitly for the written
+record, since neither D-087 nor D-088 phrased it this way: this isn't really "SHA-256 collision
+resistance" being relied on as a forward-looking cryptographic assumption so much as it's "the
+system never had a code path where a caller-claimed digest was trusted over a server-recomputed
+one to begin with" — SEC-27's removed check was defense-in-depth *behind* an already-closed gap
+(`SnapshotDigestMismatchError`), not the only thing standing between an attacker and a swapped
+archive. That framing doesn't change the ruling, only sharpens why the residual risk was already
+low before this diff.
+
+### 22.3 Claim 3 — does the `kind`/`size_bytes` check actually catch what it's supposed to, or is
+there a gap
+
+Checked for the three shapes of gap that matter here:
+
+- **Race/TOCTOU window.** The check runs in two places — the direct-read branch and the
+  post-`IntegrityError` branch — both via the same `_require_consistent_artifact_metadata`
+  helper, so there's no drift between "checked on the fast path" and "checked on the raced path."
+  Both are exercised by dedicated tests (§22.4). I looked for a window where the check could pass
+  and then the underlying row change before the `Snapshot` write commits: `Artifact` rows are
+  create-only in this codebase (no `.save()`/`.update()` call site touches an existing row's
+  `kind`/`size_bytes` anywhere in `apps/control-api` — confirmed by the same grep in §22.1), so
+  there is no legitimate mutation path for a row to go from consistent to inconsistent between
+  the read and the `Snapshot` write. The only way the row disappears entirely is the CASCADE-
+  delete path (§22.5), which self-heals via a fresh create rather than leaving a stale check
+  result standing.
+- **A metric that doesn't actually distinguish "same bytes" from "different bytes."** `kind` is
+  always the hardcoded literal `"snapshot"` at every write site on this path (never operator-
+  supplied), so it's a constant, not really discriminating anything on its own — `size_bytes`
+  compared against `info.bytes_total` (computed by `archive.enumerate_members` from the actual
+  bytes on disk, the same function that produces the `Snapshot.bytes_total` value written two
+  lines later) is the real signal. `file_count` is *not* compared in the residual check, only
+  `size_bytes`/`kind` — but this isn't a gap: if `sha256` already matched (the precondition for
+  reaching this check at all), the underlying bytes are identical under collision resistance, so
+  `file_count` is already implied and would be redundant to check explicitly.
+- **Off-by-something in the comparison itself.** `artifact.kind != "snapshot" or
+  artifact.size_bytes != info.bytes_total` — a straightforward inequality on two independently-
+  sourced values, no truncation, no type coercion between a `BigIntegerField` and a Python `int`
+  worth flagging. Read directly, no off-by-one or unit mismatch found.
+
+**No gap found in the metadata check as implemented.** It catches exactly the one failure mode
+D-088's record says it should (an ingest-pipeline bug producing inconsistent metadata for what
+should be the same bytes), and does so identically on both the non-racing and racing paths.
+
+### 22.4 Test suite — run myself, not taken on the diff's word
+
+```
+cd apps/control-api && .venv/bin/python -m pytest api/tests/test_authorize_snapshot.py -v
+============================= test session starts ==============================
+collected 25 items
+api/tests/test_authorize_snapshot.py .........................           [100%]
+============================== 25 passed in 0.39s ==============================
+```
+
+Confirmed each named test actually exercises what it claims, by reading the assertions, not just
+the name:
+
+- `test_an_archive_digest_already_claimed_by_another_mission_is_reused_not_refused` — asserts
+  `201` (not `409`), exactly one `Artifact` row for the digest (`Artifact.objects.filter(pk=
+  digest).count() == 1`) still owned by the *first* mission (`mission_id == mission.id`, i.e. not
+  reassigned to the second mission either), and the second mission's own `Snapshot` row exists
+  and reached `SNAPSHOTTED`. This is the flip §18.2's original refusal test needed and it checks
+  the right invariant (reuse, not reassignment).
+- `test_an_artifact_with_mismatched_metadata_for_the_same_digest_is_refused` — creates a
+  deliberately-inconsistent `Artifact` row (`size_bytes=999_999` against real content) for
+  another mission, asserts `409`/`CONFLICT`, no `Snapshot` row created for the requesting
+  mission, the requesting mission's state unchanged (`AUTHORIZED`, not advanced), and — the part
+  worth calling out — the stale row is asserted **untouched** (`size_bytes` still `999_999`
+  after the refusal), confirming the fix doesn't silently "correct" the bad row on the failed
+  request.
+- `test_a_toctou_race_with_mismatched_metadata_is_refused_not_a_500` (renamed/updated from
+  §18.2's original) — same real-`IntegrityError`-against-real-SQLite-unique-constraint mechanism
+  as the original SEC-27 regression test, now against a metadata-inconsistent concurrent winner,
+  asserting `409` not `500`. I checked this still forces a genuine `IntegrityError` and not a
+  mocked one: the `filter().first()` patch returns `.none()` only for the exact `pk=digest`
+  query, and the unpatched `Artifact.objects.create(...)` hits the real unique constraint — same
+  mechanism I'd have wanted to see reproduced against real Postgres per §18.2, and while this
+  round reused the existing SQLite harness rather than standing up a fresh Postgres container
+  myself, the underlying claim (poisoned-transaction/savepoint behavior) was already independently
+  reproduced against real Postgres in §18.2 and this diff does not touch the savepoint structure
+  at all — only what happens after the `except IntegrityError` catches, which is DB-engine-
+  agnostic Python logic (`_require_consistent_artifact_metadata`).
+- `test_a_toctou_race_with_matching_metadata_reuses_without_a_500` — new, the companion case:
+  concurrent winner's `Artifact` row has genuinely matching metadata (`size_bytes` computed from
+  the real archive via `archive.build_tar_from_directory`/`enumerate_members`, not a hand-picked
+  number), asserting `201`, not `409` and not `500`. This is the test that actually proves the
+  race resolves to a clean reuse rather than merely "doesn't crash" — a meaningfully different,
+  and correct, assertion from the mismatched-metadata race test next to it.
+- `test_deleting_the_claiming_mission_lets_a_new_mission_reclaim_the_digest` — **D-088's
+  explicitly-required CASCADE-delete regression test, confirmed present and confirmed it tests
+  the right thing**: ingests once, asserts the `Artifact` row and on-disk bytes both exist,
+  hard-deletes the claiming `Mission` (`mission.delete()`), asserts the `Artifact` row is gone
+  (`CASCADE`, as documented) but the on-disk bytes under `ARTIFACT_ROOT` are untouched
+  (`stored_path.is_file()` still true — the filesystem store is independent of the DB row, per
+  D-025), then has a second mission snapshot the same digest and asserts `201`, a fresh `Artifact`
+  row now owned by the second mission, and — the strongest assertion in the file — re-hashes the
+  bytes on disk (`hashlib.sha256(stored_path.read_bytes()).hexdigest() == digest`) to confirm the
+  self-heal produced a row pointing at genuinely correct bytes, not merely *a* row. This is
+  exactly the scenario D-088 flagged as relevant to T-6's dev-DB-reset runbook, and it's real,
+  not a stub.
+
+All five behaviors the brief asked me to confirm (reuse-not-refused, metadata-mismatch-still-
+refused, TOCTOU race both ways, CASCADE-delete regression) are present and each asserts the
+specific invariant it claims to, not just a status code.
+
+I also ran the broader suite to check for regressions outside the named file:
+
+```
+cd apps/control-api && .venv/bin/python -m pytest api/tests/ orchestrator/ authorization/ -q
+...
+FAILED orchestrator/tests/test_verification.py::test_real_wall_clock_limit_stops_a_hung_build
+  - PermissionError: [Errno 1] Operation not permitted (packages/sandbox/jail.py:764)
+```
+
+One failure, in `orchestrator/tests/test_verification.py`, unrelated to this diff by file, by
+subsystem (subprocess jail wall-clock enforcement, not artifact claiming), and by cause (a
+`PermissionError` sending a process signal — an environment/sandboxing constraint of this review
+shell, not a logic assertion failure). Everything else in `api/tests/`, `orchestrator/`, and
+`authorization/` passes. Noted, not silently omitted; not a regression introduced by this diff.
+
+### 22.5 D-088's CASCADE-delete observation — independently re-confirmed, not just re-tested
+
+D-088's record states the physical bytes under `ARTIFACT_ROOT` are untouched by a DB-row
+`CASCADE` delete, and that `_resolve_archive_path` checks the filesystem directly rather than
+the `Artifact` row's existence. Both re-confirmed by direct read in this round (§22.1, §22.3),
+independent of the regression test also confirming it behaviorally. One addition worth
+recording: `Artifact.mission` has no `null=True`, so the CASCADE is the only possible outcome of
+a mission delete for its owned `Artifact` rows — there is no silent-orphan variant where the row
+survives with a dangling or nulled FK. Confirmed by the model field definition
+(`missions/models.py:793-795`), not just by the test passing.
+
+### 22.6 Anything else security-relevant noticed, in scope or not
+
+- `SnapshotArtifactClaimedError`'s `details` payload is `{"sha256": artifact.sha256}` in both the
+  old and new code — the other mission's identity is never included in the error response. This
+  diff introduces no new cross-mission information disclosure at the API surface: a caller
+  cannot distinguish "reused an existing artifact" from "created a fresh one" from the response
+  shape either (`201` with the same `SnapshotSchema` fields either way), so there's no dedup
+  oracle newly exposed by this change beyond what content-addressed storage already implies
+  (you can only trigger a reuse if you already possess byte-identical content, which is not a
+  meaningful leak in this project's stated single-operator threat model).
+- Not in scope for this round but adjacent and worth flagging for whoever owns it next: D-088's
+  Ruling 2 in the same decision record (Command Center has no way to authenticate to the control
+  API at all) is a separate, more severe, already-ruled finding — not part of T-2's brief, not
+  re-reviewed here, noted only so it isn't mistaken for closed by this round's PASS.
+
+### 22.7 Verdict
+
+**CLEARED.** D-087's recommendation and D-088's ruling both hold up against independent
+re-verification of the actual current code, not just against their own written reasoning:
+`Artifact.mission` is confirmed, by direct grep and read of every call site, to never be an
+authorization/access-control gate anywhere downstream; the collision/second-preimage-resistance
+argument is sound and, on inspection, sits behind an already-existing, unaffected digest-mismatch
+check that makes the residual risk lower than either record's framing implies; the replacement
+`kind`/`size_bytes` check has no gap found across race, discriminating-power, or off-by-something
+angles; all 25 tests in `test_authorize_snapshot.py` pass, and each of the five required
+behaviors (reuse, metadata-mismatch refusal, both TOCTOU directions, CASCADE-delete self-heal)
+is exercised by an assertion that actually proves the specific claim, not a status-code check
+standing in for one. No Critical, no High, no open condition against this diff. **T-1 is cleared
+to merge** on security grounds; T-2's acceptance criteria are satisfied.

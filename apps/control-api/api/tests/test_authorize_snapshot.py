@@ -456,11 +456,13 @@ def test_reposting_the_same_digest_is_idempotent(
     assert Snapshot.objects.filter(mission=mission).count() == 1
 
 
-def test_an_archive_digest_already_claimed_by_another_mission_is_refused(
+def test_an_archive_digest_already_claimed_by_another_mission_is_reused_not_refused(
     client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path
 ):
-    """Two missions producing byte-identical snapshots must not let the second
-    mission's evidence bundle point at the first mission's stored artifact."""
+    """D-087/D-088 (closing `#207`/SEC-27): two missions producing byte-identical
+    snapshots is a legitimate content-dedup hit, not a conflict. The second mission
+    reuses the existing `Artifact` row — never reassigning it — and still earns its
+    own independent `Snapshot` row and its own full pipeline re-run."""
     _authorize(client, mission)
     digest = expected_digest(repo_dir, tmp_path)
     first = post(
@@ -496,30 +498,136 @@ def test_an_archive_digest_already_claimed_by_another_mission_is_refused(
         {"source": "git", "archive_sha256": other_digest},
         OPERATOR,
     )
+    assert response.status_code == 201
+    assert Snapshot.objects.filter(mission=other).count() == 1
+    assert Snapshot.objects.get(mission=other).archive_sha256 == digest
+    # Exactly one Artifact row for the digest, still owned by whichever mission
+    # first claimed it — reused, not duplicated or reassigned.
+    assert Artifact.objects.filter(pk=digest).count() == 1
+    assert Artifact.objects.get(pk=digest).mission_id == mission.id
+    other.refresh_from_db()
+    assert other.state_enum is MissionState.SNAPSHOTTED
+
+
+def test_an_artifact_with_mismatched_metadata_for_the_same_digest_is_refused(
+    client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path
+):
+    """D-087/D-088's residual, more precise check, replacing the removed raw
+    cross-mission exclusivity check: an existing `Artifact` row for this digest whose
+    `kind`/`size_bytes` disagree with what this mission's own materialized source just
+    produced is a genuine hash-workflow contradiction, and is still refused."""
+    other = Mission.objects.create(
+        name="pktcfg-stale-index",
+        repository_ref="file:///demo/repositories/pktcfg-stale-index",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    digest = expected_digest(repo_dir, tmp_path)
+    # A pre-existing artifact index row for this exact digest, but with metadata that
+    # could not legitimately describe the same bytes -- simulating an ingest-pipeline
+    # bug rather than a real dedup hit.
+    Artifact.objects.create(
+        sha256=digest, kind="snapshot", size_bytes=999_999, mission=other
+    )
+
+    _authorize(client, mission)
+    response = post(
+        client,
+        f"/api/v1/missions/{mission.id}/snapshot",
+        {"source": "git", "archive_sha256": digest},
+        OPERATOR,
+    )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "CONFLICT"
-    assert Snapshot.objects.filter(mission=other).count() == 0
+    assert Snapshot.objects.filter(mission=mission).count() == 0
+    mission.refresh_from_db()
+    assert mission.state_enum is MissionState.AUTHORIZED
+    # The stale row is untouched, not silently overwritten.
+    assert Artifact.objects.get(pk=digest).size_bytes == 999_999
 
 
-def test_a_toctou_race_on_the_artifact_claim_is_refused_not_a_500(
+def test_deleting_the_claiming_mission_lets_a_new_mission_reclaim_the_digest(
+    client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path
+):
+    """D-088's flagged regression test. `Artifact.mission` is `on_delete=CASCADE`. If
+    the first-claiming mission's row is ever hard-deleted (only reachable today via
+    the scoped dev-DB-reset runbook (T-6), never via any product code path), the
+    `Artifact` row cascades away with it -- but the physical bytes under
+    `ARTIFACT_ROOT` are untouched by a DB-row delete, and a later ingest of the same
+    content self-heals cleanly by creating a fresh `Artifact` row via the existing
+    idempotent-write path, rather than leaving the digest permanently unclaimable or
+    orphaning the second mission's evidence."""
+    _authorize(client, mission)
+    digest = expected_digest(repo_dir, tmp_path)
+
+    first = post(
+        client,
+        f"/api/v1/missions/{mission.id}/snapshot",
+        {"source": "git", "archive_sha256": digest},
+        OPERATOR,
+    )
+    assert first.status_code == 201
+    assert Artifact.objects.filter(pk=digest).count() == 1
+    stored_path = Path(settings.ARTIFACT_ROOT) / digest[:2] / digest
+    assert stored_path.is_file()
+
+    mission.delete()
+    assert Artifact.objects.filter(pk=digest).count() == 0
+    assert stored_path.is_file()  # disk-level store is untouched by the DB delete
+
+    other = Mission.objects.create(
+        name="pktcfg-after-reset",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    post(
+        client,
+        f"/api/v1/missions/{other.id}/authorize",
+        authorize_payload(),
+        OPERATOR,
+    )
+    second = post(
+        client,
+        f"/api/v1/missions/{other.id}/snapshot",
+        {"source": "git", "archive_sha256": digest},
+        OPERATOR,
+    )
+    assert second.status_code == 201
+    assert Snapshot.objects.get(mission=other).archive_sha256 == digest
+    artifact = Artifact.objects.get(pk=digest)
+    assert artifact.mission_id == other.id
+    assert hashlib.sha256(stored_path.read_bytes()).hexdigest() == digest
+    other.refresh_from_db()
+    assert other.state_enum is MissionState.SNAPSHOTTED
+
+
+def test_a_toctou_race_with_mismatched_metadata_is_refused_not_a_500(
     client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path, monkeypatch
 ):
-    """SEC-27 (round-4 security review). The mission-row lock only ever protects one
-    mission's row, so the read-then-write pair that claims an `Artifact` for a digest
-    is not atomic across *different* missions' transactions — under real concurrent
-    Postgres writers, the review reproduced a losing request getting an unhandled
-    `IntegrityError` (500) instead of the documented `SnapshotArtifactClaimedError`
-    (409).
+    """SEC-27 (round-4 security review), updated for D-087/D-088. The mission-row lock
+    only ever protects one mission's row, so the read-then-write pair that claims an
+    `Artifact` for a digest is not atomic across *different* missions' transactions —
+    under real concurrent Postgres writers, the review reproduced a losing request
+    getting an unhandled `IntegrityError` (500). D-087/D-088 removed the raw
+    cross-mission exclusivity refusal (a same-digest race across missions is now a
+    legitimate dedup hit, reused rather than refused — see
+    `test_an_archive_digest_already_claimed_by_another_mission_is_reused_not_refused`),
+    but the race can still land on a genuine metadata contradiction, and that must
+    still surface as the documented `SnapshotArtifactClaimedError` (409), never a raw
+    500.
 
     Reproduced deterministically here, without needing live threads or a Postgres
-    container: another mission's `Artifact` row for this digest is written directly —
-    simulating a concurrent winner — and `Artifact.objects.filter(...).first()` is
-    patched to return `None` for exactly the query `create_mission_snapshot` makes,
-    simulating the read that ran *before* the winner's row was visible. This is the
-    same window the review found; the only difference is how the interleaving is
-    forced. The unpatched `Artifact.objects.create(...)` then hits the real unique
-    constraint on `sha256` for real, against the real (SQLite) database — the
-    `IntegrityError` this test observes is genuine, not simulated.
+    container: another mission's `Artifact` row for this digest is written directly,
+    with `size_bytes` that could not legitimately describe the same content —
+    simulating a concurrent winner whose ingest disagreed with this mission's own —
+    and `Artifact.objects.filter(...).first()` is patched to return `None` for exactly
+    the query `create_mission_snapshot` makes, simulating the read that ran *before*
+    the winner's row was visible. This is the same window the review found; the only
+    difference is how the interleaving is forced. The unpatched
+    `Artifact.objects.create(...)` then hits the real unique constraint on `sha256`
+    for real, against the real (SQLite) database — the `IntegrityError` this test
+    observes is genuine, not simulated.
     """
     _authorize(client, mission)
     digest = expected_digest(repo_dir, tmp_path)
@@ -531,7 +639,7 @@ def test_a_toctou_race_on_the_artifact_claim_is_refused_not_a_500(
         policy={},
     )
     Artifact.objects.create(
-        sha256=digest, kind="snapshot", size_bytes=29, mission=other
+        sha256=digest, kind="snapshot", size_bytes=999_999, mission=other
     )
 
     from authorization import service as service_module
@@ -563,6 +671,60 @@ def test_a_toctou_race_on_the_artifact_claim_is_refused_not_a_500(
     # Exactly one Artifact row for this digest, still owned by the original winner —
     # the race did not corrupt or duplicate the claim, only (before the fix) the
     # error surfaced on the loser was wrong.
+    assert Artifact.objects.filter(pk=digest).count() == 1
+    assert Artifact.objects.get(pk=digest).mission_id == other.id
+
+
+def test_a_toctou_race_with_matching_metadata_reuses_without_a_500(
+    client: Client, mission: Mission, roots, repo_dir: Path, tmp_path: Path, monkeypatch
+):
+    """The companion case to the mismatched-metadata race above: when the concurrent
+    winner's `Artifact` row is a legitimate dedup hit (matching `kind`/`size_bytes`),
+    the race must resolve to a clean, successful reuse — not a 500, and not a 409
+    either, since D-087/D-088 removed the cross-mission refusal itself."""
+    _authorize(client, mission)
+    digest = expected_digest(repo_dir, tmp_path)
+
+    other = Mission.objects.create(
+        name="pktcfg-racer-legit",
+        repository_ref="file:///demo/repositories/pktcfg-racer-legit",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    from authorization import archive as archive_module
+
+    tar_path = tmp_path / "race-expected.tar"
+    archive_module.build_tar_from_directory(repo_dir, tar_path)
+    real_bytes_total = archive_module.enumerate_members(tar_path).bytes_total
+    Artifact.objects.create(
+        sha256=digest, kind="snapshot", size_bytes=real_bytes_total, mission=other
+    )
+
+    from authorization import service as service_module
+
+    real_filter = service_module.Artifact.objects.filter
+
+    def _filter_that_misses_the_concurrent_winner(*args, **kwargs):
+        if kwargs.get("pk") == digest:
+            return service_module.Artifact.objects.none()
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service_module.Artifact.objects, "filter", _filter_that_misses_the_concurrent_winner
+    )
+
+    response = post(
+        client,
+        f"/api/v1/missions/{mission.id}/snapshot",
+        {"source": "git", "archive_sha256": digest},
+        OPERATOR,
+    )
+    monkeypatch.undo()
+
+    assert response.status_code == 201, (
+        f"expected a clean reuse, got {response.status_code}: {response.content!r}"
+    )
+    assert Snapshot.objects.get(mission=mission).archive_sha256 == digest
     assert Artifact.objects.filter(pk=digest).count() == 1
     assert Artifact.objects.get(pk=digest).mission_id == other.id
 
