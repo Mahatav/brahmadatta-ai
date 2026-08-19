@@ -6952,3 +6952,534 @@ live this run.
 
 **Final approval authority (staffing the fixes)** — CTO / engineering-manager, per this
 project's normal issue-staffing process; not decided here.
+
+---
+
+## D-086 — Runway extended from 3 days to ~10 (deadline ≈2026-08-29, not 2026-08-20):
+what reopens from `CUT`, what stays cut, the priority order for the remaining build, and
+the finale-roster call · 2026-08-19 · CEO
+
+**Context.** The user told the orchestrating session directly that the real deadline is
+~10 days out from 2026-08-19 (≈2026-08-29), not the 2026-08-20 date `.project/state.md`,
+`docs/09-company/03-seven-day-plan.md`, and `CLAUDE.md` were all written and compressed
+against. That is roughly 7x the runway the emergency 3-day compression (D-014) assumed.
+Simultaneously: the backend/orchestration engine is now genuinely feature-complete for the
+D7 happy-path pipeline (all seven mission-stage executors — T1–T7 — merged and reviewed,
+`#168` closed) modulo one open bug, `#207` (a content-addressed artifact claim with no
+release path, blocking a live end-to-end rehearsal — filed, routed to CTO/backend-developer,
+not a CEO call). The Command Center frontend (`apps/command-center/`) has a real Astro
+build and a real component set (radial Core, mission command center, live event status,
+verdict compare, model gateway status, local repository intake, system status — 18 source
+files) but has had **zero attention this entire session** and is unverified against the now-
+complete API. 18 issues sit in the `CUT` milestone from the original compression, several
+UI/UX-shaped: `#25` (analysis rail — findings by severity/dependency/compiler health),
+`#26` (git history summary + bisect timeline panel), `#31` (fuzzing telemetry panel), `#40`
+(renewed-fuzzing gate after patch), `#52` (presentation mode with labelled deterministic
+mocks), `#56` (keyboard operability of the Command Center), the GPU-escalation set
+(`#44`/`#46`/`#47`/`#48`), and several smaller, undescribed-to-me items (`#5`, `#22`, `#23`,
+`#24`, `#30`, `#62`, `#63`).
+
+**Decision.** Do not reopen the CUT milestone wholesale, and do not leave it untouched
+either. Reopen a small, specifically-justified subset into a new **D8 — Hardening &
+rehearsal (extended)** scope, gated behind three already-committed, non-negotiable
+priorities landing first. In descending priority for the remaining ~10 days:
+
+1. **`#207` fix** (CTO/backend-developer, already routed — not re-decided here). Nothing
+   about this call changes its priority or ownership; it remains the actual gate on a live
+   E2E rehearsal.
+2. **A real phase-5 pass on the Command Center against the now-complete API** — wiring and
+   *verifying*, with a live mission, that the five P0 panels (mission core, stage timeline,
+   findings list, diff view, verdict panel — `01-vision-and-p0-cut.md` P0-13) actually
+   render real state, not just that the Astro build succeeds. This is **not new scope**. It
+   is already-committed P0 work that this entire session silently skipped in favor of
+   backend work. It is more urgent than any CUT reopening below and should run **concurrently
+   with item 1**, not after it — confirmed independently in `state.md`'s own closing line.
+3. **`#50` passing live, once, clean** — the D7 gate — followed by `#57` (three full timed
+   rehearsals).
+4. **Reopened CUT items** (this decision), staffed only once 1–3 show real signs of landing.
+5. **Fallback recording** re-verified or re-recorded against the now-much-more-complete
+   pipeline (the existing `fallback-demo-d6.html` predates `#168`'s entire executor set).
+6. **`#60`** code freeze, with a real reserve window before the actual ~2026-08-29 deadline
+   — not a repeat of the original plan's mistake, where the "reserve" sat inside a deadline
+   that later turned out to be wrong anyway.
+
+**Items reopened from `CUT`, moved to `D8 — Hardening & rehearsal (extended)`:**
+
+| Item | Reasoning |
+|---|---|
+| `#25` — Analysis rail (findings by severity, dependency health, compiler health) | Cheapest of the UI reopens — a design spec and a shared component (`NotRunCoverageRow`) already exist from `D-057`/`13-cut-pullback-design-spec.md` §1.3. More importantly, it directly reinforces the product's actual differentiator: disclosing what was *not* checked rather than hiding it (the same principle `D-009`/`D-023`/`D-057` were written to protect). This is evidence, not decoration. |
+| `#56` — Keyboard operability | Cheap by its own design (`D-059`: native `Tab`/`Shift+Tab`/`Enter`/`Space`/`Escape` only, no new global key-handling layer, no command palette). Reduces a real operational risk — a solo operator fumbling with a mouse under judge pressure during the actual scored run. Risk-reduction for the live demo, not polish. |
+| `#52` — Presentation mode (rehearsal-only, per `D-058`) | Re-scoped as a **rehearsal-enablement tool**, not demo-facing scope. It is architecturally excluded from the finale build (`command-center:presentation` is a distinct build artifact the finale never runs) and independently refuses to bind to a real mission. Given `#50` has failed three live attempts in a row, each finding a new blocker, giving the demo operator a way to rehearse narration and timing against labelled mocks while backend stabilization continues in parallel is a genuine use of the extra runway — it directly serves "rehearsal depth," which this decision explicitly prioritizes over new scope. `cybersecurity` should confirm the build-time exclusion is a tested property (per `D-058`'s own recommendation) before this is treated as shipped. |
+| `#40` — Renewed-fuzzing gate after patch | Not a UI item. The strongest anti-overfit argument in the product's own story ("how do you know the patch isn't just overfit to one input") and was explicitly expected to be cheap "once P0-7 exists" — it now does (`T2`/`FUZZ`, `#188`, merged and reviewed). Evidence, not decoration; strengthens the actual scientific claim the loop makes. Routed to **CTO** to confirm it is genuinely cheap now and does not threaten the `#50`/`#57` critical path — reopened contingent on that confirmation, not unconditionally. |
+| `#31` — Fuzzing telemetry panel | Conditionally reopened, lowest priority of the five. Visually reinforces "our own fuzzing found it," but the cost is unclear — it depends on whether the FUZZ executor already emits granular progress events on the existing SSE stream or requires a new telemetry-emission path. **Product-manager to scope a cheap version (reuse existing event stream only) before any engineering time is committed.** If it requires new backend instrumentation, it does not run this pass. |
+
+**Items evaluated and left in `CUT`:**
+
+| Item | Reasoning |
+|---|---|
+| `#26` — Git history summary + bisect timeline panel | This is scenario 2 territory (`P1-1`/`P1-8` in `01-vision-and-p0-cut.md`), and there is already a standing, closed decision on it — issue `#63`, "bisect stays cut" (see `state.md`'s closed-items list). More runway does not, by itself, overturn a decision that was already deliberately made once; reopening it would also require real new backend capability (automated `git bisect` + a seeded git history with a known-bad commit on the demo target), not just a panel — a materially bigger lift than any item above, for a demo scenario the project's own P0-cut doc already ranked additive, not load-bearing (§3: "scenario 2 ... is additive, not load-bearing"). If PM/CTO believe circumstances have genuinely changed since `#63`, that is a reopening they should bring to me explicitly with the new argument — I am not overturning it unilaterally here. |
+| `#44`/`#46`/`#47`/`#48` — GPU escalation set | `D-015` cut rented GPU entirely: highest cost, highest schedule risk, external-provider dependency, "removes the only real money in the project." None of that reasoning is a function of calendar days — if anything, attempting a never-yet-tested rented-GPU escalation for the first time in the same window as an already-fragile live-E2E gate (`#50` has failed three live attempts) is a **worse** risk now than it would have been on a calm original schedule. Stays cut. |
+| `#5`, `#22`, `#23`, `#24`, `#30`, `#62` | I was not given descriptions of these in this task and am not going to rule on content I cannot see. Default position: **stay in `CUT`.** Delegated to product-manager/engineering-manager: triage these against the priority order in this decision and bring back anything that is clearly cheap and clearly serves items 1–3 above (not decoration) — I will rule on any of these the same day if asked. This is an explicit delegation, not a silent no. |
+
+**A rule for D8, so this does not become a second uncosted plan:** no CUT-reopen work
+(`#25`, `#56`, `#52`, `#40` pending CTO confirmation, `#31` pending PM scoping) is staffed
+until `#50` has passed live at least once **and** the five P0 Command Center panels are
+confirmed rendering a real mission end to end. That is the gate that converts "extra
+runway" into "safe to spend on polish" rather than "still fixing the basics" — converting
+Phase-1-must-haves risk into Phase-2 nice-to-haves risk is exactly the failure mode
+`docs/09-company/01-vision-and-p0-cut.md` §6.7 warned about ("the Command Center as
+specified is a multi-week frontend project competing with the pipeline... when they
+collide, the pipeline wins").
+
+**Priority statement for PM/EM to build a task breakdown from** (their derivation, not a
+restatement of mine to copy verbatim): fix `#207` and do a real phase-5 verification pass
+on the Command Center concurrently; get `#50` to pass live once and run the three `#57`
+rehearsals; only then staff the five reopened CUT items in the order `#25` → `#56` → `#52`
+→ `#40` (CTO-gated) → `#31` (PM-scoped); confirm or re-record the fallback demo against the
+now-complete pipeline; and hold a real reserve before `#60` code freeze ahead of the actual
+~2026-08-29 deadline. Separately, and not itself a CUT-reopening decision: the 16
+non-blocking findings filed during this session's review rounds (`#176`, `#177`, `#180`,
+`#184`, `#191`, `#193`, `#194`, `#198`, `#199`, `#203` and others in the `#163`–`#207`
+range) are real correctness/hygiene gaps, not scope — engineering-manager should triage
+that backlog for anything that poses genuine risk to a live rehearsal or the finale itself
+(e.g., `#176` no unique constraint on `Job(mission,kind)`, `#177` no orchestrator singleton
+guard both sound like exactly the kind of thing that could bite mid-demo) as part of
+"hardening," which this decision already prioritizes over new scope.
+
+**Day-numbering.** Not renumbering D1–D9 into a longer sequence. D7/D8/D9 remain
+conceptually correct labels for what they gate (D7 = the evidence/freeze gate, D8 =
+hardening & rehearsal, D9 = submission & freeze) — the CUT reopens above land inside D8,
+which is where "the extra stuff, if there's room" already conceptually lived. What changes
+is the calendar mapping: `docs/09-company/03-seven-day-plan.md`'s Aug 6–20 dates are stale
+and superseded by the ~10-day runway from 2026-08-19. Engineering-manager should re-anchor
+D7/D8/D9 to real dates inside that window and hold a genuine reserve at the tail before
+~2026-08-29 — not a repeat of the original plan's "reserve" that sat inside a deadline that
+was itself wrong.
+
+**`#59` — finale roster.** Structural call reaffirmed, real names still outstanding.
+`01-vision-and-p0-cut.md` §5.3's original recommendation — **option C: agent roster for
+the build, plus 1–2 recruited humans for the in-person finale only**, covering the
+incident-lead / demo-operator / evidence-lead split the 36-hour runbook assumes — stands
+and is reaffirmed here; nothing about the runway change alters that reasoning; if anything,
+10 days instead of 3 makes recruitment and registration/travel lead time *more* achievable,
+not less urgent to start. What I cannot supply: **actual human names, their availability,
+and registration/travel logistics.** That is not derivable from anything in this repository
+and needs the user directly, not routed through any other role. Stated plainly as an open
+question below rather than left implicit.
+
+**Options considered (for the reopen-vs-don't call as a whole).** (a) Reopen nothing —
+spend 100% of the extra runway on hardening/rehearsal of what's already built. (b) Reopen
+everything in `CUT` — treat 7x runway as license to build the full original P1 list. (c)
+Reopen a small, specifically-justified subset gated behind the must-have items, leave the
+rest explicitly triaged rather than silently ignored.
+
+**Pros and cons.** (a) is the safest reading of "don't scope-creep a competition entry
+that has failed its own live gate three times in a row" — but it leaves real, cheap,
+narrative-relevant value on the table (the analysis rail's disclosure principle, keyboard
+safety for the operator, rehearsal tooling) for no reason other than caution, when the
+runway genuinely supports it. (b) repeats exactly the failure this document's own §6.7
+warned about — the Command Center is explicitly not supposed to compete with the pipeline
+for time, and unstaffed reopening of `#26` (a real new backend capability, not a panel) or
+the GPU set (external dependency, real money, D-015's reasoning untouched by more days)
+risks the same "built to the module level, no end-to-end wiring" pattern that has already
+cost this project three failed live-gate attempts this session alone. (c) costs the
+overhead of a gated, ordered rollout rather than a single flat decision, but it is the only
+option that actually uses the extra runway for what it is most needed for — the Command
+Center's unverified state against the complete API is the single largest unknown in the
+project right now, bigger than any CUT item — while still capturing the cheap, narrative-
+relevant wins the extended runway makes newly affordable.
+
+**Cost implications.** Zero incremental GPU/infra spend (GPU set stays cut). Engineering
+cost of the five reopened items is deliberately front-loaded with cheap ones (`#25`, `#56`
+have existing specs/components; `#52` is architecturally isolated from the finale build)
+and back-loaded with the ones needing external confirmation (`#40` CTO, `#31` PM) before
+any hours are spent.
+
+**Security implications.** None of the reopened items touch the safety boundary
+(authorization, sandboxing, egress, patch policy). `#52` (presentation mode) is the one
+with real security shape — `D-058` already covers this in detail and its own
+recommendation (cybersecurity confirms the build-time exclusion is a tested property, not
+just a description) is reaffirmed here, not weakened.
+
+**Scalability implications.** None; this is a scope-sequencing decision, not an
+architectural one.
+
+**Recommendation.** (c), as decided above.
+
+**Final approval authority.** CEO, for the scope call itself (which CUT items reopen, and
+the priority order). CTO for `#40`'s feasibility confirmation and for arbitrating if PM/EM
+believe `#63`'s "bisect stays cut" ruling should be revisited. Product-manager for `#31`'s
+cost scoping and for building the actual task breakdown from the priority statement above.
+The user directly, and only the user, for `#59`'s outstanding human names and finale
+logistics.
+
+---
+
+## D-087 — Recommended technical scoping for `#207` (SEC-27 artifact-claim deadlock):
+mission-scoped claiming, not a release-path mechanism · 2026-08-19 · `engineering-manager`
+seat (recommendation; CTO holds final ruling per D-085's own routing)
+
+**Context.** `#207` (D-085): `authorization/service.py::create_mission_snapshot` refuses a
+new mission's snapshot with `409 SnapshotArtifactClaimedError` whenever another mission
+already owns the `Artifact` row for that digest (`Artifact.sha256` is the primary key;
+`Artifact.mission` is a single FK, first-writer-wins, no release path on any of `contracts.
+state_machine.TRANSITIONS`'s five terminal states — confirmed directly, all five have
+`frozenset()` as their outbound set). `demo/repositories/pktcfg`'s snapshot tar is
+byte-for-byte deterministic, so every mission against the unmodified fixture computes the
+identical digest — this makes a second consecutive rehearsal against that fixture
+structurally impossible without a database reset, in direct conflict with this project's own
+Week 2 kill criterion ("reproduced twice consecutively"). D-085 named two options and left
+the ruling to CTO/backend-developer; this record is that scoping, done at engineering-manager
+authority for staffing/sizing purposes, with the technical ruling itself flagged for CTO
+sign-off rather than closed unilaterally, since D-085 explicitly reserved it.
+
+**Verification performed before scoping (read, not guessed).** `authorization/store.
+ingest_from_path` is already idempotent by content-hash at the filesystem layer ("if the
+destination already exists, the freshly-read bytes are discarded rather than rewritten" —
+its own docstring) — the disk-level content-addressed store (D-025) already treats identical
+bytes across missions as a no-op dedup hit, not a conflict. `Snapshot` (`missions/models.py`)
+is already the real per-mission provenance unit: `AppendOnlyModel`, one row per mission,
+write-once, keyed by `mission` FK plus its own `archive_sha256` — nothing about it assumes or
+requires `Artifact.mission` to be exclusive. Grepped every other read site of `Artifact` in
+`apps/control-api/` (`evidence_export.py`, `evidence_repository.py`, `missions/service.py`):
+none relies on `Artifact.mission` exclusivity — `evidence_export.py`'s own export-bundle path
+already uses `Artifact.objects.get_or_create(...)` for its own (different) digest, i.e. the
+existing code already treats `Artifact` as shared/idempotent in the one other place it
+matters. The only place `Artifact.mission` is read exclusively is the one check this record
+proposes to relax.
+
+**Options considered** (both named in D-085).
+
+- **(a) An audited release path on terminal state.** When a mission that owns a digest's
+  claim reaches a terminal state, release the claim so a later mission can take it.
+- **(b) Mission-scoped claiming.** Drop the cross-mission refusal. A digest already indexed
+  by another mission is treated as a legitimate content-dedup hit, not a conflict; this
+  mission gets its own fresh `Snapshot` row against the existing `Artifact`, exactly as
+  already happens for the same-mission replay case three lines above the refusal in the
+  current code.
+
+**Pros and cons.**
+
+(a) has to answer a question it cannot answer cheaply: *which* terminal states release?
+Scoping release to failure-shaped states only (`FAILED`, `CANCELLED`) does not satisfy the
+literal kill criterion, because the two rehearsal runs that actually need to repeat
+consecutively are the success-shaped ones (`VERIFIED`, `REJECTED` — the two verdicts `#50`
+itself needs in one run). Scoping release to *all* terminal states, to actually satisfy the
+criterion, means a finalized `VERIFIED`/`REJECTED` mission's referenced artifact becomes
+reassignable after the fact — which weakens the exact tamper-evidence property D-025 was
+written to buy ("post-hoc alteration of evidence detectable"), trading a currently-unused
+exclusivity check for a real regression in an audit-trail property the project explicitly
+cares about being defensible to a judge. Implementing it at all needs either a schema
+migration (a release timestamp or claim-history table) or a new hook inside
+`orchestrator/transitions.py` firing on every terminal transition — the more sensitive,
+more heavily-reviewed module in this codebase, not one to add surface to under time
+pressure without a specific reason.
+
+(b) fixes the literal, demonstrated bug in the one function it lives in, needs no schema
+migration, and does not touch `contracts/state_machine.py` or `orchestrator/transitions.py`
+at all. Every mission that reuses a digest still independently re-runs and re-earns its own
+full pipeline (`BASELINE`/`FUZZ`/`VERIFY`/`EXPORT`) against the shared bytes — there is no
+inherited trust, because the actual provenance unit was always `Snapshot`
+(mission-scoped, append-only, immutable, untouched by this change), never `Artifact`. Its
+one real cost: SEC-27's stated rationale ("preventing a swapped archive from silently
+inheriting another mission's evidence chain") loses its DB-level backstop. Under SHA-256
+preimage/collision resistance this was never a practically reachable attack in this threat
+model — the disk-level digest is server-recomputed on every ingest and compared against the
+caller's assertion regardless (`SnapshotDigestMismatchError`, unaffected by this change) — but
+because SEC-27 was cybersecurity-authored, this needs an explicit cybersecurity re-review
+before merge, not an assumption that removing it is fine because the reasoning above sounds
+right.
+
+**A residual, fail-closed check worth keeping, replacing the removed one with a more precise
+one.** If an existing `Artifact` row's `kind`/`size_bytes` disagree with what this mission's
+own materialized/hashed source just produced for the same digest, that is a genuine
+hash-workflow contradiction (would require a SHA-256 break to occur legitimately) and should
+still raise `SnapshotArtifactClaimedError` — this is a stronger, more targeted invariant than
+"different mission ID," which was never the actual risk signal.
+
+**Cost implications.** (b): roughly half a day of backend-developer time (one function,
+`authorization/service.py::create_mission_snapshot`) plus updated tests
+(`api/tests/test_authorize_snapshot.py` — the existing cross-mission-claim test flips from
+asserting `409` to asserting success/reuse; a new test asserts the metadata-mismatch case
+still raises) plus one cybersecurity review round. (a): a minimum of one to two days given the
+terminal-state-scope question alone still needs deciding, before any code is written.
+
+**Security implications.** (b) removes a DB-level check whose only realistic value was
+defense-in-depth against an unreachable SHA-256-break scenario, and replaces it with a
+strictly more precise metadata-consistency check. (a), scoped broadly enough to satisfy the
+kill criterion, would weaken D-025's tamper-evidence property for finalized missions — a real
+regression, not a neutral tradeoff. Requires cybersecurity sign-off regardless of which option
+is chosen, since SEC-27 is cybersecurity-authored.
+
+**Scalability implications.** None for either, at this project's scale (single host, single
+operator, effectively one live mission at a time).
+
+**Recommendation.** (b), mission-scoped claiming, sized as a single task (T-1 in
+`docs/09-company/14-runway-task-plan-2026-08-19.md`), backend-developer-owned, cybersecurity
+review required before merge.
+
+**Final approval authority.** CTO (technical) — D-085 explicitly routed the `#207`
+product-level fix to "CTO/backend-developer," not to engineering-manager; this record is a
+recommendation and sizing call for staffing purposes, not a substitute for that ruling. If CTO
+rules differently, the task plan's T-1 gets re-scoped accordingly before any code is written.
+
+---
+
+## D-088 — CTO ruling on `#207` (SEC-27 mission-scoped claiming) and a new, more severe
+Command Center auth gap: the browser has no way to authenticate to the control API at all
+· 2026-08-19 · CTO seat
+
+### Ruling 1 — `#207`: D-087's recommendation APPROVED, as written, no modifications
+
+**Verification performed (code read directly, not rubber-stamped).**
+`apps/control-api/authorization/service.py::create_mission_snapshot` (lines 161–214),
+`authorization/store.py::ingest_from_path`, `missions/models.py` (`Artifact`, `Snapshot`),
+`orchestrator/snapshot.py::_resolve_archive_path`, and a grep of every other read site of
+`Artifact` in `apps/control-api/` (`evidence_export.py`, `missions/service.py`) — confirmed
+independently, not taken on D-087's word:
+
+- The digest is server-recomputed on every ingest from the actual bytes on disk
+  (`store.ingest_from_path`), and `create_mission_snapshot` already refuses on mismatch
+  against the caller's asserted digest (`SnapshotDigestMismatchError`, three lines above the
+  check this ruling touches, and *unaffected* by this change). No mission's own snapshot is
+  ever trusted on say-so.
+- `Artifact.mission` (the field the cross-mission check reads) is **not used anywhere as an
+  authorization or access-control gate.** `orchestrator/snapshot.py::_resolve_archive_path`,
+  the one function that turns a recorded snapshot back into bytes on disk for `BASELINE`/
+  `FUZZ`/etc. to consume, resolves purely by `sha256` against the filesystem
+  (`store.path_for(ARTIFACT_ROOT, sha256)`) and never reads `Artifact.mission` at all.
+  `evidence_export.py` uses `Artifact.objects.get_or_create` for its own, separate digest
+  (the export bundle's own hash), already treating `Artifact` as shared/idempotent in the one
+  other place it matters. D-087's claim that nothing downstream relies on `Artifact.mission`
+  exclusivity is confirmed, independently, not assumed.
+- `Snapshot` — the real per-mission provenance/evidence unit — is `AppendOnlyModel`,
+  mission-scoped, one row per mission, write-once, immutable, and **untouched by this
+  change.** Every mission that reuses a shared digest still gets its own `Snapshot` row and
+  independently re-runs and re-earns its own full pipeline. There is no inherited trust
+  between missions anywhere in this change.
+
+**On the specific question asked — is this a "legitimate content-dedup hit, not a
+security-relevant collision," and is "SHA-256 preimage resistance" the right property to
+invoke.** One precision correction to D-087's own language, not a substantive problem: the
+property actually being relied on is **second-preimage/collision resistance**, not preimage
+resistance. Preimage resistance answers "given a digest, can you find *some* input that
+produces it" — irrelevant here, since no step in this flow ever needs to invert a hash.
+Collision/second-preimage resistance answers the question that's actually live: "given that
+two different missions' independently-hashed uploads produced the *identical* digest, can
+those uploads legitimately be different bytes?" No — not without a practical SHA-256 break,
+which does not exist. D-087's conclusion is correct; its stated justification named the wrong
+half of the hash-security taxonomy. This does not change the ruling, only its written
+rationale — corrected here for the record.
+
+**On whether the narrower kind/size_bytes check preserves what SEC-27 was protecting
+against.** Yes. SEC-27's own stated rationale — "preventing a swapped archive from silently
+inheriting another mission's evidence chain" — describes an attack that is not reachable
+without a collision in the first place: an attacker who wants mission B's evidence chain to
+point at mission A's bytes would need to produce different content that hashes identically
+to what mission A already has stored, i.e. the same SHA-256 break the check was never
+actually defending against reachably. The one failure mode SEC-27's exclusivity check
+*could* have caught that isn't a cryptographic break — a **bug** in the ingest pipeline that
+produces inconsistent metadata for the same digest (e.g. `kind` or `size_bytes` disagreeing
+between two recordings of what should be the same bytes) — is exactly what the proposed
+narrower check still catches, and catches more precisely, since "metadata disagrees" is the
+actual signal, not "different mission ID," which was never the real risk indicator.
+
+**One structural observation, not a blocker, worth a one-line note for whoever implements
+T-1.** `Artifact.mission` is `on_delete=models.CASCADE`. If the first-claiming mission's row
+is ever hard-deleted (only reachable today via the scoped dev-DB reset devops-engineer would
+run for T-6, not via any product code path — confirmed by grep, no `Mission.objects...
+.delete()` call exists outside tests), the `Artifact` DB row cascades away with it. This does
+not orphan a second mission's evidence: the physical bytes under `ARTIFACT_ROOT` are
+untouched by a DB-row delete, and `_resolve_archive_path` checks the filesystem directly, not
+the `Artifact` row's existence — a subsequent ingest of the same content self-heals by
+creating a fresh `Artifact` row via the existing idempotent-write path. Not a reason to
+withhold approval; flagged so T-1's test suite can add one cheap regression test for it
+(delete the claiming mission, confirm a second mission against the same digest still
+snapshots and materializes cleanly) since the dev-DB-reset runbook (T-6) is about to exercise
+this exact path for real.
+
+**Ruling.** **APPROVED, as written.** Mission-scoped claiming (option b) is correct: it fixes
+the literal, demonstrated bug, needs no schema migration, does not touch
+`orchestrator/transitions.py`, and the DB-level check it removes was defense-in-depth against
+a scenario that was never practically reachable to begin with — while the replacement check
+is *more* precise than the one it replaces. Reject option (a) (release-path mechanism) for
+the reasons D-087 already gave: it cannot satisfy the literal kill criterion without also
+releasing claims on the success-shaped terminal states, which is a real regression against
+D-025's tamper-evidence property, for a bigger and more sensitive code change.
+
+**Modifications to D-087's plan:** none to the technical design. One addition to T-1's
+acceptance checklist: the cascade-delete self-heal regression test named above.
+
+**Final approval authority.** CTO (this ruling). T-2 (cybersecurity review) remains required
+before merge — this ruling does not substitute for it; SEC-27 is cybersecurity-authored and
+the standing CLAUDE.md rule on auth/isolation-adjacent changes applies regardless of how
+confident this ruling is. **T-1 is unblocked as of this record.**
+
+---
+
+### Ruling 2 — new finding: the Command Center browser has no way to authenticate to the
+control API at all. Confirmed real. Ruled: nginx-layer credential injection, not a browser-
+visible token.
+
+**Verification performed (every file named, read directly).**
+
+- `apps/control-api/api/auth.py` (`BearerTokenAuth`) — confirmed fail-closed by design and
+  by its own docstring: "no configured token means no principal can authenticate, for any
+  role... an unknown or malformed `Authorization` header is a 401, never an anonymous pass."
+  There is no anonymous-read carve-out anywhere in this module.
+- `apps/command-center/src/lib/api/client.ts` — every `fetch()` call (`getSystemHealth`,
+  `getMissionDetail`) sends `Accept: application/json` and nothing else. No `Authorization`
+  header, anywhere in this file.
+- `apps/command-center/src/lib/events/connection.ts` — the SSE connection is a plain
+  `new EventSource(...)`. Worth naming explicitly since it changes the shape of the fix:
+  **the browser `EventSource` API cannot set custom request headers at all**, by spec — no
+  fix that relies on the browser attaching a bearer token can ever work for this connection
+  without abandoning `EventSource` for a manually-authenticated stream client, a strictly
+  bigger change than this finding needs.
+- `apps/command-center/astro.config.mjs` — `output: 'static'`. There is **no Astro SSR mode,
+  no Astro API routes, and no Node runtime in the production (finale) deployment at all.**
+  The only server-side code that exists today (`configureServer` middleware serving
+  `/__local/*`) is a **Vite dev-server-only plugin** — it does not run in the static build
+  nginx actually serves in the finale profile.
+- `infrastructure/compose/nginx/conf.d.dev/brahmadatta.conf` and `conf.d.finale/
+  brahmadatta.conf` — both proxy `/api/`, the SSE location, and the snapshot-upload location
+  straight through (`proxy_pass`), including only `infrastructure/compose/nginx/includes/
+  proxy-headers.conf`'s `Host`/`X-Real-IP`/`X-Forwarded-*`/`Upgrade`/`Connection` headers.
+  No `Authorization` header, no credential of any kind, is set anywhere in the nginx config
+  tree (`includes/proxy-common.conf`, `includes/proxy-headers.conf`, `includes/sse.conf` all
+  checked).
+- `infrastructure/compose/docker-compose.finale.yml` — the `nginx` service has **no
+  `env_file`/`environment` entry at all** (unlike `control-api`, which uses the `x-env`
+  anchor). It mounts `conf.d.finale/` as a plain, pre-rendered, read-only bind mount, not an
+  envsubst template — there is no existing mechanism for a secret to reach this container's
+  config even if one were added to `.env` today.
+
+**Finding confirmed real, independently, not taken on the ui-ux-designer's word.** Every
+mission/evidence endpoint requires a valid bearer token; nothing in the browser, in Astro, or
+in nginx ever supplies one; the API fails closed. The Command Center cannot render a single
+real mission today. This is upstream of and independent of `#207` — it blocks 100% of
+Command Center work against a live backend, not just the D7 rehearsal path.
+
+**Options weighed.**
+
+**(a) Short-lived token minted server-side by an Astro API route / SSR middleware,
+handed to the browser (session-cookie or page-embedded).** Rejected for this codebase,
+specifically. It requires switching Astro's `output` from `static` to `server`/`hybrid`,
+adding a Node adapter (`@astrojs/node`), and running a Node server process in the finale
+production stack. That directly contradicts a deliberate, already-documented property of this
+exact deployment: `docker-compose.finale.yml`'s own comment block states the finale stack
+has "no Astro dependency-installer service — the finale has no npm step at all, so this stack
+satisfies C4 with no exception whatsoever." Adding a Node runtime to serve API routes is not
+a small addition on top of that; it is reversing it, days before a demo, for a single-operator
+tool with no multi-tenant session model to justify the complexity. It also does not solve the
+whole problem on its own: `EventSource` cannot carry a custom `Authorization` header regardless
+of how the token is minted, so this option would additionally have to move to cookie-based auth
+(and now the browser is holding a live, if short-lived, credential — worse, not better, than
+today's total absence of one) just to make the SSE panel work at all.
+
+**(b) nginx performing credential injection at the proxy layer — chosen.** nginx already sits
+on the one network boundary this system's own architecture (`C4`, the compose network-
+isolation rule referenced by both compose files) designates as the trust boundary between the
+browser and everything else; it is the correct place for this, not a workaround. Concretely:
+convert `conf.d.finale/brahmadatta.conf` (and the dev equivalent) into nginx template files
+consumed by the official `nginxinc/nginx-unprivileged` image's built-in envsubst entrypoint
+(`/etc/nginx/templates/*.template` → `NGINX_ENVSUBST_OUTPUT_DIR`), add the nginx service to
+the existing `x-env` anchor so it reads the same `.env` control-api already reads, and inject
+`proxy_set_header Authorization "Bearer ${CONTROL_API_OPERATOR_TOKEN}";` only on the three
+locations that proxy to `control-api` (`/api/`, the snapshot-upload location, and the SSE
+location) — never on the static-asset locations. `CONTROL_API_OPERATOR_TOKEN` already exists
+as a named env var (`config/settings/base.py` line 166); nothing new needs generating, only
+plumbing to a second container. This uniformly fixes both `fetch()` and `EventSource`, since
+the browser never needs to hold or attach a credential at all — nginx supplies it on every
+proxied request regardless of method, sidestepping `EventSource`'s header limitation entirely
+rather than working around it with cookies. The container's `read_only: true` root filesystem
+needs one addition (`/etc/nginx/conf.d` to the existing `tmpfs` list, alongside `/tmp`,
+`/var/cache/nginx`, `/var/run`) since the envsubst step writes the rendered config there.
+`nginx.conf`'s access-log format (`json_combined`) was checked directly and does not include
+`$http_authorization` — the injected token will not leak into logs.
+
+**(c) Considered and rejected: nothing (leave a documented gap, ship read access as a follow-
+up later).** Rejected — not a real option. This is not a polish gap; it is the literal reason
+"the Command Center cannot render a single real mission today," which D-086 already named as
+the single largest unknown in the project. Every hour of Command Center engineering time spent
+before this lands (wiring panels, verifying against a live mission, per D-086 item 2 and the
+task plan's own Milestone-A-adjacent Command Center pass) produces work that cannot be visually
+verified against a real backend, which is exactly the "verify before reporting done" failure
+mode this project has already paid for once (`state.md`'s own account of #12/#154 — modules
+passing their own tests while the actual HTTP path was never proven end to end).
+
+**Why not over-engineer past this threat model.** No session management, no per-user token
+issuance, no token rotation/expiry UI, no login screen. One human, one machine, one role
+(`operator` — the union of `OPERATOR_ROLES` and `READ_ROLES`, since a single operator both
+reads and drives missions through this browser; no reason to plumb multiple role tokens or a
+role-selection UI for a solo demo tool). This is deliberately the same shape `api/auth.py`'s
+own docstring already commits to for the API itself ("one named operator, one machine, a
+fourteen-day project... Session and MFA-backed administrator auth is out of scope").
+
+**What this ruling protects, explicitly.** `CONTROL_API_TOKENS` — the real bearer credentials
+— must never reach client-side JS, any HTML the browser can view-source, any response body,
+or any log line. Option (b) satisfies this by construction: the token exists only in nginx's
+process environment and the rendered (tmpfs, never disk-persisted, never bind-mounted out)
+config file inside a container the browser has no filesystem access to; it is attached to
+outbound proxy requests the browser never originates and never observes response headers
+from that section of the exchange. This is the actual security property CLAUDE.md's C4 rule
+and this project's existing fail-closed auth design (`api/auth.py`) already care about, applied
+one layer further out — not a new property, not a relaxation of an existing one.
+
+**Sizing.** Small, bounded — same order of magnitude as `#207`'s T-1, not a rearchitecture.
+Roughly **half a day to one day**: convert two nginx conf files to templates, add the `x-env`
+anchor and one `tmpfs` entry to the nginx service in both compose files, add the three
+`proxy_set_header Authorization` lines, verify via `curl` through nginx with zero
+`Authorization` header supplied that a real `GET /api/v1/missions/{id}` now returns 200 where
+it returns 401 today, and confirm (grep the rendered nginx config and the Astro `dist/`
+output) the literal token value appears in neither. Plus a cybersecurity review round
+(~2–4h) before merge, required regardless of confidence level, since this is exactly the kind
+of isolation/auth-adjacent change CLAUDE.md names explicitly ("Security-sensitive changes —
+isolation, sandboxing, auth, verification gates, secrets — need a cybersecurity agent review
+recorded on the PR before merge").
+
+**Who implements.** Primarily **devops-engineer** — the change is almost entirely nginx
+config and compose-file plumbing (template conversion, `tmpfs` addition, `x-env` wiring),
+territory devops-engineer already owns in this repo (the C4 network topology, the compose
+profiles, the `control-api.Dockerfile` toolchain fix in `#205`). **backend-developer**
+should be looped in only to confirm which token/role to inject (recommend: `operator`, per
+the "why not over-engineer" reasoning above) and to confirm no `api/auth.py` behavior needs
+to change on the receiving end (it does not — this is purely a request-shaping change on the
+sending side; `BearerTokenAuth` needs zero modification). Not a database-engineer or
+compiler-toolchain-engineer concern.
+
+**This is now the critical path for all Command Center work, ahead of everything else
+UI-related.** Per the UI audit's own finding: zero panels can render a real mission without
+this. Recommend engineering-manager add this as a new task — call it **T-0 (Command Center
+auth)** — scheduled **before** any panel-wiring/verification work in D-086 item 2's "real
+phase-5 pass on the Command Center," not in parallel with it, since panel work done against a
+still-401ing backend cannot be visually verified and risks repeating the exact "tests passed
+in isolation, the real path was never proven" pattern this project has already hit twice
+(`#12`, `#154`, both per `state.md`'s reconciliation account). It does not block or depend on
+`#207`'s T-1/T-2 — genuinely independent surfaces (nginx/compose vs. `authorization/
+service.py`) — so it can run fully in parallel with Milestone A of `docs/09-company/
+14-runway-task-plan-2026-08-19.md`, staffed on Day 1 alongside T-1/T-3/T-8/T-9.
+
+**Cost implications.** Zero incremental infra spend — no new service, no new dependency, no
+GPU/hosting change. Engineering cost is small and bounded, per sizing above.
+
+**Security implications.** Closes a fail-open-by-omission gap (not fail-open in `api/auth.py`
+itself, which stays fail-closed correctly — fail-open in the sense that the *system as
+deployed* today cannot be used at all, which is not a security property, just a broken one)
+without introducing a new credential-exposure surface: the fix keeps the real bearer token
+strictly server-side (nginx process env + tmpfs-rendered config), same trust tier as
+`control-api` itself, one hop further out. No new attack surface versus today's already-
+accepted posture (`CONTROL_API_TOKENS` in `.env`, read by `control-api` the same way).
+Requires cybersecurity sign-off before merge, non-negotiable per CLAUDE.md.
+
+**Scalability implications.** None — single-operator, single-machine, effectively one
+concurrent session, same scale assumption `api/auth.py` and D-087 both already operate under.
+
+**Recommendation.** (b), nginx-layer credential injection via envsubst templates and the
+existing `CONTROL_API_OPERATOR_TOKEN`, as detailed above.
+
+**Final approval authority.** CTO (this ruling, for the architecture choice). Cybersecurity
+holds the merge-blocking review per CLAUDE.md's standing rule — this ruling picks the
+approach, it does not substitute for that review. Engineering-manager to schedule the new
+task (recommended: T-0, devops-engineer-led, backend-developer-consulted) on the task board
+ahead of any Command Center panel-wiring work.
