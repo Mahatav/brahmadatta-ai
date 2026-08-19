@@ -37,13 +37,24 @@ validate_profile() {
   esac
 
   echo "=== nginx -t · profile: ${profile} ==="
+  # D-088 (T0): conf.d.${profile}/ became templates.${profile}/ — a *.template file, not
+  # a ready-to-parse conf file, since the ingress now injects CONTROL_API_OPERATOR_TOKEN
+  # via the image's own envsubst entrypoint step. Mounted at /etc/nginx/templates (the
+  # entrypoint's default template dir), NOT /etc/nginx/conf.d — `nginx -t` still runs the
+  # entrypoint.d scripts before parsing (docker-entrypoint.sh only skips them when the
+  # command is not `nginx`/`nginx-debug`, and it is here), so the template renders into
+  # the image's own writable /etc/nginx/conf.d before `nginx -t` ever reads it. A fake,
+  # obviously-non-production token is enough to prove the substitution and the resulting
+  # config both parse; the real value is never used by this script.
   docker run --rm \
     --add-host control-api:127.0.0.1 \
     --add-host command-center:127.0.0.1 \
+    -e CONTROL_API_OPERATOR_TOKEN="nginx-validate-not-a-real-token-0123456789ab" \
+    -e NGINX_ENVSUBST_FILTER="^CONTROL_API_OPERATOR_TOKEN$" \
     -v "${NGINX_DIR}/nginx.conf:/etc/nginx/nginx.conf:ro" \
     -v "${NGINX_DIR}/includes:/etc/nginx/includes:ro" \
     -v "${NGINX_DIR}/profile/${admin_include}:/etc/nginx/profile/admin.conf:ro" \
-    -v "${NGINX_DIR}/conf.d.${profile}:/etc/nginx/conf.d:ro" \
+    -v "${NGINX_DIR}/templates.${profile}:/etc/nginx/templates:ro" \
     -v "${NGINX_DIR}/certs:/etc/nginx/certs:ro" \
     "${NGINX_IMAGE}" nginx -t
 }

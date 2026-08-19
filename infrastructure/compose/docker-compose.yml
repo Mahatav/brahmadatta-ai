@@ -48,7 +48,57 @@ services:
       - /tmp:size=640m
       - /var/cache/nginx
       - /var/run
+      # D-088 (T0): NGINX_ENVSUBST_OUTPUT_DIR default. The image's own envsubst
+      # entrypoint step (docker-entrypoint.d/20-envsubst-on-templates.sh, ships in
+      # nginxinc/nginx-unprivileged, no extra tooling) renders templates.dev/'s
+      # *.template file here at container start, before nginx boots — must be writable
+      # even though the rest of the filesystem is read_only. `mode=1777` is required,
+      # not decorative: a bare tmpfs mount over this path comes back `root:root 0775`
+      # (verified bringing model-host-auth up under the same constraint below), which
+      # uid 101 (this image's `nginx` user) cannot write into — the image's own baked-in
+      # /etc/nginx/conf.d is `nginx:root 0775` and only writable because uid 101 OWNS it
+      # there; a plain tmpfs mount does not preserve that ownership. Same idiom
+      # model-host-auth already uses for the identical reason, further down this file.
+      - /etc/nginx/conf.d:mode=1777
     cap_drop: ["ALL"]
+    environment:
+      # D-088 (T0): the real bearer credential nginx injects into the three
+      # control-api-proxied locations (SSE, snapshot upload, /api/) in
+      # templates.dev/brahmadatta.conf.template — see that file's header comment. Exists
+      # only in this container's process environment and the tmpfs-rendered config file
+      # above; the browser never holds or attaches it. Blank-by-default here follows the
+      # SAME "unset = that credential cannot authenticate at all, fails closed"
+      # convention CONTROL_API_REVIEWER_TOKEN/CONTROL_API_ADMIN_TOKEN already use (see
+      # control-api's environment block below) — NOT a hard startup failure, because an
+      # unset value here means every proxied request 401s at control-api exactly as it
+      # did before this change, not a new failure mode.
+      #
+      # Deliberately NOT via the `*env-file` (`x-env`) anchor the way control-api and
+      # command-center use it below — cybersecurity review of this task (T0) flagged
+      # that D-088's literal text ("add the nginx service to the existing x-env anchor")
+      # would give nginx EVERY variable in `.env` (44 at last count: `DJANGO_SECRET_KEY`,
+      # `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, every other role token, ...) as real
+      # container-process environment, even though nginx's own config only ever reads
+      # this one. `docker compose config nginx` demonstrated this concretely before the
+      # fix: an `env_file:` entry loads the WHOLE file into the container's process
+      # environment regardless of which keys any given process actually consumes.
+      # nginx is also the ONLY container with a route off the host (C4) — the single
+      # highest-exposure process in this stack — so it is exactly the wrong place to
+      # carry 43 credentials it has no use for. This mirrors a concern this same file
+      # already treats as worth actively engineering around: see
+      # `MODEL_HOST_BEARER_TOKEN`'s own comment in `.env.example` on why it is declared
+      # in a way that keeps it OUT of `fuzz-worker`'s ambient environment even though
+      # that process never reads it either. Compose resolves `${VAR}` interpolation
+      # below from `--env-file`/the process environment at compose-parse time
+      # regardless of whether a service also declares `env_file:` — so this one
+      # explicit line reaches nginx's container environment with the token it actually
+      # needs, and nothing else does.
+      CONTROL_API_OPERATOR_TOKEN: ${CONTROL_API_OPERATOR_TOKEN:-}
+      # Restricts the entrypoint's envsubst call to this ONE variable name — see the
+      # long comment at the top of templates.dev/brahmadatta.conf.template for why an
+      # unrestricted envsubst pass would corrupt nginx's own `$host`/`$request_uri`/etc.
+      # variable syntax in that file.
+      NGINX_ENVSUBST_FILTER: "^CONTROL_API_OPERATOR_TOKEN$"
     ports:
       - "127.0.0.1:8080:8080"   # plaintext, redirects to 8443
       - "127.0.0.1:8443:8443"   # TLS, self-signed in dev
@@ -60,7 +110,13 @@ services:
       # It lives in profile/ and not includes/ because Docker cannot create a new
       # mountpoint inside an already read-only bind mount.
       - ./nginx/profile/admin-allow.conf:/etc/nginx/profile/admin.conf:ro
-      - ./nginx/conf.d.dev:/etc/nginx/conf.d:ro
+      # D-088 (T0): templates, not a pre-rendered conf.d/ bind mount any more — see
+      # templates.dev/brahmadatta.conf.template's header comment. Mounted at
+      # /etc/nginx/templates (NGINX_ENVSUBST_TEMPLATE_DIR's default), NOT at
+      # /etc/nginx/conf.d — that path is the tmpfs entry above, which the entrypoint
+      # renders into, not a bind mount (Docker cannot create a new mountpoint inside an
+      # already read-only bind mount, same constraint as the profile/ split above).
+      - ./nginx/templates.dev:/etc/nginx/templates:ro
       - ./nginx/certs:/etc/nginx/certs:ro
       - nginx-logs:/var/log/nginx
     networks:

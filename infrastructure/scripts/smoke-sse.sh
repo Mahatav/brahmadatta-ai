@@ -109,13 +109,21 @@ start_proxy() {
   # `${@:+"$@"}` rather than a local array: `set -u` treats an empty array expansion as
   # unbound on bash 3.2, which is what ships with macOS.
   docker rm -f "${PROXY}" >/dev/null 2>&1 || true
+  # D-088 (T0): conf.d.dev/ became templates.dev/ — mounted at /etc/nginx/templates so
+  # the image's own envsubst entrypoint step renders it into /etc/nginx/conf.d before
+  # nginx starts (the default `docker run` command here is plain `nginx`, so the
+  # entrypoint.d scripts run as normal). The stub upstream (sse-stub.py) never checks
+  # the Authorization header, so the exact token value does not matter to this test —
+  # only that it substitutes into a syntactically valid config.
   docker run -d --rm --name "${PROXY}" \
     --network "${NET}" \
     -p "127.0.0.1:${HOST_PORT}:8443" \
+    -e CONTROL_API_OPERATOR_TOKEN="smoke-sse-not-a-real-token-0123456789abcdef" \
+    -e NGINX_ENVSUBST_FILTER="^CONTROL_API_OPERATOR_TOKEN$" \
     -v "${NGINX_DIR}/nginx.conf:/etc/nginx/nginx.conf:ro" \
     -v "${NGINX_DIR}/includes:/etc/nginx/includes:ro" \
     -v "${NGINX_DIR}/profile/admin-allow.conf:/etc/nginx/profile/admin.conf:ro" \
-    -v "${NGINX_DIR}/conf.d.dev:/etc/nginx/conf.d:ro" \
+    -v "${NGINX_DIR}/templates.dev:/etc/nginx/templates:ro" \
     -v "${NGINX_DIR}/certs:/etc/nginx/certs:ro" \
     ${@:+"$@"} \
     "${NGINX_IMAGE}" >/dev/null

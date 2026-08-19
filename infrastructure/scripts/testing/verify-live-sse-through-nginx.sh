@@ -72,13 +72,20 @@ for _ in $(seq 1 60); do
 done
 
 echo "=== starting nginx (committed dev config, unmodified) ==="
+# D-088 (T0): conf.d.dev/ became templates.dev/ — mounted at /etc/nginx/templates so the
+# image's own envsubst entrypoint step renders it into /etc/nginx/conf.d before nginx
+# starts. The token below matches control-api's CONTROL_API_OPERATOR_TOKEN exactly above,
+# so nginx's injected Authorization header (which OVERWRITES whatever curl sends with
+# -H "${AUTH}" further down) authenticates for real, the same way the browser will.
 docker run -d --rm --name "${PROXY}" \
   --network "${NET}" \
   -p "127.0.0.1:${HOST_PORT}:8443" \
+  -e CONTROL_API_OPERATOR_TOKEN="sse-live-verify-operator-token-0123456789ab" \
+  -e NGINX_ENVSUBST_FILTER="^CONTROL_API_OPERATOR_TOKEN$" \
   -v "${NGINX_DIR}/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "${NGINX_DIR}/includes:/etc/nginx/includes:ro" \
   -v "${NGINX_DIR}/profile/admin-allow.conf:/etc/nginx/profile/admin.conf:ro" \
-  -v "${NGINX_DIR}/conf.d.dev:/etc/nginx/conf.d:ro" \
+  -v "${NGINX_DIR}/templates.dev:/etc/nginx/templates:ro" \
   -v "${NGINX_DIR}/certs:/etc/nginx/certs:ro" \
   "${NGINX_IMAGE}" >/dev/null
 
