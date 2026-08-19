@@ -64,6 +64,21 @@ def _lock_mission(mission_id: uuid.UUID) -> Mission:
         ) from exc
 
 
+def _require_consistent_artifact_metadata(artifact: Artifact, info) -> None:
+    """The one residual check D-087/D-088 keep in place of raw cross-mission exclusivity.
+
+    An existing `Artifact` row for this digest whose `kind`/`size_bytes` disagree with
+    what this mission's own materialized/hashed source just produced is a genuine
+    hash-workflow contradiction — under SHA-256 collision resistance it would require
+    a hash break to occur legitimately — and is refused with the same, already-named,
+    already-tested exception `#207`'s cross-mission check used to raise. This is a
+    strictly more precise invariant than "different mission ID," which was never the
+    real risk signal (see D-087's and D-088's records for the full analysis).
+    """
+    if artifact.kind != "snapshot" or artifact.size_bytes != info.bytes_total:
+        raise SnapshotArtifactClaimedError(details={"sha256": artifact.sha256})
+
+
 def authorize_mission(
     mission_id: uuid.UUID,
     payload: AuthorizationRequest,
@@ -130,6 +145,20 @@ def create_mission_snapshot(
     (`SnapshotDigestMismatchError`) — a swapped archive cannot silently inherit the
     caller's claimed hash, because the stored path is keyed by the hash this function
     computed, never by the one it was told.
+
+    Mission-scoped claiming (D-087/D-088, closing `#207`/SEC-27). `Artifact.sha256` is
+    the content-addressed index, not a per-mission lock: a digest already indexed by
+    another mission is a legitimate content-dedup hit, not a conflict, so it is reused
+    rather than refused. `Artifact.mission` is not read as an authorization or
+    access-control gate anywhere downstream (`orchestrator.snapshot._resolve_archive_path`
+    resolves purely by `sha256` against the filesystem), and the real per-mission
+    provenance unit — `Snapshot`, append-only, one row per mission — is untouched by
+    this: every mission that reuses a digest still gets its own fresh `Snapshot` row
+    and independently re-runs and re-earns its own full pipeline. The one case still
+    refused is a genuine hash-workflow contradiction: an existing `Artifact` row for
+    this digest whose `kind`/`size_bytes` disagree with what this mission's own
+    materialized source just produced — that would require a SHA-256 break to occur
+    legitimately, and is a sharper signal than "different mission ID" ever was.
     """
     now = now or timezone.now()
     with transaction.atomic():
@@ -169,22 +198,24 @@ def create_mission_snapshot(
         info = archive.enumerate_members(result.path)
 
         existing_artifact = Artifact.objects.filter(pk=result.sha256).first()
-        if existing_artifact is not None and existing_artifact.mission_id != mission.id:
-            raise SnapshotArtifactClaimedError(details={"sha256": result.sha256})
-        if existing_artifact is None:
-            # SEC-27. The mission-row lock only ever protects *one* mission's row, so
-            # two different missions' transactions never contend for the same lock —
-            # the read above and this write are a check-then-act pair with nothing
-            # spanning both for the cross-mission case specifically. Under real
-            # concurrent writers the loser here does not lose the *property*
-            # (`artifact.sha256` is the primary key, so exactly one Artifact row can
-            # ever exist for a digest regardless of the race) — it loses the
-            # *documented refusal*: without this catch, the loser gets a raw
-            # `IntegrityError` off the unique-violation, which `api.errors` renders as
-            # an unhandled 500 rather than the already-named, already-tested 409 this
-            # exact condition has an exception class for three lines above. Catching
-            # it here turns "correct in outcome, wrong in the telling" into "correct
-            # in both" without changing behavior in the non-racing case at all.
+        if existing_artifact is not None:
+            _require_consistent_artifact_metadata(existing_artifact, info)
+            # D-087/D-088: a digest another mission already indexed is a legitimate
+            # content-dedup hit, not a conflict — reuse the existing Artifact row
+            # rather than reassigning or duplicating it. This mission still earns its
+            # own independent Snapshot row below.
+        else:
+            # The mission-row lock only ever protects *one* mission's row, so two
+            # different missions' transactions never contend for the same lock — the
+            # read above and this write are a check-then-act pair with nothing
+            # spanning both, across missions. Under real concurrent writers the loser
+            # here does not lose the *property* (`artifact.sha256` is the primary key,
+            # so exactly one Artifact row can ever exist for a digest regardless of
+            # the race) — without this catch it would lose the *documented refusal*:
+            # a raw `IntegrityError` off the unique-violation, which `api.errors`
+            # renders as an unhandled 500 rather than a clean outcome. Catching it
+            # here turns "correct in outcome, wrong in the telling" into "correct in
+            # both" without changing behavior in the non-racing case at all.
             #
             # The `create` runs inside its own nested `atomic()` — a savepoint, not a
             # new transaction — deliberately: on Postgres, an `IntegrityError` marks
@@ -206,12 +237,11 @@ def create_mission_snapshot(
                     )
             except IntegrityError:
                 winner = Artifact.objects.get(pk=result.sha256)
-                if winner.mission_id != mission.id:
-                    raise SnapshotArtifactClaimedError(
-                        details={"sha256": result.sha256}
-                    ) from None
-                # The winner is this same mission's own row — a second, harmless race
-                # against itself (e.g. a retried request). Nothing to refuse.
+                _require_consistent_artifact_metadata(winner, info)
+                # The winner's metadata is consistent with what this mission just
+                # produced — a race against a concurrent legitimate ingest of the
+                # same content (this mission's own retry, or another mission's
+                # dedup hit). Nothing to refuse; reuse the winner's row.
 
         snapshot_row = Snapshot.objects.create(
             mission=mission,

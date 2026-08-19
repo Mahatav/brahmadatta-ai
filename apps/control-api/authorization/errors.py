@@ -81,13 +81,20 @@ class SnapshotArtifactUnavailableError(ContractError):
 
 
 class SnapshotArtifactClaimedError(ContractError):
-    """The digest is already registered in the artifact index to another mission."""
+    """An existing artifact index row for this digest disagrees with what this
+    mission's own materialized source just produced (`kind`/`size_bytes`).
+
+    Not raised merely because another mission already indexed the same digest (D-087/
+    D-088): that is a legitimate content-dedup hit and is reused, not refused. This is
+    raised only for a genuine hash-workflow contradiction — the residual, more precise
+    check that replaced the raw cross-mission exclusivity check `#207` removed.
+    """
 
     code = ErrorCode.CONFLICT
     http_status = 409
     default_message = (
-        "That archive digest is registered to a different mission in the artifact "
-        "index."
+        "An existing artifact index entry for that digest has a different kind or "
+        "size than what was just ingested."
     )
 
 
