@@ -113,6 +113,14 @@ def list_patch_candidates(
     return [_patch_candidate(row) for row in rows[offset : offset + limit]], total
 
 
+def patch_candidate_schema(row: PatchCandidate) -> PatchSchema:
+    """Public alias of `_patch_candidate`, for callers outside this module (T-3's
+    `POST /missions/{id}/patches` — the write path hands back the row it just
+    created and needs the identical row -> schema conversion the read path uses, so
+    there is exactly one definition of what a `PatchCandidate` response looks like)."""
+    return _patch_candidate(row)
+
+
 def get_patch_verification(mission_id: UUID, patch_id: UUID) -> VerificationSchema:
     try:
         row = VerificationRecord.objects.get(mission_id=mission_id, patch_id=patch_id)

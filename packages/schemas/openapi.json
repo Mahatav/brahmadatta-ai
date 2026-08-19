@@ -2060,6 +2060,38 @@
         "title": "ModelProvenance",
         "type": "object"
       },
+      "OperatorPatchCandidateRequest": {
+        "additionalProperties": false,
+        "description": "`POST /missions/{id}/patches` (T-3, D-008). An operator-authored unified diff,\nsubmitted for the same finding `PATCH_GENERATE` would otherwise have targeted.\n\nDeliberately carries no `provenance`, `policy_status` or `model` field — the\nserver sets `provenance=OPERATOR_SUPPLIED` unconditionally (an HTTP caller cannot\nclaim `MODEL_GENERATED` for a diff it typed itself) and the real policy gate\n(`orchestrator.patch_policy.evaluate_patch_policy`) computes `policy_status` from\nthe diff and the mission's own policy, exactly as it does for a model-generated\ncandidate. See `orchestrator.operator_candidates.submit_operator_candidate`.",
+        "properties": {
+          "diff": {
+            "description": "Unified diff (`git diff` / `diff -u` format). Verified through the same deterministic gate matrix a model-generated candidate goes through — never accepted on say-so.",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Diff",
+            "type": "string"
+          },
+          "finding_id": {
+            "description": "Which finding this diff addresses. Must belong to this mission.",
+            "format": "uuid",
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "rationale": {
+            "default": "",
+            "description": "Optional operator note on why this diff is believed to fix the finding. Displayed separately from evidence, never treated as evidence.",
+            "maxLength": 5000,
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "diff"
+        ],
+        "title": "OperatorPatchCandidateRequest",
+        "type": "object"
+      },
       "Page_FindingSummary_": {
         "additionalProperties": false,
         "properties": {
@@ -5204,6 +5236,133 @@
           }
         ],
         "summary": "Patch candidates, with provenance and policy status",
+        "tags": [
+          "evidence"
+        ]
+      },
+      "post": {
+        "description": "T-3, D-008. The HTTP-reachable counterpart to PATCH_GENERATE's own model-driven fan-out, for a mission that has already reached PATCH (or is still in VERIFY with its candidate set not yet frozen — see orchestrator.operator_candidates for why a second candidate can still land there). provenance is always OPERATOR_SUPPLIED; the diff is validated by the same deterministic gate matrix (compile, reproducer-eliminated, regression-preserved) a model-generated candidate goes through — never accepted on say-so. A policy-accepted candidate is dispatched into VERIFY through the same Job queue, worker and executor every other candidate uses; a policy-rejected one is recorded but never enqueued.",
+        "operationId": "submitOperatorPatchCandidate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "mission_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Mission Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorPatchCandidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatchCandidate"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          }
+        },
+        "security": [
+          {
+            "BearerTokenAuth": []
+          }
+        ],
+        "summary": "Submit an operator-authored patch candidate",
         "tags": [
           "evidence"
         ]

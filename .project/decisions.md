@@ -7705,3 +7705,305 @@ demo-host" question, since that is a venue/staging decision, not an engineering 
 compose up`) — held back per instruction, since `.project/decisions.md` is a live merge-conflict
 hotspot with five other parallel branches in flight; the orchestrating session coordinates
 merge order.
+
+---
+
+## D-090 — T-3: `POST /missions/{id}/patches`, the HTTP-reachable operator-supplied-candidate path D-084/D-085 found missing · 2026-08-19 · `backend-developer` seat
+
+**Trigger.** D-084/D-085 (§ above) each confirmed, empirically, that no HTTP-reachable
+path existed for an operator to supply a patch candidate: `orchestrator/
+patch_generate_executor.py` only ever calls the live self-hosted model, and the #50
+D7 gate's own acceptance criteria need both a `Verified` and a `Rejected` verdict
+produced in one run — a poor fit for a live, non-deterministic model on a project
+whose kill criterion is about reproducibility. D-008 already permits an
+operator-supplied candidate, explicitly labelled as such; this closes the gap named
+but not implemented in D-084's own recommendation.
+
+**Decision.** Added one new HTTP endpoint, `POST /api/v1/missions/{id}/patches`
+(`api/routers/evidence.py::submit_patch`), and its orchestration function
+(`orchestrator/operator_candidates.py::submit_operator_candidate`). It composes
+three existing, unmodified functions in the order the rest of the pipeline already
+calls them — `orchestrator.candidates.record_patch_candidate` (D-046 freeze + the
+real `orchestrator.patch_policy.evaluate_patch_policy` gate), `orchestrator.
+transitions.transition` (the only sanctioned writer of `Mission.state`, SEC-16), and
+`orchestrator.queue.enqueue_job` (the same `Job` table `run_worker`/
+`run_orchestrator` already drive) — and adds no new verification logic of its own.
+`provenance` is hardcoded to `PatchProvenance.OPERATOR_SUPPLIED`; the request schema
+(`OperatorPatchCandidateRequest`) has no `provenance` field at all, so an HTTP caller
+has no vocabulary to claim `MODEL_GENERATED`. Auth is `OPERATOR_ROLES`, matching
+every other mutating mission endpoint (not `READ_ROLES`).
+
+**One real design call made here, not specified by the task brief**: whether a
+mission with a policy-*rejected* first submission advances to `VERIFY` anyway. It
+does not. `orchestrator.patch_generate_executor._patch_generate_transition_policy`
+(the model-generated case this mirrors) routes a zero-accepted `PATCH_GENERATE` job
+to `HUMAN_REVIEW` — but `TRANSITIONS[HUMAN_REVIEW]` is `frozenset()` (a dead end),
+which would permanently block a legitimate second operator submission after a
+rejected first attempt. This module instead leaves the mission in `PATCH` on a
+rejected candidate (recorded in full, nothing enqueued) and only advances to
+`VERIFY` the moment a candidate is actually policy-accepted — first or later
+submission, either way. Caught by a regression test during implementation (an
+earlier draft always advanced on the first submission regardless of policy outcome,
+producing a mission stuck in `VERIFY` with no job that could ever move it onward).
+
+**Multiple candidates per mission.** D-046's freeze is keyed on `Mission.
+verification_started_at`, set by `record_verification` on the mission's *first*
+`VerificationRecord` — not on `Mission.state == VERIFY`. A mission this endpoint
+already advanced to `VERIFY` can still accept a second operator-supplied candidate as
+long as no verification has run yet, which is what lets `candidate-a-correct-bounds-
+fix.patch` and `candidate-b-rejected-crash-only-fix.patch` both go through **one
+mission, one endpoint call each** — exactly the shape the D7 gate's acceptance
+criteria need.
+
+**Options considered** — (a) this endpoint transitions and enqueues directly (chosen);
+(b) record the candidate only, and require a second, separate "advance to VERIFY"
+call; (c) run `VERIFY` synchronously inside the HTTP request instead of enqueuing a
+`Job`. (b) adds a second HTTP round-trip and a second place to get the freeze/
+transition timing wrong, for no real benefit — the router already has enough
+information in one call. (c) would mean an HTTP request blocks on a real `cmake`/
+`ctest` build inside a `Jail` (seconds to tens of seconds, per D-085's own measured
+numbers) and would step around the same `Job`/worker path a model-generated
+candidate's `VERIFY` job always takes, becoming exactly the "parallel verification
+path" the task brief explicitly ruled out. Rejected.
+
+**Cost implications** — none; reuses existing infrastructure.
+
+**Security implications** — see the review below. Headline: no new attack surface at
+the verification layer (VERIFY's own `packages.sandbox.Jail`/SEC-47/SEC-44
+protections were already designed around an operator-authored diff as a first-class
+threat actor — `orchestrator/verification.py`'s own module docstring says so
+directly, predating this endpoint); this module is a new *front door* into an
+already-hardened path, not a new path.
+
+**Scalability implications** — none beyond the existing `Job` queue's own scaling
+characteristics. One new, real gap flagged, not fixed here: no per-mission cap on how
+many operator-supplied candidates may be submitted before verification starts,
+unlike `PATCH_GENERATE`'s own `mission_policy.patch_generation_attempts` ceiling on
+model-generated fan-out. Left open because every existing `OPERATOR_ROLES` endpoint
+(start/pause/cancel/export) already has zero rate limiting under this project's
+"one named operator, one machine" trust model (`api/auth.py`'s own docstring) — not a
+new inconsistency, but worth a real cap if this endpoint is ever exposed beyond that
+trust model.
+
+**Implementation** — `apps/control-api/orchestrator/operator_candidates.py` (new),
+`apps/control-api/contracts/schemas/evidence.py` (`OperatorPatchCandidateRequest`
+added), `apps/control-api/api/routers/evidence.py` (`submit_patch` added,
+`evidence_repository.patch_candidate_schema` made public for reuse from the write
+side), `apps/control-api/orchestrator/evidence_repository.py` (`_patch_candidate`
+aliased as `patch_candidate_schema`), `docs/03-technical/21-api-specification.md`
+(new § "Operator-supplied candidate submission", `Endpoints added` table row,
+`Evidence API` bullet, and the D-008 fallback-provenance table row updated),
+`packages/schemas/openapi.json` (regenerated via `tools/export_openapi.py`).
+
+**Tests — actually run this session, real output below.**
+
+New: `apps/control-api/api/tests/test_operator_candidate_endpoint.py` (12 fast
+routing/auth/validation tests, no real toolchain) and `apps/control-api/orchestrator/
+tests/test_operator_candidate_submission.py` (the real-toolchain proof: drives
+`candidate-a-correct-bounds-fix.patch` and `candidate-b-rejected-crash-only-fix.patch`
+through the real Django test `Client` calling this endpoint twice against one mission
+with a real, passed `BaselineReport` and a real reproducer artifact, then through the
+real, unmodified `orchestrator/verify_dispatch.py` executor — no scripted
+`GateMatrix`, no monkeypatch — confirming `VERIFIED` for candidate A and `REJECTED`
+for candidate B in one run, then the mission's own terminal `VERIFIED` state via
+any-`VERIFIED`-wins reduction):
+
+```
+$ source /tmp/t5-verify-venv/bin/activate && DJANGO_SECRET_KEY=devkey-not-literally-test \
+  POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m pytest \
+  api/tests/test_operator_candidate_endpoint.py orchestrator/tests/test_operator_candidate_submission.py -v
+...
+api/tests/test_operator_candidate_endpoint.py ...........                [ 91%]
+orchestrator/tests/test_operator_candidate_submission.py .               [100%]
+============================= 12 passed in 14.69s ==============================
+```
+
+Full `apps/control-api` suite, from a clean venv, run twice (the first run's one
+failure, `test_verification.py::test_real_wall_clock_limit_stops_a_hung_build`, is a
+pre-existing, unrelated `os.killpg` process-group-permission flake — passes alone and
+passes on immediate rerun of the full suite; not touched by this task):
+
+```
+$ source /tmp/t5-verify-venv/bin/activate && DJANGO_SECRET_KEY=devkey-not-literally-test \
+  POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m pytest
+...
+679 passed, 11 skipped, 2 warnings in 40.91s
+```
+
+`contracts/tests/test_openapi_dump.py::test_committed_dump_is_current` failed before
+`tools/export_openapi.py` was re-run to pick up the new schema/operation; passes
+after, alongside `test_every_p0_endpoint_is_present` (the path already existed for
+`GET`; adding `POST` to it does not change the path set) and `test_cut_endpoints_are_
+absent`.
+
+**Security review — a real caveat, stated plainly.** CLAUDE.md's standing rule
+("security-sensitive changes need a `cybersecurity` agent review recorded before
+merge") calls for an independent second agent. This session's tool access has no
+Agent/Task-dispatch capability — `Read`/`Write`/`Edit`/`Bash` only — so no such
+independent review was actually run, and none is claimed. What *was* done: this
+developer read `~/.claude/agents/cybersecurity.md` and applied its review checklist
+directly to this diff, covering exactly the two questions the task asked a reviewer
+to check:
+
+1. **Can an operator-supplied patch escape VERIFY's real checks?** No code path in
+   this diff calls `run_verification` or touches `packages.sandbox.Jail` directly —
+   `submit_operator_candidate` only ever enqueues a `Job` row; the same, unmodified
+   `orchestrator/verify_dispatch.py::_verify_executor` claims and runs it, with zero
+   references to `PatchProvenance` anywhere in that module (grepped directly). SEC-47
+   (`Jail`) and SEC-44 (env allowlist) apply identically regardless of how the
+   candidate was recorded. `orchestrator/verification.py`'s own module docstring
+   already names an operator-authored diff as an in-scope adversary for that module
+   ("D-008 sanctions an operator-authored diff through this identical pipeline, and a
+   one-line `CMakeLists.txt` addition ... is registered as a regression test and run
+   by the `ctest` gate") — that hardening predates this endpoint and needed no change.
+2. **Is auth correctly scoped?** `require_role(request, *OPERATOR_ROLES)` is the
+   first line of the handler, matching every other mutating mission endpoint;
+   `test_submitting_a_candidate_requires_operator_role` and `test_submitting_a_
+   candidate_requires_a_token` (both passing, see run above) prove a `REVIEWER` token
+   gets `403` and no token gets `401`.
+
+Additional checks performed against the same diff: cross-mission `finding_id` IDOR
+(`Finding.objects.filter(mission_id=mission.id, id=finding_id)`, tested via `test_a_
+finding_from_another_mission_is_404`); `diff`/`rationale` size caps
+(`max_length=200000`/`5000`, matching the existing `PatchCandidate` schema); no
+request-time code execution (the diff is only parsed structurally by `evaluate_
+patch_policy` at record time — real `git apply`/`cmake`/`ctest` happen later, inside
+`Jail`, in the async worker, never inside this HTTP request); the request/response
+schemas reject unknown fields (`StrictSchema`, `extra="forbid"`, tested). One
+accepted, non-blocking finding: no per-mission cap on operator-submitted candidates
+before verification starts (see Scalability implications above) — **LOW**, consistent
+with every other `OPERATOR_ROLES` endpoint's existing lack of rate limiting, not a
+regression this diff introduces.
+
+**Self-assessed verdict: PASS**, with the LOW finding above logged rather than fixed,
+and the explicit caveat that this is a same-session self-review, not the independent
+`cybersecurity`-seat review CLAUDE.md's standing rule calls for. Recommend the
+orchestrating session actually dispatch the `cybersecurity` agent against this diff
+before merge if a genuinely independent pass is required for this repository's own
+gate.
+
+**Recommendation** — merge once the orchestrating session confirms no conflicts with
+the other in-flight branches touching this file, and once (or in parallel with) an
+actual independent `cybersecurity` agent pass is run against this diff.
+
+**Final approval authority** — CTO (technical); `cybersecurity` holds the
+review/veto CLAUDE.md's standing rule assigns, not yet independently exercised here
+per the caveat above.
+
+## D-091 — Independent `cybersecurity` review of T-3, `POST /missions/{id}/patches` (closes the D-090 gap) · 2026-08-19 · `cybersecurity` seat
+
+**Trigger.** D-090 self-review (§ above) named its own gap plainly: CLAUDE.md's
+standing rule requires an independent `cybersecurity`-seat review of a
+security-sensitive change before merge, and the implementing session had no
+Agent-dispatch tool to obtain one. This entry is that independent pass, run
+directly against `3ef2140` with `Read`/`Bash`/`Grep`, not against D-090's prose.
+
+**Scope.** `orchestrator/operator_candidates.py`, `api/routers/evidence.py`'s
+`submit_patch`, `contracts/schemas/evidence.py`'s `OperatorPatchCandidateRequest`,
+`orchestrator/evidence_repository.py`'s new `patch_candidate_schema` alias, and the
+shared code this new endpoint calls into (`orchestrator/candidates.py::
+record_patch_candidate`, `orchestrator/patch_policy.py`, `orchestrator/
+verify_dispatch.py` / `orchestrator/verification.py`, `api/auth.py`).
+
+**Findings, independently re-derived (not taken from D-090's claims):**
+
+1. **Auth is correctly scoped — verified by reading `api/auth.py` directly, not
+   inferred from a comment.** `require_role(request, *OPERATOR_ROLES)` is
+   line 1 of `submit_patch` (`api/routers/evidence.py:136`); `OPERATOR_ROLES =
+   (Role.OPERATOR, Role.ADMINISTRATOR)` is a strict subset of `READ_ROLES` (which
+   also admits `Role.REVIEWER`) at `api/auth.py:83-84`. Confirmed by re-running
+   `test_submitting_a_candidate_requires_operator_role` (REVIEWER → 403) and
+   `test_submitting_a_candidate_requires_a_token` (no token → 401) — see test run
+   below. No finding.
+2. **No leniency in VERIFY for an operator-supplied candidate.** Grepped
+   `orchestrator/verify_dispatch.py` and `orchestrator/verification.py` for
+   `PatchProvenance`/`provenance`: zero branches on it outside a docstring and a
+   test-name string. `_verify_executor` claims and runs the `Job` this endpoint
+   enqueues through the identical path a `PATCH_GENERATE`-sourced candidate uses —
+   same `Jail` (SEC-47), same env allowlist (SEC-44), same gate matrix. Confirmed
+   directly, not inferred. No finding.
+3. **Diff content handling.** `orchestrator/patch_policy.py::_normalize_path`
+   (pre-existing, unmodified, shared with the model-generated path) rejects
+   `/dev/null`, absolute paths, embedded NUL bytes, and any path segment of `""`,
+   `"."`, or `".."` before a diff's changed-path list is ever produced — this runs
+   at `record_patch_candidate` time, before `VERIFY` is even reached. `git apply`
+   itself (`orchestrator/verification.py:261-262`) additionally refuses unsafe
+   paths by default (no `--unsafe-paths` flag is passed) and only ever runs inside
+   `packages.sandbox.Jail`, in the async worker, never inside the HTTP request —
+   `submit_operator_candidate` only calls `record_patch_candidate` /
+   `transitions.transition` / `queue.enqueue_job`, never `run_verification` or
+   `Jail` directly (confirmed by reading `operator_candidates.py` end to end: no
+   such import exists). Size is capped (`diff: max_length=200000`,
+   `min_length=1` in `OperatorPatchCandidateRequest`). No finding.
+4. **Rationale field.** Capped at `max_length=5000`, stored verbatim
+   (`orchestrator/candidates.py:137`), never fed through `orchestrator/
+   redaction.py` (that module and SEC-48/SEC-50 concern `GateResult.detail` —
+   sanitizer/build tool output that can carry secrets from the *target*
+   repository — a different field with a different threat model: the operator is
+   the trusted, authenticated caller here, not an untrusted repository). This is
+   pre-existing behavior identical to a model-generated candidate's own
+   `rationale` (`orchestrator/patch_generate_executor.py:323` writes it through
+   the same `record_patch_candidate` call), not something this diff changes.
+   **Informational, not a finding against this diff**: neither this field nor a
+   model-generated candidate's `rationale` is HTML/markdown-escaped before
+   rendering; if the Command Center or the Markdown export ever renders it as
+   HTML without escaping, stored-content injection becomes possible from either
+   provenance. Out of this diff's scope (no renderer touched here) — flagged for
+   whichever review next touches the Command Center's patch panel or the
+   Markdown exporter.
+5. **Provenance cannot be spoofed — verified structurally, not by trusting the
+   docstring's claim.** `OperatorPatchCandidateRequest`
+   (`contracts/schemas/evidence.py:535-562`) has no `provenance` field.
+   `StrictSchema.model_config = ConfigDict(extra="forbid")`
+   (`contracts/schemas/common.py:25`) rejects any unknown field, so a caller
+   POSTing `"provenance": "MODEL_GENERATED"` gets a 422, confirmed live by
+   re-running `test_a_caller_cannot_claim_model_generated_provenance`. Belt and
+   suspenders: `PatchCandidate._provenance_matches_model` (`contracts/schemas/
+   evidence.py:324-335`) independently rejects an `OPERATOR_SUPPLIED` row
+   carrying a non-`None` `model`. Two independent enforcement points, not one.
+   No finding.
+6. **Rate limiting.** Grepped the whole `apps/control-api` tree for
+   `ratelimit`/`throttle` (case-insensitive): zero matches anywhere, including
+   every other `OPERATOR_ROLES` mutating endpoint in `api/routers/missions.py`
+   (start/pause/cancel and others, 7 call sites) and `api/routers/system.py`.
+   The "no rate limiting" gap D-090 flagged is confirmed pre-existing across the
+   whole trust boundary, not a new inconsistency this endpoint introduces.
+   **LOW, accepted, not a merge blocker** — matches D-090's own characterization.
+
+**Tests — actually run this session, real output:**
+
+```
+$ source /tmp/t5-verify-venv/bin/activate && DJANGO_SECRET_KEY=cybersec-review-not-literally-test \
+  POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m pytest \
+  api/tests/test_operator_candidate_endpoint.py orchestrator/tests/test_operator_candidate_submission.py -v
+...
+api/tests/test_operator_candidate_endpoint.py ...........                [ 91%]
+orchestrator/tests/test_operator_candidate_submission.py .               [100%]
+============================== 12 passed in 7.78s ===============================
+```
+
+The full `apps/control-api` suite was not independently re-run this session (only
+the two files the merge gate named); D-090's own full-suite run (679 passed, 11
+skipped) is not re-verified here and is not the basis for this verdict.
+
+**Verdict: CLEARED.** No critical or high findings. One LOW finding (rate
+limiting), already accepted and consistent with this project's existing
+"one named operator, one machine" trust model across every other `OPERATOR_ROLES`
+endpoint — not a regression this diff introduces, does not block merge. One
+informational note (rationale/diff rendering escaping) logged for whichever
+review next touches a renderer, not this diff. This satisfies CLAUDE.md's standing
+rule requiring a `cybersecurity` review recorded before merge for this change.
+
+**Options considered** — n/a (review, not a design decision).
+
+**Cost implications** — none.
+
+**Security implications** — closes the D-090 gap; endpoint is cleared to merge.
+
+**Scalability implications** — none beyond the pre-existing, accepted lack of
+per-mission rate limiting noted above.
+
+**Recommendation** — merge. No fix required before merge.
+
+**Final approval authority** — `cybersecurity` (security severity/verdict, per
+this project's standing rule); this entry is that determination.
