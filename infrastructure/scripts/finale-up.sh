@@ -48,6 +48,29 @@ note "compose config valid"
 note "nginx -t (finale profile) passed"
 
 echo
+echo "== confirming every image this run needs is already in the local Docker image store"
+# The finale host has NO internet access at demo time (competition constraint) — every
+# image below (pinned upstream pulls AND this repo's own `build:` images: control-api,
+# worker, db) must already have been pulled/built on THIS SAME Docker daemon while it was
+# still online. `docker compose up` resolves an already-cached digest/tag from the local
+# store with no registry round-trip, and will not silently rebuild an image that already
+# exists — but if any image below is genuinely absent, `up` fails with a raw network error
+# mid-attempt instead of a clear preflight message, which is worse to discover on stage
+# than here. This check does not build or pull anything itself.
+missing_images=0
+while IFS= read -r image_ref; do
+  [[ -z "${image_ref}" ]] && continue
+  if ! docker image inspect "${image_ref}" >/dev/null 2>&1; then
+    printf '  \033[31mmissing locally:\033[0m %s\n' "${image_ref}" >&2
+    missing_images=1
+  fi
+done < <(docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" config --images "$@")
+if [[ "${missing_images}" -eq 1 ]]; then
+  fail "one or more images above are not in the local Docker image store. Pull/build them all WHILE ONLINE, before this host goes offline: 'docker compose --env-file .env -f ${COMPOSE_FILE} build' for this repo's own images (control-api/worker/db), plus a normal 'docker compose ... up -d' once (or 'docker compose ... pull') for the pinned upstream images (nginx, redis, ollama). This check only looks; it never pulls or builds."
+fi
+note "every image this run needs is already present locally"
+
+echo
 echo "== docker compose up"
 docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" up -d --remove-orphans "$@"
 
