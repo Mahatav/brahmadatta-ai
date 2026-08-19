@@ -73,7 +73,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 from uuid import UUID
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from contracts.enums import EventStatus, EventType, MissionStage, MissionState, Severity
@@ -203,12 +203,29 @@ def enqueue_job(
     max_attempts: int | None = None,
     now=None,
 ) -> Job:
-    """Insert one `Job` row. Locks the mission row for the duration, so a caller that
-    checks mission state right before enqueuing (`ensure_jobs_enqueued`,
+    """Insert one `Job` row, or return the existing row for the same `(mission,
+    kind)` pair. Locks the mission row for the duration, so a caller that checks
+    mission state right before enqueuing (`ensure_jobs_enqueued`,
     `advance_out_of_validating`) is not racing a concurrent `pause`/`cancel` HTTP call
     between its check and the insert — the same discipline
     `orchestrator.transitions.transition` uses for `Mission`, applied here because a
     `Job` row is only ever meaningful in the context of the mission row that owns it.
+
+    SEC-42 (#176) / D-086: the mission row lock above serializes two concurrent
+    `enqueue_job` calls for the *same* mission against each other, but it does not by
+    itself stop them from both reaching `Job.objects.create` — `ensure_jobs_enqueued`,
+    the only production caller, does its own "does a row already exist" check with a
+    plain, unlocked `SELECT` *before* calling this function, so two overlapping
+    `ensure_jobs_enqueued()` invocations (two `run_orchestrator` processes racing, or a
+    retry racing an in-flight dispatch) can both see "no row yet" and both call
+    `enqueue_job` for the same `(mission, kind)`. `Job.Meta`'s `job_mission_kind_unique`
+    constraint is what actually prevents the duplicate row; the `create()` call below
+    is wrapped in its own `transaction.atomic()` (a savepoint here, since this already
+    runs inside the mission-lock transaction) and a caught `IntegrityError` degrades to
+    reading back the row the other caller's write produced — the same pattern
+    `workers.baseline.dispatch._persist_report` uses for `BaselineReport`'s race, see
+    that function's own docstring for the savepoint-vs-`TransactionManagementError`
+    detail this mirrors.
     """
     now = now or timezone.now()
     with transaction.atomic():
@@ -220,16 +237,25 @@ def enqueue_job(
                 else default_deadline_seconds(kind, mission.policy or {})
             )
         )
-        return Job.objects.create(
-            mission=mission,
-            kind=kind,
-            state=JobState.QUEUED,
-            payload=payload or {},
-            attempt=1,
-            max_attempts=max_attempts or MAX_ATTEMPTS_BY_KIND.get(kind, 1),
-            run_after=now,
-            deadline_at=deadline,
-        )
+        try:
+            with transaction.atomic():
+                return Job.objects.create(
+                    mission=mission,
+                    kind=kind,
+                    state=JobState.QUEUED,
+                    payload=payload or {},
+                    attempt=1,
+                    max_attempts=max_attempts or MAX_ATTEMPTS_BY_KIND.get(kind, 1),
+                    run_after=now,
+                    deadline_at=deadline,
+                )
+        except IntegrityError:
+            # Someone else's write won the race for (mission, kind). Report *their*
+            # row, not ours — the database, not this in-memory result, is the
+            # terminal artifact. The savepoint above has already been rolled back by
+            # the time we get here, so this query runs against a clean transaction
+            # state (still inside the outer mission-lock transaction).
+            return Job.objects.get(mission=mission, kind=kind)
 
 
 def ensure_jobs_enqueued(*, now=None) -> list[Job]:
@@ -245,6 +271,15 @@ def ensure_jobs_enqueued(*, now=None) -> list[Job]:
     retry via `retry_job`) rather than a new row appearing — which is what makes "does
     a `Job` row for (mission, kind) exist at all" a correct, no-extra-bookkeeping
     "already enqueued" check.
+
+    SEC-42 (#176) / D-086: the existence check below is a plain, unlocked `SELECT`, so
+    it is a race-reduction, not a race-elimination, on its own — two overlapping calls
+    to this function (two `run_orchestrator` processes, or a retry racing an in-flight
+    dispatch) can both pass it for the same `(mission, kind)` before either has
+    written anything. `Job.Meta`'s `job_mission_kind_unique` constraint plus
+    `enqueue_job`'s own `IntegrityError` fallback are what make the *outcome* race-free
+    regardless — this function itself needs no lock, because the function it calls
+    already resolves the race down to "one caller's row wins."
     """
     now = now or timezone.now()
     created: list[Job] = []

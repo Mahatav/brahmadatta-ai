@@ -178,6 +178,14 @@ def test_executor_reports_failed_export_as_failed_outcome(
 
 
 def test_rerunning_the_executor_reuses_the_existing_export(mission, finding, tmp_path, settings):
+    """SEC-42 (#176) / D-086: `job_mission_kind_unique` now makes two literal `Job`
+    rows for `(mission, EXPORT)` impossible, matching production reality — a re-run
+    reuses the *same* row via `retry_job`, it never gets a second one
+    (`orchestrator.queue.ensure_jobs_enqueued`'s own docstring). The second executor
+    call below reuses `first_job` rather than creating a `second_job`, the same way
+    `test_executor_writes_a_durable_bundle_and_policy_routes_to_verified` above
+    reuses `job` after mutating it in place, instead of the pre-fix version's two
+    separately created rows."""
     settings.ARTIFACT_ROOT = tmp_path / "artifacts"
     settings.EXPORT_WORKSPACE_ROOT = tmp_path / "exports"
     _verified_mission(mission, finding)
@@ -186,8 +194,7 @@ def test_rerunning_the_executor_reuses_the_existing_export(mission, finding, tmp
     first = export_executor(_ctx(mission, first_job, tmp_path))
     assert first.result["reused_existing"] is False
 
-    second_job = _job(mission)
-    second = export_executor(_ctx(mission, second_job, tmp_path))
+    second = export_executor(_ctx(mission, first_job, tmp_path))
 
     assert second.outcome is JobOutcome.SUCCEEDED
     assert second.result["reused_existing"] is True

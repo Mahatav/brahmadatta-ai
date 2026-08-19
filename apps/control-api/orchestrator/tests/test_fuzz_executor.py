@@ -186,6 +186,12 @@ def test_unconfigured_image_is_an_infra_failure_not_a_crash(mission: Mission, se
 
 
 def test_a_genuine_jail_error_is_an_infra_failure_and_may_retry(mission: Mission, monkeypatch):
+    """SEC-42 (#176) / D-086: `job_mission_kind_unique` makes a second literal `Job`
+    row for `(mission, FUZZ)` impossible, matching production reality — a retry
+    reuses the *same* row with `attempt` incremented in place (`orchestrator.queue.
+    retry_job`), it never gets a new row. The second attempt below mutates `job` in
+    place instead of the pre-fix version's separately created `job2`."""
+
     def _raise_unavailable(*args, **kwargs):
         raise ContainerUnavailableError("docker daemon did not respond")
 
@@ -199,8 +205,10 @@ def test_a_genuine_jail_error_is_an_infra_failure_and_may_retry(mission: Mission
     assert result.error_code == ErrorCode.SANDBOX_UNAVAILABLE
     assert result.retry is True  # attempt 1 < max_attempts 2
 
-    job2 = _job(mission, attempt=2)
-    result2 = executor_for(JobKind.FUZZ)(_ctx(mission, job2))
+    job.attempt = 2
+    job.state = JobState.RUNNING
+    job.save(update_fields=["attempt", "state"])
+    result2 = executor_for(JobKind.FUZZ)(_ctx(mission, job))
     assert result2.retry is False  # attempts exhausted
 
 
@@ -345,7 +353,14 @@ def test_a_crash_with_no_parseable_sanitizer_report_still_records_a_finding(
 def test_re_running_a_completed_campaign_does_not_duplicate_findings(mission: Mission, monkeypatch):
     """A worker that crashed after `_persist_outcome` committed but before its `Job`
     reached SUCCEEDED must not double the evidence on restart — proven end to end
-    through the executor, not just `record_finding` in isolation."""
+    through the executor, not just `record_finding` in isolation.
+
+    SEC-42 (#176) / D-086: `job_mission_kind_unique` makes a second literal `Job` row
+    for `(mission, FUZZ)` impossible, matching production reality — a worker that
+    crashed mid-job and gets re-claimed re-runs the executor against the *same* `Job`
+    row (still not yet terminal), it never gets a new one. The restart below reuses
+    `job` instead of the pre-fix version's separately created `job2`.
+    """
     outcome = _clean_outcome(executions=4096, crashes=1, excerpt=_REAL_ASAN_CAPTURE)
     monkeypatch.setattr(dispatch, "run_fuzzing_stage", lambda *a, **k: outcome)
 
@@ -359,8 +374,7 @@ def test_re_running_a_completed_campaign_does_not_duplicate_findings(mission: Mi
 
     monkeypatch.setattr(dispatch, "run_fuzzing_stage", _must_not_run_again)
 
-    job2 = _job(mission)
-    result2 = executor_for(JobKind.FUZZ)(_ctx(mission, job2))
+    result2 = executor_for(JobKind.FUZZ)(_ctx(mission, job))
     assert result2.outcome == JobOutcome.SUCCEEDED
     assert Finding.objects.filter(mission=mission).count() == 1
     assert FuzzingReport.objects.filter(mission=mission).count() == 1

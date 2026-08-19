@@ -440,6 +440,39 @@ class Job(models.Model):
             models.Index(fields=["state", "run_after"], name="job_claim_idx"),
             models.Index(fields=["lease_expires_at"], name="job_lease_idx"),
         ]
+        constraints = [
+            # SEC-42 (#176): at most one Job row per (mission, kind), enforced by the
+            # database rather than by `orchestrator.queue.ensure_jobs_enqueued`'s own
+            # unlocked existence check alone. Not scoped to non-terminal states —
+            # `ensure_jobs_enqueued`'s own docstring ("Never a second one... If a retry
+            # is needed, the existing row moves back to QUEUED... rather than a new row
+            # appearing") and a repository-wide grep confirm `Job.objects.create` has
+            # exactly one production call site (`orchestrator.queue.enqueue_job`,
+            # itself called only from `ensure_jobs_enqueued`, which only calls it when
+            # no row for (mission, kind) exists yet); retries reuse the same row via
+            # `retry_job`/`reap_expired_leases`, they never insert a second one — for
+            # every kind except one.
+            #
+            # `JobKind.VERIFY` is the real exception, not test scaffolding: architecture
+            # spec §2.3 decision (b), `orchestrator/verify_dispatch.py`'s own module
+            # docstring ("one job per candidate... not one VERIFY job per mission"),
+            # and D-067 §1 (CTO-approved) all confirm VERIFY fans out one `Job` row per
+            # policy-accepted `PatchCandidate`, keyed by `job.payload["patch_id"]` —
+            # `ensure_jobs_enqueued`'s one-per-mission enqueue path does not yet wire
+            # that fan-out (a separate, pre-existing gap `verify_dispatch.py` itself
+            # flags, out of this task's scope to close), but the schema must not
+            # foreclose the documented design while that gap exists. The real per-unit
+            # idempotency guarantee for VERIFY already lives one level narrower, at
+            # `VerificationRecord.patch`'s own `OneToOneField` (D-067 §1) — this
+            # constraint is deliberately not extended to a `(mission, kind, patch_id)`
+            # shape to cover it too, since SEC-42's own review never identified a gap
+            # there and doing so was not asked for. See D-086.
+            models.UniqueConstraint(
+                fields=["mission", "kind"],
+                condition=~models.Q(kind="VERIFY"),
+                name="job_mission_kind_unique",
+            ),
+        ]
 
 
 class BaselineReport(models.Model):
@@ -501,8 +534,20 @@ class Finding(models.Model):
     class Meta:
         db_table = "finding"
         ordering = ["detected_at"]
-        indexes = [
-            models.Index(fields=["mission", "fingerprint"], name="finding_fp_idx"),
+        constraints = [
+            # SEC-42 / D-083 §4 (#176): `orchestrator.findings.record_finding`
+            # deduplicates by (mission, fingerprint) under the mission row lock alone
+            # — no database constraint backed it up before this. `Finding.objects.
+            # create` has exactly one production call site (`record_finding`, which
+            # only reaches it after finding no existing row for the same pair), so a
+            # plain `UniqueConstraint` replaces the old non-unique `finding_fp_idx`
+            # rather than sitting alongside it — Postgres already builds a unique
+            # index over these two columns to enforce this, which serves every query
+            # `finding_fp_idx` served, so keeping both would be a redundant index. See
+            # D-086.
+            models.UniqueConstraint(
+                fields=["mission", "fingerprint"], name="finding_mission_fingerprint_unique"
+            ),
         ]
 
 
