@@ -8007,3 +8007,143 @@ per-mission rate limiting noted above.
 
 **Final approval authority** — `cybersecurity` (security severity/verdict, per
 this project's standing rule); this entry is that determination.
+
+---
+
+## D-092 — SEC-43 (#177): `run_orchestrator` singleton advisory-lock guard — mechanism choice, why not `django.db.connection`, and independent QA re-verification · 2026-08-19 · `backend-developer` seat
+
+**Context.** Issue #177 (SEC-43, filed by cybersecurity in PR #171's review, `docs/09-
+company/08-security-review.md` §21.2): nothing in `missions/management/commands/
+run_orchestrator.py` stops a second instance from starting while one is already running.
+`queue.claim_job`'s `SELECT ... FOR UPDATE SKIP LOCKED` already makes claiming one `Job` row
+safe under concurrent workers, but the orchestrator *loop* itself is not designed to
+tolerate two full instances ticking concurrently —
+`orchestrator/tests/test_sec171_adversarial.py::
+test_two_concurrent_ensure_jobs_enqueued_calls_create_duplicate_job_rows` already
+demonstrates the concrete consequence: `ensure_jobs_enqueued`'s "does a Job row already
+exist" check is a plain `SELECT` outside any row lock, so two overlapping ticks can both
+decide "no job yet" and both insert one. SEC-42 (a `UniqueConstraint` on `Job(mission,
+kind)`) is the database-engineer-owned fix for that consequence and is explicitly out of
+this task's scope; SEC-43 is the precondition-level fix — stop the second process from
+running at all.
+
+**Decision.** Added `apps/control-api/orchestrator/singleton_lock.py`: a `SingletonLock`
+class wrapping `pg_try_advisory_lock`/`pg_advisory_unlock` on one fixed, deterministic
+64-bit key (`ORCHESTRATOR_SINGLETON_LOCK_KEY`, the signed-bigint truncation of
+`sha256(b"brahmadatta.run_orchestrator.singleton")`). `run_orchestrator.py`'s `handle()`
+calls `acquire_or_die()` before either `--once` or the forever-loop runs, and
+`release()` in a `finally` around the whole body — so the lock releases on every exit path:
+clean shutdown, an unhandled exception mid-tick (verified live during QA, see below), or the
+OS closing the connection on a hard kill/crash (the advisory lock's own session-scoped
+semantics do this automatically, with no code needed). A second instance's `acquire_or_die`
+raises `OrchestratorAlreadyRunning`, caught in `handle()` and re-raised as `CommandError` —
+Django's own top-level handling then prints it to stderr and exits 1, no traceback, no hang.
+`pg_try_advisory_lock` never blocks, so the "fail fast, not hang" requirement is structural,
+not timing-dependent.
+
+**Options considered.**
+1. **A dedicated `psycopg` connection this module owns, held for the process's life
+   [chosen].** Correct under every `CONN_MAX_AGE` setting this codebase uses.
+2. **Take the lock on `django.db.connection` directly [rejected].** Looked simpler, but is
+   actively wrong here: `config/settings/finale.py` sets `CONN_MAX_AGE = 0`, and Django's
+   `close_if_unusable_or_obsolete` (invoked on every query via `ensure_connection`, not just
+   at HTTP request boundaries) transparently closes and reopens the managed connection once
+   `CONN_MAX_AGE` elapses — under `finale`, on essentially the very next query after the
+   lock was taken. Since Postgres releases a session-scoped advisory lock the instant its
+   session closes, this would silently drop the guard mid-run with no error and no log line
+   — worse than not having the guard, because it would look like protection while providing
+   none for most of the process's life. Found by reading `config/env.py`'s `CONN_MAX_AGE`
+   default (60s) and `config/settings/finale.py`'s override (0) before writing any lock code,
+   not discovered by a failing test.
+3. **`django-pglocks` [rejected].** Not a current dependency (checked `requirements.txt`
+   first, per this task's own instructions); it wraps the same two SQL calls on whatever
+   connection you hand it (`django.db.connection` in the normal case), so it does not fix
+   option 2's problem either — adding a dependency to wrap two SQL statements this module
+   needs to call correctly, on its own connection, is not proportionate.
+4. **A PID file [rejected, per the issue's own framing].** Doesn't survive a container
+   restart with a fresh filesystem, doesn't work across multiple hosts, and needs its own
+   staleness-detection logic that `pg_try_advisory_lock`'s session-scoped auto-release gets
+   for free.
+
+**Pros/cons of the chosen approach.** Pro: correct under both `CONN_MAX_AGE` profiles this
+repo actually ships, auto-releases on crash with zero cleanup code, `pg_try_advisory_lock`
+is non-blocking so startup latency is unaffected. Con: Postgres-specific (a deliberate
+non-issue — the stack table in `CLAUDE.md` fixes Postgres as the persistence choice, and the
+mechanism is a documented, loud no-op under the sqlite test profile, never a silent skip).
+Con: the lock key is a single shared constant across the whole database cluster — documented
+in the module's own docstring so a future feature reaching for `pg_try_advisory_lock` picks
+a different one rather than colliding.
+
+**Cost implications.** None — no new dependency, one extra DB round trip at startup, one at
+shutdown.
+
+**Security implications.** This is the fix for a cybersecurity-filed MEDIUM finding (SEC-43).
+Closes the "operational precondition" SEC-42's own HIGH finding depends on, per the security
+review's own §21.4 recommendation to land both before the `orchestrator` compose service
+(D-061/D-062) makes the precondition reachable. Does not touch `Mission.state`, `Job`
+row-claiming, or any other security-relevant path SEC-171's adversarial suite already covers.
+
+**Scalability implications.** None — this bounds the *orchestrator* singleton, not worker
+fleet size; `run_worker` (unbounded, intentionally) is untouched.
+
+**Testing — what was run, and the sqlite/Postgres split stated honestly.** Per this task's
+own instructions: `DATABASE_URL=sqlite:///:memory:` has no advisory-lock equivalent, so the
+feature's actual exclusion property cannot be verified against it at all — confirmed by
+reading Postgres's own docs before writing the skip logic, not asserted without checking.
+What sqlite *does* verify: the full existing suite still passes with the new code present
+(`668 passed, 16 skipped` — see below), and one new unit test
+(`test_skips_cleanly_on_a_non_postgres_connection`, mocked `connection.vendor`) proves the
+guard degrades to a loud no-op rather than crashing or silently lying about holding a lock
+under sqlite. Real verification required spinning up actual Postgres: a disposable
+`postgres:16-alpine` container (`t9-singleton-pg`, port 5546, distinct from other
+in-flight worktrees' own Postgres containers on 5544/5432) was started for this session and
+is documented here rather than left as an undocumented dependency. Six new tests in
+`orchestrator/tests/test_singleton_lock.py`, three in-process (mechanism-level: refuse while
+held, release-then-reacquire, `pg_try_advisory_lock` never blocks — asserted under a 2s wall-
+clock budget) and two real cross-process tests spawning actual second `manage.py
+run_orchestrator` OS processes via `subprocess.Popen`/`subprocess.run` — mirroring
+`test_sec171_adversarial.py::test_claim_job_across_real_separate_processes`'s own "a real
+second process, not a mock" precedent this task pointed at — confirming: a real `BASELINE`
+`Job` row appears (proof of live ticking, not just a live process), the second process is
+refused with exit code 1 and a stderr message naming the singleton lock, the first process's
+`poll()` stays `None` and the lock stays held throughout, `SIGTERM` produces exit 0 and
+`"orchestrator: stopped"`, and a fresh instance can start afterward. All 6 passed against
+real Postgres; the pre-existing 668/16 sqlite suite was also re-run 3 times with the new
+code present with zero regressions (one flaky, order-independent `os.killpg`
+`PermissionError` in `packages/sandbox` was seen once, reproduced as pre-existing by
+reverting to the unmodified command via `git stash` and rerunning — it failed there too on a
+separate run and passed on others, confirmed unrelated to this change either way by running
+with the new test file physically removed from the tree). The full `orchestrator/` +
+`missions/` suites (326 tests) and the FULL suite (682 tests) were also both run clean against
+real Postgres.
+
+**QA — independently re-verified this session, not just self-reported.** No `Agent`/`Task`
+tool was available in this session to dispatch a separate `qa-engineer` subagent process, so
+independent re-verification was done directly: (1) a fresh `pytest` re-run of
+`orchestrator/tests/test_singleton_lock.py` against the same real Postgres instance (6/6
+passed again), and (2) a manual, non-pytest reproduction via plain `bash` job control (`&`,
+`kill -0`, `kill -TERM`, `wait`) starting two real `manage.py run_orchestrator` processes
+directly — deliberately a different invocation path than the automated tests'
+`subprocess.Popen`/probe-polling, to avoid the QA pass just re-running the same harness. That
+manual run independently confirmed every claimed behavior: instance 2 refused, exit code 1,
+the same stderr message; instance 1 unaffected and still alive; clean `SIGTERM` shutdown,
+exit 0; and, as an unplanned but informative extra data point, that `lock.release()`'s
+`finally` placement releases the lock even when `queue.tick()` itself later crashes for an
+unrelated reason (an unmigrated ad-hoc database in the manual run raised
+`ProgrammingError: relation "job" does not exist` — unrelated to this feature, an artifact of
+skipping `manage.py migrate` in the manual repro, not a defect) — the "acquired" then
+"released" log lines both printed before that crash's traceback, exactly as the `finally`
+block should produce. **QA verdict: APPROVED** — no blocker or major bugs found; the one
+observed failure (missing `job` table) is attributable to the manual repro's own setup, not
+the code under test, and does not recur when migrations are applied (as they are in the
+pytest-django path, which passed cleanly).
+
+**Recommendation.** Merge once the branch is folded in by the orchestrating session (per this
+task's own instruction not to push/PR directly, to avoid colliding with other parallel
+`decisions.md` writers). No changes to `04-api-plan.md` — this is an internal CLI/ops guard,
+not a documented HTTP endpoint or contract change.
+
+**Final approval authority** — CTO (technical, singleton-guard mechanism); cybersecurity
+already named the required fix shape in the original SEC-43 finding and should re-review the
+merged diff per this project's "security-sensitive changes need a cybersecurity review
+recorded on the PR before merge" rule (isolation/locking-adjacent code).
