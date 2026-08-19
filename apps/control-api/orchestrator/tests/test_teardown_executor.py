@@ -162,12 +162,19 @@ def test_executor_reports_infra_fault_as_retryable_failure(monkeypatch, mission)
 
 def test_second_teardown_run_is_a_safe_no_op(monkeypatch, mission):
     """Idempotency (D-061 §3's TEARDOWN-shaped obligation): re-running teardown on a
-    mission with nothing left to release must not raise or report a fake failure."""
+    mission with nothing left to release must not raise or report a fake failure.
+
+    SEC-42 (#176) / D-086: `job_mission_kind_unique` makes a second literal `Job` row
+    for `(mission, TEARDOWN)` impossible, matching production reality — a re-run
+    reuses the *same* row, it never gets a new one. Both calls below run against one
+    `job` instead of the pre-fix version's two separately created rows.
+    """
     reaper = FakeReaper(())  # nothing found to release, same as a real empty reaper
     monkeypatch.setattr(teardown, "default_reapers", lambda: (reaper,))
 
-    first = teardown_executor(_ctx(_job(mission), mission))
-    second = teardown_executor(_ctx(_job(mission), mission))
+    job = _job(mission)
+    first = teardown_executor(_ctx(job, mission))
+    second = teardown_executor(_ctx(job, mission))
 
     for result in (first, second):
         assert result.outcome is JobOutcome.SUCCEEDED

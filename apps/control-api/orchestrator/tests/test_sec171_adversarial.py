@@ -5,6 +5,17 @@ enqueue-side race the author's own tests do not cover. Run against real Postgres
 
     DATABASE_URL=postgresql://brahmadatta:secpg171@localhost:55432/brahmadatta_sec171 \
         python -m pytest orchestrator/tests/test_sec171_adversarial.py -q -s
+
+SEC-42 (#176) / D-086 update: the enqueue-side race this file's §2 originally found
+(no unique constraint on `Job(mission, kind)`, live duplicate rows reproduced under
+real Postgres) has a real fix now -- `job_mission_kind_unique`
+(`missions/models.py`, conditional: excludes `kind="VERIFY"`, which fans out one job
+per candidate by design, see that constraint's own comment) plus an `IntegrityError`
+catch in `orchestrator.queue.enqueue_job`. The three tests in §2 below are updated in
+place to assert the fixed behavior rather than deleted -- this file is this project's
+adversarial record of SEC-42/#171, and a record that silently stopped matching
+reality would be worse than none. Every other section (§1, §3) is untouched; neither
+finding it covers has changed.
 """
 
 from __future__ import annotations
@@ -143,21 +154,25 @@ def test_claim_job_across_real_separate_processes(mission):
 # ------------------------------------------------------------------------------------
 
 
-def test_no_db_constraint_prevents_two_job_rows_for_the_same_mission_and_kind(mission):
-    """Baseline proof, no timing needed: nothing at the schema level stops a second
-    enqueue_job call for a (mission, kind) pair that already has a row. If the
-    application-level existence check in ensure_jobs_enqueued is ever bypassed or
-    raced, Postgres will not catch it.
+def test_a_db_constraint_now_prevents_two_job_rows_for_the_same_mission_and_kind(mission):
+    """SEC-42 (#176) / D-086: this used to be
+    `test_no_db_constraint_prevents_two_job_rows_for_the_same_mission_and_kind` and
+    proved the opposite of what it now asserts -- `job_mission_kind_unique` plus
+    `enqueue_job`'s `IntegrityError` catch mean a second `enqueue_job` call for a
+    `(mission, kind)` pair that already has a row now returns *that* row instead of
+    creating a second one, even with no timing/locking involved at all.
     """
     walk_to(mission, MissionState.BASELINE)
     job1 = queue.enqueue_job(mission.id, JobKind.BASELINE, now=NOW)
     job2 = queue.enqueue_job(mission.id, JobKind.BASELINE, now=NOW)
-    assert job1.id != job2.id
-    assert Job.objects.filter(mission_id=mission.id, kind=JobKind.BASELINE).count() == 2
+    assert job1.id == job2.id
+    assert Job.objects.filter(mission_id=mission.id, kind=JobKind.BASELINE).count() == 1
 
 
 @_requires_real_row_locking
-def test_two_concurrent_ensure_jobs_enqueued_calls_create_duplicate_job_rows(mission):
+def test_two_concurrent_ensure_jobs_enqueued_calls_no_longer_create_duplicate_job_rows(
+    mission,
+):
     """Forces the real race: two threads both run ensure_jobs_enqueued() for the same
     mission, with thread A paused (via a monkeypatched Job.objects.create) *after* its
     `exists()` check returns False but *before* its INSERT commits. Thread B's own
@@ -167,6 +182,13 @@ def test_two_concurrent_ensure_jobs_enqueued_calls_create_duplicate_job_rows(mis
     run_orchestrator.py's management command prevents (no advisory lock, no PID
     file, no singleton check) -- e.g. a supervisor restart that starts a new
     `run_orchestrator` before confirming the old one exited.
+
+    SEC-42 (#176) / D-086: previously an informational test ("the point is whether
+    n == 1 or n == 2") because nothing yet made n == 1 guaranteed. `job_mission_kind_
+    unique` plus `enqueue_job`'s `IntegrityError` catch now make it a hard assertion.
+    Thread B's own `Job.objects.create` call (inside `enqueue_job`, after it acquires
+    the mission row lock thread A already committed and released by the time B gets
+    there) hits the constraint and is caught, returning thread A's row instead.
     """
     walk_to(mission, MissionState.BASELINE)
     assert not Job.objects.filter(mission_id=mission.id, kind=JobKind.BASELINE).exists()
@@ -208,32 +230,43 @@ def test_two_concurrent_ensure_jobs_enqueued_calls_create_duplicate_job_rows(mis
 
     rows = Job.objects.filter(mission_id=mission.id, kind=JobKind.BASELINE)
     n = rows.count()
-    print(f"\n[SEC-171] duplicate-enqueue race: {n} Job row(s) created for one "
-          f"(mission, kind) pair from two concurrent ensure_jobs_enqueued() calls")
-    if n > 1:
-        print(f"[SEC-171] job ids: {[str(r.id) for r in rows]}")
-    assert n >= 1  # informational -- the point is whether n == 1 or n == 2
+    print(f"\n[SEC-171] duplicate-enqueue race (post-D-086 fix): {n} Job row(s) "
+          f"created for one (mission, kind) pair from two concurrent "
+          f"ensure_jobs_enqueued() calls")
+    assert n == 1, f"expected exactly one Job row, found {n}: {[str(r.id) for r in rows]}"
+    # Neither caller raised -- both got a (the same) row back.
+    assert len(results["A"]) == 1 and len(results["B"]) == 1
+    assert results["A"][0].id == results["B"][0].id == rows.first().id
 
 
 @_requires_real_row_locking
-def test_duplicate_job_rows_are_both_independently_claimable_by_different_workers(mission):
-    """If the race above does produce two rows, confirm the consequence: two
-    different workers can each successfully claim one, and both would then run the
-    same JobKind's executor concurrently for the same mission -- the double-execution
-    outcome D-064 #1's idempotency reasoning assumes cannot happen.
+def test_duplicate_job_rows_can_no_longer_be_independently_claimed_by_different_workers(
+    mission,
+):
+    """This used to confirm the consequence of the (then-real) duplicate-row bug: two
+    different workers could each successfully claim one row and both would then run
+    the same JobKind's executor concurrently for the same mission -- the
+    double-execution outcome D-064 #1's idempotency reasoning assumes cannot happen.
+
+    SEC-42 (#176) / D-086: there is no second row to claim anymore.
+    `queue.enqueue_job` called twice for the same `(mission, kind)` now returns the
+    *same* row both times, so only one worker can ever claim it -- the second
+    `claim_job` call correctly finds nothing left to claim.
     """
     walk_to(mission, MissionState.BASELINE)
     job1 = queue.enqueue_job(mission.id, JobKind.BASELINE, now=NOW)
     job2 = queue.enqueue_job(mission.id, JobKind.BASELINE, now=NOW)
+    assert job1.id == job2.id
+    assert Job.objects.filter(mission_id=mission.id, kind=JobKind.BASELINE).count() == 1
 
     claimed1 = queue.claim_job("worker-1", now=NOW)
     claimed2 = queue.claim_job("worker-2", now=NOW)
 
-    assert claimed1 is not None and claimed2 is not None
-    assert {claimed1.id, claimed2.id} == {job1.id, job2.id}
-    print(f"\n[SEC-171] both duplicate rows independently claimed: "
-          f"worker-1={claimed1.id} worker-2={claimed2.id} -- both would now run "
-          f"BASELINE concurrently for mission {mission.id}")
+    assert claimed1 is not None and claimed1.id == job1.id
+    assert claimed2 is None
+    print(f"\n[SEC-171] no duplicate row to claim (post-D-086 fix): "
+          f"worker-1={claimed1.id} worker-2=None -- only one worker can ever run "
+          f"BASELINE for mission {mission.id}")
 
 
 # ------------------------------------------------------------------------------------

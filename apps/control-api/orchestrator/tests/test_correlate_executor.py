@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from django.db import IntegrityError
 
 from contracts.enums import FindingCategory
 from missions.models import Finding, Job, JobKind, JobState, Mission
@@ -119,33 +120,31 @@ def test_finding_rows_win_even_when_fuzz_job_also_reports_a_positive_crash_count
     assert "crashes_found" not in result.result
 
 
-def test_only_the_latest_terminal_fuzz_job_by_finished_at_is_used(mission):
-    """A mission can accumulate more than one terminal `FUZZ` job (e.g. a retried
-    campaign). `_latest_terminal_fuzz_job` must pick the one that finished last, not
-    the first/last row inserted into the database -- so the earlier-finishing job is
-    created *second* here specifically to rule out "just picks insertion order"."""
+def test_a_second_terminal_fuzz_job_for_the_same_mission_is_now_database_impossible(mission):
+    """SEC-42 (#176) / D-086: this is the reworked version of what used to be
+    `test_only_the_latest_terminal_fuzz_job_by_finished_at_is_used` -- before
+    `job_mission_kind_unique` existed, a mission really could accumulate more than
+    one terminal `FUZZ` job for the reason SEC-42's own review demonstrated live (two
+    racing `ensure_jobs_enqueued()` calls), and `_latest_terminal_fuzz_job`
+    (`orchestrator/correlate_executor.py`) picking the row with the latest
+    `finished_at` -- not insertion order -- was a real, exercised code path, not
+    speculative defense.
+
+    That row-level scenario is now refused by the database itself: a second `Job`
+    row for `(mission, FUZZ)` cannot be created at all once the first exists, so this
+    test instead proves *that*, directly, rather than continuing to construct a
+    now-illegal fixture. `_latest_terminal_fuzz_job`'s own `.order_by("-finished_at")`
+    is left exactly as backend-developer wrote it -- this task's own scope is the
+    schema, not `correlate_executor.py` -- but it is worth backend-developer's own
+    note that this ordering is now unreachable defense-in-depth for `FUZZ`
+    specifically, not a live path, the moment this constraint lands.
+    """
     _terminal_fuzz_job(mission, crashes_found=0)
-    stale_positive = Job.objects.get(mission=mission, kind=JobKind.FUZZ)
-    stale_positive.result = {"crashes_found": 7}
-    stale_positive.finished_at = NOW - timedelta(hours=1)
-    stale_positive.save(update_fields=["result", "finished_at"])
 
-    latest_clean = Job.objects.create(
-        mission=mission,
-        kind=JobKind.FUZZ,
-        state=JobState.SUCCEEDED,
-        result={"crashes_found": 0},
-        run_after=NOW,
-        deadline_at=NOW + timedelta(hours=1),
-        finished_at=NOW,
-    )
-    assert latest_clean.finished_at > stale_positive.finished_at
+    with pytest.raises(IntegrityError):
+        _terminal_fuzz_job(mission, crashes_found=7)
 
-    result = executor_for(JobKind.CORRELATE)(_ctx(mission))
-
-    assert result.result["correlated"] is False
-    assert result.result["source"] == "no_signal"
-    assert result.result["crashes_found"] == 0
+    assert Job.objects.filter(mission=mission, kind=JobKind.FUZZ).count() == 1
 
 
 @pytest.mark.parametrize(
