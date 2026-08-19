@@ -26,6 +26,7 @@
 - ~~`GET /api/v1/missions/{id}/git-bisect`~~ — **superseded/cut at D1.** Automated bisect is P1-1, in the `CUT` milestone (D-014).
 - `GET /api/v1/missions/{id}/fuzzing`
 - `GET /api/v1/missions/{id}/patches`
+- `POST /api/v1/missions/{id}/patches` — **added post-D1 (T-3, 2026-08-19, D-008).** Submit an operator-authored unified diff; see § Operator-supplied candidate submission below.
 - `GET /api/v1/missions/{id}/patches/{patch_id}/verification`
 - `GET /api/v1/missions/{id}/evidence`
 - `POST /api/v1/missions/{id}/export`
@@ -87,6 +88,7 @@ Implemented in `apps/control-api/`, published as `packages/schemas/openapi.json`
 | `GET /api/v1/missions/{id}/baseline` | P0-5 and the D3 gate are stated in baseline counts; the UI needs them addressable without pulling the whole evidence bundle. |
 | `GET /api/v1/system/sandboxes` | Replaces `GET /system/gpu-leases` (D-015). P0-14 teardown still applies to whatever compute a run started. |
 | `POST /api/v1/system/sandboxes/{sandbox_id}/teardown` | Replaces the GPU-lease teardown, same reason. |
+| `POST /api/v1/missions/{id}/patches` | **Added post-D1 (T-3, 2026-08-19, D-008).** No HTTP-reachable path existed for an operator-supplied candidate (D-084, D-085). See § Operator-supplied candidate submission above. |
 
 ### Endpoints cut
 
@@ -142,6 +144,65 @@ the competition differentiator.
 The orchestrator still has to fan out over candidates *inside* the PATCH and VERIFY
 stages rather than loop `VERIFY → PATCH` — that half is issues #12 and #80.
 
+### Operator-supplied candidate submission — `POST /api/v1/missions/{id}/patches` (T-3, 2026-08-19)
+
+**Why this exists.** Three live rehearsals of the #50 D7 gate (D-084, D-085) found no
+HTTP-reachable path for an operator to supply a patch candidate —
+`orchestrator/patch_generate_executor.py` only ever calls the live self-hosted model.
+The gate's own acceptance criteria need **both** a `Verified` and a `Rejected` verdict
+produced in one run, which a live, non-deterministic model is a poor fit for on a
+project whose kill criterion is about reproducibility. D-008 already permits an
+operator-supplied candidate, explicitly labelled as such; this endpoint is the first
+HTTP surface that reaches it. `demo/repositories/pktcfg/patches/` already ships the
+fixture pair this endpoint is exercised against: `candidate-a-correct-bounds-fix.patch`
+(→ `Verified`) and `candidate-b-rejected-crash-only-fix.patch` (→ `Rejected`).
+
+**Request** — `OperatorPatchCandidateRequest`: `finding_id` (UUID, must belong to the
+mission), `diff` (unified diff, ≤200000 chars), `rationale` (optional, ≤5000 chars).
+No `provenance` field: the server always sets `PatchProvenance.OPERATOR_SUPPLIED`, so
+an HTTP caller has no vocabulary to claim `MODEL_GENERATED` for a diff it typed itself.
+
+**Response** — `201 PatchCandidate` (the same schema `GET .../patches` already
+returns), with `provenance=OPERATOR_SUPPLIED`, `model=null`, and `policy_status` from
+the same deterministic `orchestrator.patch_policy.evaluate_patch_policy` gate a
+model-generated candidate is evaluated against — never accepted on say-so.
+
+**Auth** — `OPERATOR_ROLES` (operator or administrator), matching every other
+mutating mission endpoint. Not reachable by `REVIEWER`.
+
+**Mission state** — the mission must be in `PATCH` (the point `PATCH_GENERATE` would
+normally run) or already in `VERIFY` with no verification recorded yet (D-046's
+freeze is keyed on `Mission.verification_started_at`, set on the *first*
+`VerificationRecord`, not on `Mission.state`, so a second operator-supplied candidate
+can still land against a mission this same endpoint already advanced — this is what
+lets `candidate-a` and `candidate-b` both go through one mission, one endpoint call
+each). Any other state is `409 INVALID_STATE_TRANSITION`.
+
+**What happens on a call**, composed entirely from existing, unmodified functions —
+no parallel verification path and no shortcut around any gate:
+
+1. `orchestrator.candidates.record_patch_candidate` — the same D-046 freeze check and
+   the same real policy gate a model-generated candidate goes through.
+2. If policy-accepted and the mission is still in `PATCH`:
+   `orchestrator.transitions.transition(..., MissionState.VERIFY)` — the *only*
+   sanctioned writer of `Mission.state` (SEC-16); this module never assigns it
+   directly.
+3. If policy-accepted: `orchestrator.queue.enqueue_job(..., JobKind.VERIFY,
+   payload={"patch_id": ...})` — the same `Job` table `run_worker`'s claim loop and
+   `run_orchestrator`'s `dispatch_terminal_jobs` already drive for every other kind.
+   The job is executed by the real, unmodified `orchestrator/verify_dispatch.py`
+   executor (real `git apply`/`cmake`/`ctest` inside a `packages.sandbox.Jail`,
+   SEC-47) and routed onward by its real, unmodified transition policy.
+4. A policy-*rejected* candidate is recorded in full (visible on `GET .../patches`,
+   with its own `PATCH_POLICY_EVALUATED` event) but the mission is left exactly where
+   it was, and nothing is enqueued — a mission with nothing accepted never advances
+   into a `VERIFY` stage with no job that could ever move it onward.
+
+Implemented in `apps/control-api/orchestrator/operator_candidates.py` and
+`apps/control-api/api/routers/evidence.py::submit_patch`. Real-toolchain proof of
+both verdicts in one run, through this endpoint: `apps/control-api/orchestrator/
+tests/test_operator_candidate_submission.py`.
+
 ### The D3 gate signal
 
 The D3 kill criterion is written as the literal string `BASELINE_PASSED`. It is an
@@ -164,7 +225,7 @@ remembers to set:
 | Reproducer replay (#83) | `FindingSummary.discovery_method` is **required with no default** — `FUZZING_CAMPAIGN`, `DIRECT_HARNESS` or `REPLAYED_REPRODUCER` — and a replayed finding must name its `replay_source` while a live one may not carry one. `FuzzingReport.mode` is required, and `NOT_RUN` cannot report executions or crashes |
 | Gate evidence | `GateResult.evidence_source` is **required with no default** (D-049). A gate may only `PASS` on `TOOL_EXECUTION` with a named tool; a `NOT_RUN` gate may not claim `TOOL_EXECUTION` at all. A replayed artifact is recordable and displayable and **cannot pass a gate** — so a run whose fuzzer never executed cannot claim the renewed-fuzz gate |
 | Subprocess jail (#81) | `IsolationMode` is **required with no default** on both `SandboxStatus` and `EvidenceBundle` (D-049 — the bundle previously defaulted to the stronger claim); `SUBPROCESS_JAIL` cannot be reported as `ROOTLESS_CONTAINER` |
-| Operator-supplied patch (D-008) | `PatchCandidate` validator: `MODEL_GENERATED` requires `ModelProvenance`, `OPERATOR_SUPPLIED` forbids it |
+| Operator-supplied patch (D-008) | `PatchCandidate` validator: `MODEL_GENERATED` requires `ModelProvenance`, `OPERATOR_SUPPLIED` forbids it. `POST /missions/{id}/patches` (T-3, § above) never accepts a `provenance` field from the caller at all — the server sets `OPERATOR_SUPPLIED` unconditionally, so an HTTP submission has no vocabulary to claim it came from the model. |
 
 `EvidenceBundle.substitutions` lists every fallback used, with a mandatory non-empty
 reason. An empty list is the claim that the primary path ran throughout — a claim the

@@ -532,6 +532,36 @@ class EvidenceBundle(StrictSchema):
         return self
 
 
+class OperatorPatchCandidateRequest(StrictSchema):
+    """`POST /missions/{id}/patches` (T-3, D-008). An operator-authored unified diff,
+    submitted for the same finding `PATCH_GENERATE` would otherwise have targeted.
+
+    Deliberately carries no `provenance`, `policy_status` or `model` field — the
+    server sets `provenance=OPERATOR_SUPPLIED` unconditionally (an HTTP caller cannot
+    claim `MODEL_GENERATED` for a diff it typed itself) and the real policy gate
+    (`orchestrator.patch_policy.evaluate_patch_policy`) computes `policy_status` from
+    the diff and the mission's own policy, exactly as it does for a model-generated
+    candidate. See `orchestrator.operator_candidates.submit_operator_candidate`.
+    """
+
+    finding_id: UUID = Field(
+        description="Which finding this diff addresses. Must belong to this mission."
+    )
+    diff: str = Field(
+        min_length=1,
+        max_length=200000,
+        description="Unified diff (`git diff` / `diff -u` format). Verified through "
+        "the same deterministic gate matrix a model-generated candidate goes "
+        "through — never accepted on say-so.",
+    )
+    rationale: str = Field(
+        default="",
+        max_length=5000,
+        description="Optional operator note on why this diff is believed to fix the "
+        "finding. Displayed separately from evidence, never treated as evidence.",
+    )
+
+
 class ExportRequest(StrictSchema):
     formats: list[str] = Field(
         default_factory=lambda: ["markdown", "json"],

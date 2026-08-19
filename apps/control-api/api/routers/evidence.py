@@ -18,6 +18,7 @@ from ninja import Query, Router, Status
 
 from api.auth import OPERATOR_ROLES, READ_ROLES, require_role
 from api.errors import ERROR_RESPONSES
+from api.trace import get_trace_id
 from contracts.schemas.common import Page
 from contracts.schemas.evidence import (
     BaselineReport,
@@ -27,10 +28,11 @@ from contracts.schemas.evidence import (
     FindingDetail,
     FindingSummary,
     FuzzingReport,
+    OperatorPatchCandidateRequest,
     PatchCandidate,
     VerificationRecord,
 )
-from orchestrator import evidence_bundle, evidence_export, evidence_repository
+from orchestrator import evidence_bundle, evidence_export, evidence_repository, operator_candidates
 
 router = Router(tags=["evidence"])
 
@@ -108,6 +110,38 @@ def list_patches(
     require_role(request, *READ_ROLES)
     items, total = evidence_repository.list_patch_candidates(mission_id, limit=limit, offset=offset)
     return Page(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.post(
+    "/missions/{mission_id}/patches",
+    response={201: PatchCandidate, **ERROR_RESPONSES},
+    summary="Submit an operator-authored patch candidate",
+    description=(
+        "T-3, D-008. The HTTP-reachable counterpart to PATCH_GENERATE's own "
+        "model-driven fan-out, for a mission that has already reached PATCH (or is "
+        "still in VERIFY with its candidate set not yet frozen — see "
+        "orchestrator.operator_candidates for why a second candidate can still land "
+        "there). provenance is always OPERATOR_SUPPLIED; the diff is validated by "
+        "the same deterministic gate matrix (compile, reproducer-eliminated, "
+        "regression-preserved) a model-generated candidate goes through — never "
+        "accepted on say-so. A policy-accepted candidate is dispatched into VERIFY "
+        "through the same Job queue, worker and executor every other candidate uses; "
+        "a policy-rejected one is recorded but never enqueued."
+    ),
+    operation_id="submitOperatorPatchCandidate",
+)
+def submit_patch(
+    request: HttpRequest, mission_id: UUID, payload: OperatorPatchCandidateRequest
+):
+    require_role(request, *OPERATOR_ROLES)
+    candidate = operator_candidates.submit_operator_candidate(
+        mission_id,
+        finding_id=payload.finding_id,
+        diff=payload.diff,
+        rationale=payload.rationale,
+        trace_id=get_trace_id(request),
+    )
+    return Status(201, evidence_repository.patch_candidate_schema(candidate))
 
 
 @router.get(
