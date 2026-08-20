@@ -1,0 +1,38 @@
+21 objects imported automatically (use -v 2 for details).
+
+MISSION 9d9b86b5-a26f-4dd8-81c4-f81b0ebd687f FAILED D7 gate 50 live run 4e - pktcfg
+=== Jobs ===
+BASELINE SUCCEEDED {'detail': 'BASELINE_PASSED: 8/8 ctest cases passed', 'passed': True, 'adapter': 'C_CMAKE_CTEST', 'log_ref': '/app/var/workspaces/9d9b86b5-a26f-4dd8-81c4-f81b0ebd687f/9d9b86b5-a26f-4dd8-81c4-f81b0ebd687f-baseline-ctest-junit.xml', 'build_ok': True, 'tests_total': 8, 'configure_ok': True, 'tests_fail
+FUZZ SUCCEEDED {'detail': 'FUZZ_COMPLETE: 3247 executions, 1 unique crash(es) in 0.3s', 'executions': 3247, 'crashes_found': 1, 'infra_failure': False, 'unique_crashes': 1}
+CORRELATE SUCCEEDED {'detail': 'CORRELATED: 1 Finding row(s) already recorded for this mission.', 'source': 'finding_rows', 'correlated': True, 'finding_ids': ['f1f2a9f8-8952-4580-a916-eaec5766a158'], 'finding_count': 1}
+PATCH_GENERATE QUEUED {}
+VERIFY SUCCEEDED {'detail': 'Verification complete for candidate 1ecc995d-e1a7-4070-98c7-d48063c2fbe6: HUMAN_REVIEW_REQUIRED.', 'verdict': 'HUMAN_REVIEW_REQUIRED', 'patch_id': '1ecc995d-e1a7-4070-98c7-d48063c2fbe6', 'gate_matrix_ref': '/app/var/workspaces/9d9b86b5-a26f-4dd8-81c4-f81b0ebd687f/verify/1ecc995d-e1a7-407
+VERIFY SUCCEEDED {'detail': 'Verification complete for candidate 4492bd6f-0149-4438-90e1-7347e6f0adf1: REJECTED.', 'verdict': 'REJECTED', 'patch_id': '4492bd6f-0149-4438-90e1-7347e6f0adf1', 'gate_matrix_ref': '/app/var/workspaces/9d9b86b5-a26f-4dd8-81c4-f81b0ebd687f/verify/4492bd6f-0149-4438-90e1-7347e6f0adf1.json',
+EXPORT FAILED {'error': 'contracts.schemas.common.ArtifactRef() argument after ** must be a mapping, not str', 'detail': 'Evidence export failed: TypeError: contracts.schemas.common.ArtifactRef() argument after ** must be a mapping, not str', 'error_code': 'INTERNAL_ERROR'}
+=== PatchCandidates ===
+4492bd6f-0149-4438-90e1-7347e6f0adf1 OPERATOR_SUPPLIED ACCEPTED
+1ecc995d-e1a7-4070-98c7-d48063c2fbe6 OPERATOR_SUPPLIED ACCEPTED
+=== VerificationRecords ===
+3bb78791-7a26-44d0-8ead-98fb21fa7001 1ecc995d-e1a7-4070-98c7-d48063c2fbe6  HUMAN_REVIEW_REQUIRED
+80524f8b-e84e-4f54-a1ca-7fbc57000e72 4492bd6f-0149-4438-90e1-7347e6f0adf1  REJECTED
+=== events ===
+1 MISSION_AUTHORIZED {'kind': 'state_changed', 'reason': 'authorized by devops-engineer-gate50-run4e', 'posture': 'PROTECTED', 'to_state': 'AUTHORIZED', 'from_state': 'CRE
+2 SNAPSHOT_RECORDED {'kind': 'state_changed', 'reason': 'snapshot ingested', 'posture': 'PROTECTED', 'to_state': 'SNAPSHOTTED', 'from_state': 'AUTHORIZED'}
+3 PREFLIGHT_COMPLETED {'kind': 'state_changed', 'reason': 'operator confirmed start', 'posture': 'INVESTIGATING', 'to_state': 'VALIDATING', 'from_state': 'SNAPSHOTTED'}
+4 STATE_CHANGED {'kind': 'state_changed', 'reason': 'orchestrator: preflight satisfied, entering the pipeline', 'posture': 'INVESTIGATING', 'to_state': 'BASELINE', 'f
+5 STATE_CHANGED {'kind': 'state_changed', 'reason': 'BASELINE job fbc2a01d-62db-41e3-bb8c-1963aacf00e6 -> SUCCEEDED', 'posture': 'INVESTIGATING', 'to_state': 'TRIAGE'
+6 STAGE_STARTED {'kind': 'triage_stub'}
+7 LOG {'kind': 'triage_stub'}
+8 STAGE_COMPLETED {'kind': 'triage_stub'}
+9 STATE_CHANGED {'kind': 'state_changed', 'reason': 'orchestrator: no static analyzers configured in this build', 'posture': 'INVESTIGATING', 'to_state': 'STRESS_TEST
+10 FINDING_RECORDED {'kind': 'finding', 'finding': {'id': 'f1f2a9f8-8952-4580-a916-eaec5766a158', 'tool': 'ADDRESS_SANITIZER', 'title': 'heap buffer overflow at <unknown>
+11 STATE_CHANGED {'kind': 'state_changed', 'reason': 'FUZZ job 695ea7ca-0fe8-40dd-a7c9-f779d5f53937 -> SUCCEEDED', 'posture': 'VULNERABILITY_CONFIRMED', 'to_state': 'C
+12 STATE_CHANGED {'kind': 'state_changed', 'reason': 'CORRELATE job 8e152cb5-3e60-4947-8c44-9c90ef486d8b -> SUCCEEDED', 'posture': 'PATCHING', 'to_state': 'PATCH', 'fr
+13 PATCH_CANDIDATE_RECORDED {'kind': 'patch_candidate', 'patch': {'id': '1ecc995d-e1a7-4070-98c7-d48063c2fbe6', 'diff': "diff --git a/src/decode.c b/src/decode.c\nindex 0180959..
+14 STATE_CHANGED {'kind': 'state_changed', 'reason': 'operator-supplied candidate submitted', 'posture': 'PATCHING', 'to_state': 'VERIFY', 'from_state': 'PATCH'}
+15 PATCH_CANDIDATE_RECORDED {'kind': 'patch_candidate', 'patch': {'id': '4492bd6f-0149-4438-90e1-7347e6f0adf1', 'diff': "diff --git a/src/decode.c b/src/decode.c\nindex 0180959..
+16 VERIFICATION_RECORDED {'kind': 'verification', 'verification': {'id': '3bb78791-7a26-44d0-8ead-98fb21fa7001', 'gates': {'compile': {'name': 'COMPILE', 'tool': 'cmake', 'det
+17 VERIFICATION_RECORDED {'kind': 'verification', 'verification': {'id': '80524f8b-e84e-4f54-a1ca-7fbc57000e72', 'gates': {'compile': {'name': 'COMPILE', 'tool': 'cmake', 'det
+18 STATE_CHANGED {'kind': 'state_changed', 'reason': 'VERIFY job 964851f9-0501-4c5b-9ec0-716f27848b7b -> SUCCEEDED', 'posture': 'PATCHING', 'to_state': 'EXPORTING', 'f
+19 MISSION_FAILED {'kind': 'state_changed', 'reason': 'EXPORT job c5c9cf5a-d026-4dfe-a110-55bb225c6189 -> FAILED', 'posture': 'FAILED', 'to_state': 'FAILED', 'from_stat
+20 TEARDOWN_CONFIRMED {'kind': 'teardown', 'detail': 'no mission-scoped compute was running', 'released': True, 'resource_id': 'no-started-compute', 'resource_kind': 'orche
