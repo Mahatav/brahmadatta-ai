@@ -183,6 +183,11 @@ services:
       # dev stack up and reading the container's real environment, not by inspection.
       UVICORN_FORWARDED_ALLOW_IPS: ${UVICORN_DEV_FORWARDED_ALLOW_IPS:-172.28.90.0/24}
       PYTHONPATH: /app
+      # D-100: config.settings.base.MODEL_GATEWAY_ROOT's default only resolves
+      # correctly bare-metal (REPO_ROOT/services/model-gateway) — inside this
+      # container REPO_ROOT collapses to the container filesystem root, which does not
+      # hold services/model-gateway. Pointed explicitly at the bind mount below.
+      MODEL_GATEWAY_ROOT: /app/services/model-gateway
     volumes:
       - ../../apps/control-api:/app
       # Keep the host's macOS/arm .venv out of the container; /opt/venv is the real one.
@@ -209,6 +214,13 @@ services:
       - ../../workers:/app/workers
       - ../../packages:/app/packages
       - ../../adapters:/app/adapters
+      # `services/model-gateway/` — D-100 (.project/decisions.md). Same shape and
+      # reason as the three bind mounts directly above: `orchestrator/
+      # patch_generate_executor.py::_model_gateway_root()` needs this on `sys.path`
+      # for `JobKind.PATCH_GENERATE`'s live-model path to import `gateway.*` at all,
+      # and it was never reachable inside this container before this fix. Not :ro:
+      # live source other roles actively edit, same as workers/packages/adapters.
+      - ../../services/model-gateway:/app/services/model-gateway
     networks:
       # `api`, NOT `edge`. control-api shares a network with nginx and with nothing else.
       # See the networks: block — this is the fix for the Critical in the security review.
@@ -521,6 +533,9 @@ services:
       # #189: threaded through so it is visible here even though THIS service cannot
       # currently act on it — see the comment block above `worker:` for why.
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
+      # D-100: this is the process that actually runs JobKind.PATCH_GENERATE — see
+      # control-api's identical MODEL_GATEWAY_ROOT comment above.
+      MODEL_GATEWAY_ROOT: /app/services/model-gateway
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:
       - ../../apps/control-api:/app
@@ -530,6 +545,8 @@ services:
       - ../../workers:/app/workers
       - ../../packages:/app/packages
       - ../../adapters:/app/adapters
+      # Same fix as control-api's identical mount above — D-100.
+      - ../../services/model-gateway:/app/services/model-gateway
     networks:
       - backend
     depends_on:

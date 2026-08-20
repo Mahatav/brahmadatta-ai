@@ -136,6 +136,61 @@ def _small_attempts(mission: Mission, n: int) -> None:
 
 
 # --------------------------------------------------------------------------------
+# 0. `_model_gateway_root()` — D-100 (`.project/decisions.md`)
+# --------------------------------------------------------------------------------
+#
+# #50 D7 gate rehearsal run 4 (D-098): `_model_gateway_root()` used to be
+# `Path(__file__).resolve().parents[3] / "services" / "model-gateway"` — bare-metal
+# only. `IndexError` inside either compose profile's container, live, both times
+# PATCH_GENERATE's live-model path actually ran.
+
+
+def test_the_old_relative_parent_indexing_would_fail_inside_either_container():
+    """Documents the exact failure mechanism D-098 reproduced live, independent of
+    however `_model_gateway_root()` is implemented today: `parents[3]` assumed a
+    bare-metal checkout depth (`repo_root/apps/control-api/orchestrator/file.py`, 4
+    parent levels to repo root) that neither compose profile's flattened container
+    layout has (`/app/orchestrator/file.py` — `/app/orchestrator`, `/app`, `/` is the
+    whole chain, only 3 entries, indices 0-2)."""
+    container_module_path = Path("/app/orchestrator/patch_generate_executor.py")
+    with pytest.raises(IndexError):
+        container_module_path.resolve().parents[3]
+
+
+def test_model_gateway_root_is_driven_by_django_settings_not_file_depth(settings, tmp_path):
+    """The fix: `_model_gateway_root()` reads `settings.MODEL_GATEWAY_ROOT`, which
+    each compose profile now sets explicitly (`infrastructure/compose/docker-
+    compose*.yml`), rather than deriving anything from `__file__`'s own location.
+    Proven by pointing the setting at a directory with zero relationship to this
+    module's path on disk — if `_model_gateway_root()` still touched `__file__`
+    depth in any way, it could not possibly return this exact, unrelated path.
+
+    This is the test that would have caught the original bug: against the pre-D-100
+    code (`Path(__file__).resolve().parents[3] / "services" / "model-gateway"`),
+    `MODEL_GATEWAY_ROOT` was never read at all, so this assertion would have failed
+    (the old code returns the bare-metal repo-relative path regardless of what this
+    setting says) well before ever reaching the container-only `IndexError` case
+    covered by the test above.
+    """
+    custom_root = tmp_path / "wherever" / "gateway-happens-to-live"
+    settings.MODEL_GATEWAY_ROOT = str(custom_root)
+
+    assert pge._model_gateway_root() == custom_root
+
+
+def test_model_gateway_root_default_resolves_to_the_real_importable_package():
+    """Sanity check for the bare-metal default this checkout actually runs under
+    pytest: `config.settings.base.MODEL_GATEWAY_ROOT`'s own `REPO_ROOT`-relative
+    default (unset `MODEL_GATEWAY_ROOT` env var, the common case) must land on the
+    real `services/model-gateway/gateway` package — not merely some path — so
+    `_ensure_gateway_importable`'s `sys.path` insert actually makes `import gateway`
+    resolve, exactly as this test module's own `pge._ensure_gateway_importable()`
+    call (module scope, above) already relies on."""
+    root = pge._model_gateway_root()
+    assert (root / "gateway" / "__init__.py").is_file()
+
+
+# --------------------------------------------------------------------------------
 # 1. Registration
 # --------------------------------------------------------------------------------
 

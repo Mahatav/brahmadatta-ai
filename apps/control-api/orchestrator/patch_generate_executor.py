@@ -121,7 +121,29 @@ _REDUCED_SLICE_RATIO = 3
 
 
 def _model_gateway_root() -> Path:
-    return Path(__file__).resolve().parents[3] / "services" / "model-gateway"
+    """Directory containing the importable `gateway` package.
+
+    D-100 (`.project/decisions.md`): this used to compute the path itself —
+    `Path(__file__).resolve().parents[3] / "services" / "model-gateway"` — which
+    assumed a bare-metal checkout depth (`repo_root/apps/control-api/orchestrator/
+    file.py`, 4 parent levels to repo root) that neither compose profile's flattened
+    container layout has (`/app/orchestrator/file.py`, 2 real parent levels).
+    `parents[3]` raised `IndexError` the instant PATCH_GENERATE's live-model path
+    actually ran inside either container — found live, #50 D7 gate rehearsal run 4
+    (D-098).
+
+    Delegated to `settings.MODEL_GATEWAY_ROOT` instead, the same shape
+    `SNAPSHOT_SOURCE_ROOT` already established (`config/settings/base.py`) for the
+    identical class of problem (`demo/repositories`'s bare-metal-only default):
+    correct by default on bare metal, explicitly overridden by each compose profile
+    for its own container layout rather than guessed at here. Reading `django.conf.
+    settings` (not `gateway.*`) is fine at any point in this module — the import
+    discipline this module's own docstring describes is specifically about the
+    gateway package itself, not Django settings.
+    """
+    from django.conf import settings
+
+    return Path(settings.MODEL_GATEWAY_ROOT)
 
 
 def _ensure_gateway_importable() -> None:

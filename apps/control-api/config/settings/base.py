@@ -272,6 +272,28 @@ ARTIFACT_ROOT = Path(env.get_str("ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifa
 SNAPSHOT_SOURCE_ROOT = Path(
     env.get_str("SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories"))
 )
+
+# `services/model-gateway/` — the directory `orchestrator/patch_generate_executor.py::
+# _model_gateway_root()` puts on `sys.path` (lazily, only inside `run_worker`'s claim
+# loop; see that module's own docstring for why nothing here loads `gateway.*` at
+# import time) so `import gateway` resolves. Same shape as `SNAPSHOT_SOURCE_ROOT`
+# immediately above, for the identical reason: `REPO_ROOT`-relative is only correct
+# bare metal, so an explicit env-var override lets each compose profile state the
+# right answer for its own container layout rather than the code guessing at it.
+#
+# Before D-100, this was computed directly inside patch_generate_executor.py via
+# `Path(__file__).resolve().parents[3]` — bare metal, `apps/control-api/orchestrator/
+# file.py` sits 4 parent levels below the repo root, so that indexed correctly there.
+# Neither compose profile's container layout has that depth (`/app/orchestrator/
+# file.py`, 2 real parent levels): `parents[3]` raised `IndexError` in both dev and
+# finale the moment PATCH_GENERATE's live-model path actually ran — found live, #50
+# D7 gate rehearsal run 4 (D-098), fixed as D-100. `services/model-gateway/` was also
+# not reachable inside either container at all until D-100's compose/Dockerfile
+# changes (mirroring the existing `workers-source`/`packages-source`/`adapters-source`
+# additional-build-contexts) landed alongside this setting.
+MODEL_GATEWAY_ROOT = env.get_str(
+    "MODEL_GATEWAY_ROOT", str(REPO_ROOT / "services" / "model-gateway")
+)
 SNAPSHOT_STAGING_ROOT = Path(
     env.get_str("SNAPSHOT_STAGING_ROOT", str(BASE_DIR / "var" / "uploads"))
 )
@@ -311,6 +333,15 @@ EXPORT_WORKSPACE_ROOT = Path(
 #: target's source archive (architecture spec §5.3, "never in"), so this is far
 #: smaller than `SNAPSHOT_MAX_BYTES` — 64 MiB is generous for diffs, logs and JSON.
 EVIDENCE_BUNDLE_MAX_BYTES = env.get_int("EVIDENCE_BUNDLE_MAX_BYTES", 67_108_864)
+
+#: Byte ceiling for one artifact `workers.baseline.dispatch._persist_report` ingests
+#: into `ARTIFACT_ROOT` (currently just the ctest JUnit XML `run_baseline_stage`
+#: copies out of the jail before it tears down — see `BaselineOutcome.log_ref`'s own
+#: docstring). A JUnit report for this project's demo-sized targets is single-digit
+#: kilobytes; 16 MiB is generous headroom, matching the same "far smaller than
+#: SNAPSHOT_MAX_BYTES" reasoning EVIDENCE_BUNDLE_MAX_BYTES states two lines up, not a
+#: realistic expectation.
+BASELINE_LOG_ARTIFACT_MAX_BYTES = env.get_int("BASELINE_LOG_ARTIFACT_MAX_BYTES", 16_777_216)
 
 # --- Security headers ----------------------------------------------------------
 

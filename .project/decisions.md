@@ -9829,3 +9829,232 @@ fix (small, contained). No change needed to this branch before merge on QA's aut
 project's standing QA rule. `frontend-developer`/`engineering-manager` for scheduling BUG-1's
 fix. CTO if anyone wants to escalate past an APPROVED WITH KNOWN ISSUES verdict for a P0-blocking
 feature this close to the finale.
+
+---
+
+## D-103 — Two blockers D-098 found and reported on the #50 D7 gate critical path, both
+fixed: `PATCH_GENERATE`'s live-model `IndexError` (path arithmetic + missing container
+mount) and evidence-export's `ArtifactRef` `TypeError` (a write-side serialization bug in
+`workers/baseline/dispatch.py`, not the export module D-098 pointed at) · 2026-08-19 ·
+`backend-developer` seat
+
+**Context.** D-098 (four sections up) named this seat as owner for two blockers found live
+during the #50 D7 gate rehearsal run 4, both on the direct critical path to a PASS: blocker
+1 (`PATCH_GENERATE`'s live-model path crashing with `IndexError`, in both compose profiles)
+and blocker 3 (`EXPORTING` crashing on every mission with an `ArtifactRef` `TypeError`,
+blocking the gate's evidence-export/read-back acceptance criterion entirely). Full detail:
+`.project/evidence/d7-gate-50-live-run-2026-08-19-run4.{json,md}`. Both are fixed here, with
+regression tests that reproduce each original failure and pass after the fix, the full
+`apps/control-api` suite run green, and the container-side half of blocker 1 verified inside
+a real built image (not just unit tests) — all without touching the concurrent worktree's
+live compose stack this session found already running (`docker ps -a`, confirmed both before
+and after this work: unchanged, not disrupted).
+
+### Blocker 1 — `PATCH_GENERATE` live-model `IndexError` + missing container mount
+
+**Root cause, precisely.** `orchestrator/patch_generate_executor.py::_model_gateway_root()`
+computed `Path(__file__).resolve().parents[3] / "services" / "model-gateway"` —
+bare-metal-only arithmetic (`repo_root/apps/control-api/orchestrator/file.py`, 4 parent
+levels to repo root) that neither compose profile's flattened container layout has
+(`/app/orchestrator/file.py`, only 3 real parent-chain entries — `/app/orchestrator`,
+`/app`, `/`, indices 0-2 — so `parents[3]` raises `IndexError` outright, independent of
+whether `services/model-gateway/` is even present). Confirmed live in D-098; reproduced
+again here, in isolation, both as a pure `pathlib` assertion
+(`test_the_old_relative_parent_indexing_would_fail_inside_either_container`) and inside a
+real built `runtime`-target image (`docker run ... python -c "Path('/app/orchestrator/
+patch_generate_executor.py').resolve().parents[3]"` → `IndexError`, output captured in this
+session's handoff). D-098 also independently confirmed `services/model-gateway/` was never
+bind-mounted (dev) or `COPY`'d (finale `runtime` target) into `control-api` or `worker` at
+all — fixing the arithmetic alone would not have been sufficient.
+
+**Options considered for the path-arithmetic half.**
+(a) Fix the index count (`parents[2]` for container, keep `parents[3]` for bare metal,
+branched on some environment signal) — rejected: two arithmetic expressions for one
+directory is exactly the "fragile relative-parent-counting" this task's own brief warned
+against, and a THIRD container shape (a future base image, a different `WORKDIR`) breaks it
+again silently.
+(b) An env-var override each deployment context sets explicitly — **chosen**. This
+codebase already has the identical pattern for the identical class of problem:
+`config/settings/base.py::SNAPSHOT_SOURCE_ROOT` (`demo/repositories`) is `env.get_str(
+"SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories"))` — a
+`REPO_ROOT`-relative default that is only correct bare-metal, explicitly overridden by both
+compose files for their own container layout. Added `MODEL_GATEWAY_ROOT` right beside it,
+same shape, same reasoning, and pointed `_model_gateway_root()` at
+`django.conf.settings.MODEL_GATEWAY_ROOT` instead of computing anything itself. Reading
+Django settings from this module is fine at any point — the import discipline this module's
+own docstring describes (`from gateway...` only inside function bodies) is specifically
+about the `gateway` package itself, a real security invariant (D-028/C5, the ASGI process
+must never load an inference client); `django.conf.settings` carries no such restriction.
+
+**Options considered for the missing-mount half.**
+(a) Bake `services/model-gateway/` into the `dev` image build instead of bind-mounting it —
+rejected: every sibling directory this exact problem shape already covers
+(`workers/`, `packages/`, `adapters/`) is a *bind mount* in the dev profile specifically so
+edits reload live, and `services/model-gateway/` is edited by the same class of contributor
+(ml-infra-engineer, per this module's own docstring on the `MODEL_ENDPOINT`/
+`SMALL_MODEL_BASE_URL` naming split) — baking it in dev would silently stop picking up
+gateway-side edits without a rebuild, a regression relative to every other cross-role source
+directory this stack already mounts live.
+(b) Mirror the exact, already-established `workers-source`/`packages-source`/
+`adapters-source` pattern exactly — **chosen**: dev bind-mounts
+`../../services/model-gateway:/app/services/model-gateway`; finale adds a fourth named
+`additional_contexts` entry (`model-gateway-source: ../../services/model-gateway`) to both
+`control-api` and `worker`'s `build:` blocks, and `control-api.Dockerfile`'s `runtime`
+target gets one more `COPY --from=model-gateway-source --chown=app:app . /app/services/
+model-gateway`, landing at the same repo-root-sibling-relative path
+(`/app/services/model-gateway`) the dev bind mount uses, so both profiles present an
+identical importable layout — same discipline the workers/packages/adapters fix (#168/#174
+regression) already established for exactly this reason.
+
+**Verification, concretely, this session.**
+`docker compose -f infrastructure/compose/docker-compose.yml --profile worker config` and
+the finale equivalent (with placeholder required env vars) both resolve cleanly, with the
+new bind mount / `additional_contexts` entry / `MODEL_GATEWAY_ROOT` env var present on both
+`control-api` and `worker` in both files. A standalone `docker build --target runtime`
+against `control-api.Dockerfile` with all five `--build-context` flags (the four existing
+plus `model-gateway-source`) succeeds. Inside a container built from that image, with the
+finale settings module and `MODEL_GATEWAY_ROOT=/app/services/model-gateway`:
+`_model_gateway_root()` returns that exact path, the path exists, and
+`_ensure_gateway_importable()` followed by `import gateway; import gateway.settings`
+succeeds, reading `gateway.__file__` back as `/app/services/model-gateway/gateway/
+__init__.py` — the live-model path's actual import, working, inside the actual container
+layout, not merely asserted from the Dockerfile/compose text. The test image was removed
+after this check (`docker rmi`); the concurrently-running `brahmadatta-*` stack this session
+found already up was never touched (`docker ps -a` before and after: byte-identical set of
+containers, all still healthy/running).
+
+New tests, `apps/control-api/orchestrator/tests/test_patch_generate_executor.py`:
+`test_the_old_relative_parent_indexing_would_fail_inside_either_container` (documents the
+exact bug mechanism, independent of current code),
+`test_model_gateway_root_is_driven_by_django_settings_not_file_depth` (the actual
+regression test — confirmed to fail against the pre-fix code by reverting
+`_model_gateway_root()` locally and re-running it: `AssertionError`, old code returns the
+bare-metal path regardless of the overridden setting), and
+`test_model_gateway_root_default_resolves_to_the_real_importable_package` (bare-metal
+default sanity check, so this test module's own module-scope
+`pge._ensure_gateway_importable()` call keeps working under pytest).
+
+### Blocker 3 — evidence-export `ArtifactRef` `TypeError`
+
+**Root cause, precisely — and NOT where D-098 pointed.** D-098 named `orchestrator/
+evidence_export.py`/`orchestrator/evidence_bundle.py` as the likely call site. Both modules'
+own `ArtifactRef(**ref)` calls are fine — every value they unpack is a real dict, either
+freshly built via `ArtifactRef(...).model_dump(mode="json")` or read back from a `Export.
+artifact_refs` `JSONField` that only that one write site ever populates. The actual bug is
+one layer upstream and in a different module entirely: `workers/baseline/dispatch.py::
+_persist_report` wrote `BaselineOutcome.log_ref` — a bare filesystem path string
+(`workers/baseline/run.py`'s `log_ref = str(durable_junit)`, the durable copy of the ctest
+JUnit report `run_baseline_stage` copies out of its jail before tearing down) — straight
+into `BaselineReport.log_ref`, a `JSONField` typed and read everywhere downstream as an
+`ArtifactRef`. `orchestrator/evidence_repository.py::get_baseline_report` (called by
+`assemble_evidence_bundle` for the baseline section of every evidence bundle) does
+`_artifact_ref(row.log_ref)` → `ArtifactRef(**row.log_ref)` unconditionally. A bare path
+string round-trips through a `JSONField` with no error at write time (a `JSONField` happily
+stores a scalar string), so nothing caught this until a reader unpacked it — `ArtifactRef(**
+"<path string>")` raises `TypeError: ... argument after ** must be a mapping, not str` on
+the first character of the string it tries to treat as a keyword, exactly D-098's own error
+text. Since essentially every mission that reaches `EXPORTING` first passed `BASELINE`, this
+fired on every mission D-098 drove through export — "reproduced twice, not a fluke" was
+actually the same bug reproducing deterministically, not two candidate mechanisms.
+
+This is genuinely the "serialization mismatch between how it's written and how it's read
+back" this task's own brief anticipated — just one call site further upstream than the two
+named as likely locations. Confirmed by grep: `Export.artifact_refs` (the field D-098's
+named modules actually own) has exactly one writer in the whole tree
+(`evidence_export.py:244`, already correct), while `BaselineReport.log_ref` had exactly one
+writer (`dispatch.py`, the actual bug) and three separate readers that all assume the same
+`ArtifactRef` shape (`evidence_repository.py`, and from there `evidence_bundle.py`/
+`evidence_export.py` — both correct on their own terms, just fed a broken value). No
+existing test ever set a non-null `BaselineReport.log_ref` and then exercised
+`get_baseline_report`/`assemble_evidence_bundle` against it — `test_evidence_bundle.py`'s
+own `BaselineReport.objects.create` in its full-data fixture omits `log_ref` entirely,
+defaulting to `None`, which never reaches the buggy line — a real, disclosed pre-existing
+coverage gap this bug slipped through, closed by the new tests below.
+
+**Fix.** `dispatch.py` now ingests the durable log file into the same content-addressed
+`ARTIFACT_ROOT` store `orchestrator.evidence_export` already uses for the bundle tarball
+itself (`authorization.store.ingest_from_path` → `Artifact.objects.get_or_create` →
+`ArtifactRef(...).model_dump(mode="json")`) — the identical three-call shape
+`evidence_export.py::export_mission` already established, reused rather than inventing a
+second storage mechanism for one more kind of artifact. New settings constant
+`BASELINE_LOG_ARTIFACT_MAX_BYTES` (16 MiB default, `config/settings/base.py`, `.env.example`
+— a JUnit report for this project's demo-sized targets is single-digit kilobytes; matches
+`EVIDENCE_BUNDLE_MAX_BYTES`'s own "far smaller than `SNAPSHOT_MAX_BYTES`" reasoning one
+setting up). `Artifact.kind = "baseline_ctest_junit"`. `_log_ref_artifact(mission, log_path)`
+returns `None` for `log_path is None` (the configure/build-failure case, which never
+produces a durable log — `run_baseline_stage`'s own comment), matching `BaselineReport.
+log_ref`'s `null=True`; idempotent by construction, same as `ingest_from_path` itself, so a
+retried `BASELINE` job (blocked by the `OneToOneField`/`IntegrityError` race-handling this
+same function already had) never double-ingests. Fixed at the write site, not by relaxing
+the read side: `evidence_repository.py`'s own module docstring states the invariant this
+closes back to — "callers receive hash-addressed pointers, never artifact content."
+
+**Options considered.**
+(a) Make `evidence_repository.py::_artifact_ref` defensive — accept either a mapping or a
+bare string, treating a string as a legacy/degraded `uri`-only reference — rejected: this
+would have hidden the actual defect behind a silently-degraded read, and the
+`ArtifactRef.uri` contract (`"artifact://<mission>/<kind>/<id>"`, checked by `Field(
+description=...)`) is not something a bare filesystem path satisfies anyway; the write side
+was simply wrong and needed a real fix, not a more forgiving reader.
+(b) Fix at the write site, ingesting into the real content-addressed store — **chosen**, for
+the reason above and because it also closes a real, separate, pre-existing gap: before this,
+the baseline's ctest JUnit log was **never durable** in any way the evidence bundle or the
+operator could actually retrieve — `BaselineReport.log_ref` held a path into a directory
+(`workspace_root`) that this codebase's own conventions treat as scratch, not the
+content-addressed `ARTIFACT_ROOT` (`EXPORT_WORKSPACE_ROOT`/`SNAPSHOT_WORKSPACE_ROOT`'s own
+comments: "created and torn down per stage run"). This fix is therefore not merely a type
+fix; it makes the baseline log an artifact a competition judge's evidence bundle can actually
+resolve for the first time, consistent with architecture spec §5.2's own point of the whole
+mechanism.
+
+**Verification, concretely, this session.** New tests,
+`apps/control-api/orchestrator/tests/test_baseline_executor.py`:
+`test_persist_report_turns_a_log_ref_path_into_an_artifact_ref_dict` — a real log file on
+disk, `_persist_report` writing it, `orchestrator.evidence_repository.get_baseline_report`
+(the actual downstream reader D-098's own error trace runs through) reading it back, no
+mock on either half — confirmed to fail against the pre-fix code by locally reverting
+`_persist_report`'s `log_ref=log_ref` back to `log_ref=outcome.log_ref` and re-running:
+fails at `isinstance(report.log_ref, dict)` (the bare path string is written, exactly as
+before this fix), output captured in this session's handoff — and
+`test_persist_report_leaves_log_ref_null_when_there_is_no_durable_log` (the
+configure/build-failure case stays `None`, not a broken reference).
+
+**Full-suite regression check.** `apps/control-api`: `689 passed, 19 skipped` (skips are the
+pre-existing toolchain/Docker-dependent slow tests, unaffected by this change), 0 failed,
+exit code 0 —
+`DJANGO_SECRET_KEY=<real> POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m
+pytest` from `apps/control-api/`. `workers/baseline/tests` (outside that suite's `testpaths`,
+covers `run.py` directly — unaffected by this change since only `dispatch.py` was touched):
+`5 passed`. Both runs' full output is in this session's handoff, not merely summarized here.
+
+**Cost implications** — none. No new infrastructure; `BASELINE_LOG_ARTIFACT_MAX_BYTES`'s
+16 MiB default artifact is smaller than a single evidence bundle tarball already is.
+
+**Security implications** — none negative; strictly closes a gap. No isolation, auth, or
+sandboxing boundary changed. The `services/model-gateway` mount/`COPY` reaches the same
+`gateway` package `PATCH_GENERATE` already imports lazily inside the worker process only
+(D-028/C5's ASGI-exclusion invariant untouched — nothing about *when* `gateway.*` loads
+changed, only *whether the directory is reachable when it tries to*). The baseline log
+artifact now flows through the same content-addressed, permission-mode-0600 store every
+other artifact already uses, rather than sitting as a bare, ungoverned path string.
+
+**Scalability implications** — none; both fixes are correctness fixes on the existing
+single-mission-at-a-time pipeline, not scale-sensitive.
+
+**Recommendation.** Both blockers were on D-098's own critical-path list for a #50 PASS;
+with both closed, the next live rehearsal should be able to reach a real `VERIFIED`-or-
+`REJECTED` verdict through the live-model `PATCH_GENERATE` path (not just the
+operator-candidate fallback) and complete evidence export/read-back for the first time.
+Independent `qa-engineer` review dispatched this session per this task's own standing
+instruction, before this is reported as done; see that review's own entry for its verdict.
+Two items remain explicitly out of this fix's scope and un-changed: D-098's blocker 2
+(`VERIFY`'s missing `git`, already fixed on PR #215, blocked on CI infrastructure) and the
+reproducer/minimized-crash artifact persistence gap capping `VERIFIED` at
+`HUMAN_REVIEW_REQUIRED` (D-098's own recommendation 3, a real product decision for
+CTO/backend-developer, not resolved here) — a full #50 PASS still depends on both.
+
+**Final approval authority** — CTO, for whether/when to schedule the next live #50
+rehearsal now that both of this session's blockers are closed; qa-engineer, for this
+session's own implementation sign-off (see that review's entry immediately below).
+
+---

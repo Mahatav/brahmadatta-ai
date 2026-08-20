@@ -183,6 +183,103 @@ def test_persist_report_survives_a_genuine_race(mission: Mission):
     assert BaselineReport.objects.filter(mission=mission).count() == 1
 
 
+def test_persist_report_turns_a_log_ref_path_into_an_artifact_ref_dict(
+    mission: Mission, tmp_path: Path, settings
+):
+    """D-100 (`.project/decisions.md`). #50 D7 gate rehearsal run 4 (D-098): every
+    mission reaching `EXPORTING` crashed identically — `contracts.schemas.common.
+    ArtifactRef() argument after ** must be a mapping, not str` — because
+    `_persist_report` used to write `outcome.log_ref` (a bare filesystem path string
+    `run_baseline_stage` produces; see that function's own docstring) straight into
+    `BaselineReport.log_ref`, which every reader downstream
+    (`orchestrator.evidence_repository.get_baseline_report`) unconditionally unpacks
+    as `ArtifactRef(**row.log_ref)`.
+
+    This test reproduces the failure end to end — a real log file on disk,
+    `_persist_report` writing it, then the real downstream reader consuming exactly
+    what was written, no mock on either half. Against the pre-D-100 code this fails
+    at the `get_baseline_report` call with D-098's own `TypeError` (`report.log_ref`
+    would still be the bare path string at that point, and `ArtifactRef(**"<path
+    string>")` raises exactly that on the first character it tries to treat as a
+    keyword — confirmed by reverting `_persist_report`'s `log_ref=log_ref` back to
+    `log_ref=outcome.log_ref` locally and re-running this test).
+    """
+    import hashlib
+
+    from adapters.cpp.snapshot import hash_source_tree
+    from missions.models import Artifact
+    from orchestrator.evidence_repository import get_baseline_report
+    from workers.baseline.run import BaselineOutcome
+
+    settings.ARTIFACT_ROOT = tmp_path / "artifacts"
+
+    log_path = tmp_path / f"{mission.id}-baseline-ctest-junit.xml"
+    log_bytes = b"<testsuite tests='8' failures='0'></testsuite>"
+    log_path.write_bytes(log_bytes)
+
+    outcome = BaselineOutcome(
+        mission_id=str(mission.id),
+        configure_ok=True,
+        build_ok=True,
+        tests_total=8,
+        tests_passed=8,
+        tests_failed=0,
+        duration_seconds=1.0,
+        adapter="C_CMAKE_CTEST",
+        recorded_at=NOW,
+        snapshot=hash_source_tree(PKTCFG_SOURCE) if PKTCFG_SOURCE.is_dir() else None,
+        log_ref=str(log_path),
+    )
+
+    report = dispatch._persist_report(mission, outcome)
+
+    # The write side: a mapping, never the bare path string.
+    assert isinstance(report.log_ref, dict)
+    assert report.log_ref["kind"] == dispatch.BASELINE_LOG_ARTIFACT_KIND
+    assert report.log_ref["uri"].startswith(f"artifact://{mission.id}/")
+    assert report.log_ref["sha256"] == hashlib.sha256(log_bytes).hexdigest()
+    assert report.log_ref["size_bytes"] == len(log_bytes)
+
+    # The artifact is actually durable, content-addressed, and indexed.
+    artifact = Artifact.objects.get(sha256=report.log_ref["sha256"])
+    assert artifact.mission_id == mission.id
+    assert artifact.size_bytes == len(log_bytes)
+
+    # The read side D-098 actually crashed on: the real downstream consumer.
+    baseline_schema = get_baseline_report(mission.id)
+    assert baseline_schema.log_ref is not None
+    assert baseline_schema.log_ref.sha256 == hashlib.sha256(log_bytes).hexdigest()
+
+
+def test_persist_report_leaves_log_ref_null_when_there_is_no_durable_log(
+    mission: Mission,
+):
+    """A configure/build failure produces `BaselineOutcome.log_ref=None` (`workers/
+    baseline/run.py`'s own comment: 'no durable artifact for a configure/build
+    failure'). `_persist_report` must not try to ingest nothing, and the read side
+    must see a real `None`, not a broken reference."""
+    from adapters.cpp.snapshot import hash_source_tree
+    from workers.baseline.run import BaselineOutcome
+
+    outcome = BaselineOutcome(
+        mission_id=str(mission.id),
+        configure_ok=False,
+        build_ok=False,
+        tests_total=0,
+        tests_passed=0,
+        tests_failed=0,
+        duration_seconds=0.1,
+        adapter="UNKNOWN",
+        recorded_at=NOW,
+        snapshot=hash_source_tree(PKTCFG_SOURCE) if PKTCFG_SOURCE.is_dir() else None,
+        log_ref=None,
+    )
+
+    report = dispatch._persist_report(mission, outcome)
+
+    assert report.log_ref is None
+
+
 def test_cancel_requested_before_start_short_circuits(mission: Mission, tmp_path: Path, monkeypatch):
     """A real, if coarse, cooperative-cancellation check: skip starting the stage at
     all if cancellation was already requested (see `workers/baseline/dispatch.py`'s

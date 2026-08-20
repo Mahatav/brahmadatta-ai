@@ -193,6 +193,19 @@ COPY --from=workers-source --chown=app:app . /app/workers
 COPY --from=packages-source --chown=app:app . /app/packages
 COPY --from=adapters-source --chown=app:app . /app/adapters
 
+# `services/model-gateway/` — D-100 (`.project/decisions.md`), same shape and reason as
+# the three COPYs directly above (workers/packages/adapters): a repo-root sibling of
+# `apps/`, outside this Dockerfile's own build context, that `orchestrator/
+# patch_generate_executor.py::_model_gateway_root()` needs on `sys.path` for
+# `JobKind.PATCH_GENERATE`'s live-model path to import `gateway.*` at all. Never
+# reachable inside this image before D-100 — the executor's own path arithmetic
+# additionally assumed a bare-metal parent-directory depth that raised `IndexError`
+# before ever reaching a missing-directory error, so the gap was masked until that was
+# fixed too. Landed at `/app/services/model-gateway` — `config/settings/base.py`'s
+# `MODEL_GATEWAY_ROOT` default only resolves correctly bare-metal, so both compose
+# files set it explicitly to this exact path rather than relying on the default here.
+COPY --from=model-gateway-source --chown=app:app . /app/services/model-gateway
+
 # `docker-compose.finale.yml` mounts named volumes at these two paths for the
 # content-addressed artifact store (ARTIFACT_ROOT) and the exported evidence bundle
 # store. A fresh named volume is created empty and root-owned; Docker seeds it from
