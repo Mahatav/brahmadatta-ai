@@ -11278,3 +11278,191 @@ instruction.
 re-verification gate that follows.
 
 ---
+
+## D-111 — Independent `qa-engineer` re-verification of D-106/D-109/D-110 (`FUZZ`
+durable reproducer persistence, branch `fix/d106-reproducer-persistence`, commit
+`d523fed`): verdict **APPROVED** · 2026-08-19/20 · `qa-engineer` seat
+
+**Context.** D-106 ruled a scoped fix for the reproducer-persistence gap that had
+capped every live verdict at `HUMAN_REVIEW_REQUIRED` across two prior rehearsals
+(D-098, D-105). D-109 implemented it; D-110 cleared it on security grounds and named
+`qa-engineer` re-verification as the next and final gate, matching this project's
+standing pattern (D-097, D-102, D-104, D-108). This entry is that gate, run with
+independent test/tool access, not a re-read of the two prior reports.
+
+**Scope reviewed.** `.project/decisions.md`'s D-106, D-109, D-110 in full; `git show
+2650e01` (the implementation) in full — `adapters/cpp/fuzzing.py`
+(`_copy_crash_artifacts_durably`, `DurableArtifact`, `MAX_DURABLE_ARTIFACT_BYTES`),
+`workers/fuzzing/run.py` (`workspace_root` threading), `workers/fuzzing/dispatch.py`
+(`_fuzz_executor`, `_persist_outcome`, `_record_reproducers`,
+`_record_one_reproducer`, the updated `_minimize_executor` detail message), and the
+diffs of all 6 named test files (`adapters/cpp/tests/test_fuzzing.py`,
+`apps/control-api/orchestrator/tests/test_findings.py`,
+`apps/control-api/orchestrator/tests/test_fuzz_executor.py`,
+`apps/control-api/orchestrator/tests/test_fuzz_to_verify_real_e2e.py`,
+`workers/fuzzing/tests/test_real_campaign.py`), read to confirm each genuinely
+exercises the claimed behavior rather than passing trivially.
+
+**Pre-flight.** `docker ps -a` before starting: no pre-existing `brahmadatta-*`
+stack — only an unrelated `infra-postgres-1` and stopped `good_marketer_web-*`
+containers from other projects on this host. Confirmed clean per the
+worktree-collision warning (PR #219).
+
+**Automated suites — run myself, not trusted from the paste.**
+
+- `apps/control-api` (venv `/tmp/t5-verify-venv`, `DJANGO_SECRET_KEY=qa-verify-secret-
+  not-literally-test POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m
+  pytest --tb=short`): **701 passed, 20 skipped, 2 warnings in 55.93s** — matches
+  D-109's and D-110's reported number exactly.
+- Repo-root targeted suites (`PYTHONPATH=. python3 -m pytest workers/fuzzing/tests
+  workers/baseline/tests adapters/cpp/tests packages/sandbox/tests`): **151 passed,
+  6 skipped, 1 xfailed in 73.27s** — matches D-110's re-run count exactly (one more
+  skip than D-109's own reported 5, both pre-existing environment-dependent skips,
+  unrelated to this diff, as D-110 already established).
+- `tests/architecture`: **73 passed in 4.04s**.
+
+**Headline claim — independently, live-reproduced, not re-read from two prior
+reports.** Confirmed `docker info` reachable and
+`brahmadatta-fuzz-toolchain:local` image present. Ran the checked-in opt-in real
+tests myself:
+
+- `BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 python3 -m pytest
+  orchestrator/tests/test_fuzz_to_verify_real_e2e.py -v -s` (apps/control-api,
+  cmake/ctest confirmed on PATH first): **1 passed in 11.99s.**
+- `PYTHONPATH=. BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 python3 -m pytest
+  workers/fuzzing/tests/test_real_campaign.py -v -s` (repo root): **2 passed, 1
+  xfailed in 8.59s.**
+
+Then went further than re-running the checked-in tests, per this task's own
+instruction not to trust a test's own assertion: wrote and ran a standalone,
+independent script
+(`/private/tmp/.../scratchpad/qa_run/qa_live_verify.py`, not part of this repo)
+against a **file-based sqlite DB** (not the in-memory DB pytest itself tears down),
+reusing only the repo's own real fixtures/transitions/executors — no monkeypatching,
+no scripted gate matrix — to drive **two full, separate, real FUZZ campaigns**
+against `pktcfg` end to end:
+
+- **Positive case** (mission A, `candidate-a-correct-bounds-fix.patch`): real `FUZZ`
+  job found 1 unique crash in 1136 executions, real `VERIFY` job reached
+  `Verification complete for candidate ...: VERIFIED.`
+- **Negative case** (mission B, `candidate-b-rejected-crash-only-fix.patch`): real
+  `FUZZ` job found 1 unique crash in 1175 executions, real `VERIFY` job reached
+  `Verification complete for candidate ...: REJECTED.` (`REGRESSION_PRESERVED: FAIL`
+  — "ctest: Regression suite failed: 1 of 8 tests failed" — while
+  `REPRODUCER_ELIMINATED: PASS`, confirming this fix does not make everything come
+  back `VERIFIED` regardless of correctness; the gate this fix touches passed
+  correctly in both directions, and a different, still-enforced gate is what
+  correctly rejects the crash-only fix).
+
+Then, in a **separate process**, queried the resulting sqlite file directly with
+raw `sqlite3` (no Django ORM, no reliance on any script's own print statements or
+assertions):
+
+- `reproducer` table: 2 rows, one per mission, each with a real `sha256`, a real
+  `artifact://.../reproducer/<sha256>` URI, `size_bytes` 34 and 54 respectively, and
+  `test_command` values (`./pktcfg_replay crash-<hash> x1`) matching the pattern
+  `_record_one_reproducer` builds.
+- `verification_record` table: mission A's row shows `verdict='VERIFIED'` with
+  `reproducer_eliminated.status='PASS'`; mission B's row shows `verdict='REJECTED'`
+  with `reproducer_eliminated.status='PASS'` and `regression_preserved.status='FAIL'`
+  — read directly off the raw JSON `gates` column, not through any ORM accessor.
+- Independently located the two artifact files on disk under the script's
+  `ARTIFACT_ROOT` (`<root>/<sha256[:2]>/<sha256>`), recomputed their sha256 with
+  `shasum -a 256` from the shell (a completely independent hash implementation from
+  anything in this codebase), and confirmed both match the DB-recorded sha256
+  exactly. Inspected the raw bytes with `xxd`: both are real `PKTC`-format binary
+  crash inputs (pktcfg's own container format), 34 and 54 bytes, matching the
+  DB-recorded `size_bytes` exactly — not placeholder or empty files.
+
+This is independent proof, by a completely different code path (a standalone script
++ raw SQL + raw filesystem hashing, none of it the checked-in test suite) of the
+same claim D-109 and D-110 each already proved: a real `FUZZ` campaign against
+`pktcfg` finds the seeded heap-buffer-overflow, writes a real `Reproducer` row with
+real, durable, content-addressed bytes, and a real `VERIFY` run against a correct
+candidate reaches `REPRODUCER_ELIMINATED: PASS` / `VERIFIED` — and, newly confirmed
+by this entry specifically (D-109/D-110 exercised the negative path only via the
+existing `_result_from_outcome`/unit-test coverage, not a full live `FUZZ`-to-
+`VERIFY` run against `candidate-b`), that a genuinely broken candidate still reaches
+`REJECTED` through the same real, live pipeline.
+
+**Docker hygiene.** `docker ps -a` and `docker ps -a --filter
+"label=brahmadatta.sandbox"` after all real-docker runs (the two checked-in opt-in
+tests plus the standalone script's two full campaigns): output identical to the
+pre-run baseline — the same 5 pre-existing, unrelated containers, zero
+`brahmadatta.sandbox`-labeled containers. No orphaned containers or resources from
+this session's real-docker runs.
+
+**Test-file diff review (step 4 of this dispatch).** All 6 files read in full via
+`git show 2650e01`. None pass trivially:
+
+- `adapters/cpp/tests/test_fuzzing.py`'s 6 new tests exercise real file I/O against
+  a `ContainerJail` built directly on a temp directory (no daemon needed) — real
+  bytes surviving `sandbox.close()`, two independent symlink-escape shapes (absolute
+  and relative-`..`) both refused with zero bytes copied, a size ceiling enforced
+  mid-copy with an explicit "no leftover file" assertion, a vanished artifact
+  skipped without raising, and multi-artifact discovery-order preservation.
+- `orchestrator/tests/test_findings.py`'s 5 new tests exercise `record_reproducer`'s
+  real persistence, the `REPRODUCER_RECORDED` event inside the mission lock,
+  `(finding, sha256)` dedup (including that a retry does not double-emit the event),
+  a second distinct artifact for the same finding, and — the one this review singled
+  out as the actual acceptance criterion — a real `ingest_from_path` round-trip read
+  back through `verify_dispatch._resolve_reproducer_path`, the exact function
+  `VERIFY`'s gate calls.
+- `orchestrator/tests/test_fuzz_executor.py`'s 3 new tests cover the happy path (a
+  durable artifact becomes a real, resolvable `Reproducer`), the honest failure path
+  (no durable artifact survived → no `Reproducer`, `Finding` still recorded), and the
+  fail-closed pairing rule (artifact/finding count mismatch → zero `Reproducer` rows
+  for the whole batch, not a guessed subset) — this last one independently confirmed
+  live-adjacent by this review's own standalone script never hitting this path
+  (both live campaigns produced exactly one crash and one artifact, the only case
+  this pairing rule claims to handle).
+- `orchestrator/tests/test_fuzz_to_verify_real_e2e.py` and
+  `workers/fuzzing/tests/test_real_campaign.py`: read in full above this entry (see
+  the "Automated suites"/"Headline claim" sections) — genuine, real-docker,
+  opt-in, skip-loud, no mocking of the mechanism under test.
+
+**Implementation review, beyond what D-110 already covered on security grounds.**
+Read `workers/fuzzing/dispatch.py`'s diff in full: confirmed `_persist_outcome`
+records reproducers before the `FuzzingReport` row is created (matching D-109's own
+stated retry-safety rationale — checked directly in the diff, not assumed), and
+confirmed `_minimize_executor`'s updated `detail`/`blocked_reason`
+(`minimize_not_implemented`, was `no_durable_crash_artifact`) accurately reflects
+that D-106 closed the durability gap without authorizing `MINIMIZE` itself — matches
+D-106's own "what this does NOT authorize" clause exactly.
+
+**Bugs found.** None. No blocker, major, minor, or trivial defect found in this
+diff during this review.
+
+**Verdict: APPROVED.** All automated suite counts independently reproduced exactly.
+The headline claim — a real, self-discovered `FUZZ` finding reaching a real
+`VERIFIED` verdict — is now independently confirmed by three separate code paths
+(D-109's own report, D-110's independent re-run, and this entry's own standalone
+script + raw-SQL + raw-filesystem-hash verification), not narrated once and trusted
+twice. The negative case (a genuinely broken candidate still reaching `REJECTED`
+through the same live pipeline) is now confirmed live for the first time by this
+entry specifically, closing the one gap D-109/D-110 left to unit-test coverage
+rather than a full live run. Zero orphaned docker resources from any of this
+session's real-docker runs. This closes D-106's own final-approval chain
+(CTO ruling → backend-developer implementation → cybersecurity clearance →
+qa-engineer re-verification) with no remaining named gate.
+
+**Security implications.** None beyond D-110's own assessment, which this entry
+does not re-litigate (out of this seat's authority per this project's own division
+of labor) — re-confirmed only that the diff this review tested is the exact commit
+D-110 reviewed (`2650e01`, unchanged since, now sitting under `d523fed`'s D-110
+docs-only commit).
+
+**Scalability implications.** None beyond D-106/D-109/D-110's own assessment.
+
+**Cost implications.** None — this is a verification pass, not a code change.
+
+**Recommendation.** Merge is unblocked. This branch
+(`fix/d106-reproducer-persistence`, commit `d523fed`) has now cleared every gate
+this project's standing pattern (D-097, D-102, D-104, D-108) requires: CTO ruling,
+implementation, independent cybersecurity review, independent qa-engineer
+re-verification. No blocker outstanding. The orchestrating session may merge.
+
+**Final approval authority** — qa-engineer (this seat), for the re-verification
+verdict itself (APPROVED, recorded here); CTO retains final authority to merge.
+
+---
