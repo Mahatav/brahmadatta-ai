@@ -3,6 +3,7 @@ import { SystemStatus } from '../components/SystemStatus';
 import { LiveEventStatus } from '../components/LiveEventStatus';
 import { LocalRepositoryIntake } from '../components/LocalRepositoryIntake';
 import { MissionCommandCenter } from '../components/MissionCommandCenter';
+import { MissionControlPanel } from '../components/MissionControlPanel';
 import { ModelGatewayStatus } from '../components/ModelGatewayStatus';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
@@ -21,6 +22,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     <section class="situation-room" aria-label="Situation room">
       <MissionCommandCenter client:load />
       <LocalRepositoryIntake client:load />
+      <MissionControlPanel client:load />
     </section>
 
     <section class="control-plane" aria-labelledby="control-plane">

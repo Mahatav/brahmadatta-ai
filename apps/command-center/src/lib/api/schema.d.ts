@@ -155,7 +155,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The complete evidence bundle for a mission */
+        /**
+         * The complete evidence bundle for a mission
+         * @description SEC-50, D-071c: this handler returns `assemble_evidence_bundle`'s result directly, without going through `orchestrator.evidence_export` at all — it is safe *because* `assemble_evidence_bundle` itself now sanitizes every `GateResult.detail` before returning (not because this handler does anything extra), so this endpoint stays safe automatically if that function is ever called from a new site in the future too.
+         */
         get: operations["getEvidenceBundle"];
         put?: never;
         post?: never;
@@ -174,7 +177,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Export the Markdown/JSON evidence report */
+        /**
+         * Export the Markdown/JSON evidence report
+         * @description Exportable from any mission state (architecture spec §5.3: 'export is a side-effect and an endpoint, not a privilege of the happy path'). Each call is a fresh export (a new export_id/generated_at); the pipeline-driven JobKind.EXPORT job that runs on entry to EXPORTING reuses a mission's existing bundle instead of re-rendering one — see orchestrator.evidence_export's module docstring for why the two callers differ on that point, and the known gap around `idempotency_key` not yet being persisted.
+         */
         post: operations["exportEvidence"];
         delete?: never;
         options?: never;
@@ -243,7 +249,11 @@ export interface paths {
         /** Patch candidates, with provenance and policy status */
         get: operations["listPatchCandidates"];
         put?: never;
-        post?: never;
+        /**
+         * Submit an operator-authored patch candidate
+         * @description T-3, D-008. The HTTP-reachable counterpart to PATCH_GENERATE's own model-driven fan-out, for a mission that has already reached PATCH (or is still in VERIFY with its candidate set not yet frozen — see orchestrator.operator_candidates for why a second candidate can still land there). provenance is always OPERATOR_SUPPLIED; the diff is validated by the same deterministic gate matrix (compile, reproducer-eliminated, regression-preserved) a model-generated candidate goes through — never accepted on say-so. A policy-accepted candidate is dispatched into VERIFY through the same Job queue, worker and executor every other candidate uses; a policy-rejected one is recorded but never enqueued.
+         */
+        post: operations["submitOperatorPatchCandidate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1241,6 +1251,12 @@ export interface components {
             fuzz_seconds: number;
             patch?: components["schemas"]["PatchPolicy"];
             /**
+             * Patch Generation Attempts
+             * @description Fan-out width for JobKind.PATCH_GENERATE (D-027, architecture spec §3.4: '1 job, N attempts internally'). Each attempt that produces a parseable candidate is persisted as its own PatchCandidate row the moment it is produced, whether policy-accepted or not. Default 10 matches the D6 kill criterion's supporting threshold ('at least 3 of 10 attempts', docs/09-company/01-vision-and-p0-cut.md). Added by #168 T4 — not present in the original architecture spec's MissionPolicy listing, so documented here as the addition it is (backend-developer's minor-contract-detail authority per its own role brief).
+             * @default 10
+             */
+            patch_generation_attempts: number;
+            /**
              * Reproducer Replay Attempts
              * @description How many times a minimized input must replay from a clean build before `reproducible` is set.
              * @default 5
@@ -1432,6 +1448,37 @@ export interface components {
              * @description Digest of the replayed transcript, so the claim is checkable.
              */
             transcript_sha256?: string | null;
+        };
+        /**
+         * OperatorPatchCandidateRequest
+         * @description `POST /missions/{id}/patches` (T-3, D-008). An operator-authored unified diff,
+         *     submitted for the same finding `PATCH_GENERATE` would otherwise have targeted.
+         *
+         *     Deliberately carries no `provenance`, `policy_status` or `model` field — the
+         *     server sets `provenance=OPERATOR_SUPPLIED` unconditionally (an HTTP caller cannot
+         *     claim `MODEL_GENERATED` for a diff it typed itself) and the real policy gate
+         *     (`orchestrator.patch_policy.evaluate_patch_policy`) computes `policy_status` from
+         *     the diff and the mission's own policy, exactly as it does for a model-generated
+         *     candidate. See `orchestrator.operator_candidates.submit_operator_candidate`.
+         */
+        OperatorPatchCandidateRequest: {
+            /**
+             * Diff
+             * @description Unified diff (`git diff` / `diff -u` format). Verified through the same deterministic gate matrix a model-generated candidate goes through — never accepted on say-so.
+             */
+            diff: string;
+            /**
+             * Finding Id
+             * Format: uuid
+             * @description Which finding this diff addresses. Must belong to this mission.
+             */
+            finding_id: string;
+            /**
+             * Rationale
+             * @description Optional operator note on why this diff is believed to fix the finding. Displayed separately from evidence, never treated as evidence.
+             * @default
+             */
+            rationale: string;
         };
         /** Page[FindingSummary] */
         Page_FindingSummary_: {
@@ -3354,6 +3401,104 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_PatchCandidate_"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Content */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    submitOperatorPatchCandidate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mission_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OperatorPatchCandidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PatchCandidate"];
                 };
             };
             /** @description Bad Request */

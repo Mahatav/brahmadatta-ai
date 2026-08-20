@@ -9449,3 +9449,383 @@ for the correction itself and for not taking any further unilateral action again
 shared environment.
 
 ---
+
+---
+
+## D-100 — Command Center mission-lifecycle control surface: real create/authorize/snapshot/preflight/start/pause/cancel UI, live-verified end to end · 2026-08-19/20 · `frontend-developer` seat
+
+Numbering note, same pattern D-097 established: this worktree's local
+`.project/decisions.md` tops out at D-097; `origin/main` (fetched fresh before writing
+this) tops out at D-099. This entry is D-100, the next free number after what is
+actually on `origin/main`, so it does not collide on merge. Reconciling any other
+numbering drift between this worktree and `origin/main` is the merging session's job,
+not redone here.
+
+**Decision** — Closed the P0-blocking gap identified in this dispatch: the Command
+Center (`apps/command-center/`) had zero mission-creation or control flow, only ever
+reading a mission by hand-typed `?mission=` query param. Added:
+
+1. `src/lib/api/client.ts` extended from 2 endpoints to the full 20-endpoint surface:
+   all 11 mission-lifecycle operations (`createMission` … `cancelMission`,
+   `preflightMission`, `startMission`, `pauseMission`) and the evidence/export
+   surface (`listFindings`, `getFinding`, `getBaselineReport`, `getFuzzingReport`,
+   `listPatchCandidates`, `submitOperatorPatchCandidate`, `getPatchVerification`,
+   `getEvidenceBundle`, `exportEvidence`), typed directly against
+   `schema.d.ts` (regenerated from `packages/schemas/openapi.json`, which was already
+   stale against the committed openapi dump — `npm run check:api` failed before this
+   work and passes after). One `ApiError` class carries `status`/`code`/`details`/
+   `traceId` uniformly.
+2. `src/components/MissionControlPanel.tsx` (new) — the actual create/authorize/
+   snapshot/preflight/start/pause/cancel/emergency-teardown UI, per design-system
+   §4.1/§4.2. Built as new, self-contained chrome directly against the rev-2 token
+   system (`packages/ui-components/tokens.css`) — bracket-label controls, crop-mark
+   primitive (`.bd-crop-frame`, shared per §12 build note 5), state glyphs, a
+   `ConfirmDialog` primitive for the three destructive/high-consequence actions
+   (start, cancel, emergency teardown) naming the consequence in a full sentence per
+   §2.7. Deliberately does **not** touch the Core/Stage-Timeline/Findings-rail/
+   Candidate-Compare/Verdict-panel visual language (out of scope — separate pass).
+3. `src/lib/events/store.ts` gained `$activeMissionId`/`setActiveMissionId`, and
+   `MissionCommandCenter.tsx` was rewired to bind its one shared SSE connection
+   (§12 build note 1) to that store instead of only a page-load-time URL read —
+   additive: a deep-linked `?mission=` URL still works, seeding the same store once.
+4. `LocalRepositoryIntake.tsx` is wired into the real flow (not rewritten): when its
+   local scan has run, `MissionControlPanel` prefills `repository_ref`/`granted_by`
+   from it, so the operator's local-folder context now feeds a real mission instead
+   of sitting in a disconnected nanostore.
+
+**A genuine contract gap found and worked around, not silently papered over** —
+`SnapshotRequest.archive_sha256` is required and checked server-side against a
+digest the server computes itself from a deterministic tar
+(`authorization/service.py::_materialize_source`); a browser cannot reproduce that
+tar byte-for-byte, so it cannot know the correct digest before the first call, and
+no digest-preview endpoint exists. `snapshotLocalRepository()` uses a two-step
+probe: POST once with a placeholder digest, read the real one back out of the
+guaranteed `SnapshotDigestMismatchError.details.computed_archive_sha256` (`api/
+errors.py::envelope` always returns `ContractError.details`), retry once with the
+corrected value. Proven against the real backend, not just unit-mocked (§ live
+verification below): one real `409` followed by one real `201` on every snapshot
+call. Flagged to backend-developer as the cleaner long-term fix (a real digest-
+preview endpoint) rather than fixed by adding backend surface myself.
+
+**Two more real backend defects found during live verification, reported, not
+fixed here (backend-owned files)** — both share one root cause:
+`orchestrator/evidence_repository.py::_artifact_ref` calls `ArtifactRef(**value)`
+assuming `row.log_ref` is a mapping; on a real `BaselineReport` row it is a plain
+string, so `GET /missions/{id}/baseline` and `GET /missions/{id}/evidence` (which
+calls the former internally) both 500 with
+`TypeError: contracts.schemas.common.ArtifactRef() argument after ** must be a
+mapping, not str`. Reproduced live against mission `0696cf5b-…` created by this
+session's own UI; trace ids `fe117a90320d4337a441dca9bee34238` (baseline) and
+`3aa632d7c71e4129a1aecdbbfdad6e0b` (evidence) are in the control-api container log
+from this run.
+
+**A third gap, infra-scoped, also found live and not fixed in committed files** —
+no `manage.py run_orchestrator` process is wired into
+`infrastructure/compose/docker-compose.yml` at all (no service, no profile). Without
+it, a mission never advances past `VALIDATING` — `run_worker` alone claims and runs
+individual jobs but never dispatches the state transitions between them
+(`orchestrator.queue.tick()`, which only `run_orchestrator` calls). This is
+independent of and additional to the already-known `run_orchestrator` singleton-lock
+work (D-096/SEC-43 elsewhere in this log). Ran it manually
+(`docker exec -d brahmadatta-control-api python manage.py run_orchestrator`) for
+this session's own verification only; not added to the compose file, since service
+topology is devops-engineer's call (candidate framings: its own service, or folded
+into an existing one — not decided here).
+
+**A fourth gap, also infra-scoped**: `.env.example`'s committed
+`CONTROL_API_WORKER_CMD=python manage.py rqworker default` names a command that does
+not exist (`missions/management/commands/run_worker.py` is the real one); every
+fresh `worker` container crash-loops on `Unknown command: 'rqworker'` until this is
+corrected. Worked around locally in this session's own `.env` (untracked) for
+verification; the committed `.env.example` was not edited, since fixing a committed
+default is this seat overriding devops-engineer's/backend-developer's prior work
+without their sign-off — flagged instead.
+
+**Live verification actually performed, not narrated** — full stack brought up via
+`infrastructure/scripts/dev-up.sh` (`DEV_UP_WORKER=1`, plus a manually-started
+`run_orchestrator` and the `.env` worker-command fix above), fresh Postgres 16,
+migrations applied. Playwright drove a real Chromium browser against
+`https://localhost:8443/` (self-signed dev cert, real nginx, real Django/ninja
+control-api, real worker, real orchestrator tick loop):
+
+- Run 1 (`mission 0696cf5b`): filled the real form, clicked
+  `[ CREATE + AUTHORIZE + SNAPSHOT ]` → real `POST /missions` (201) → `POST
+  .../authorize` (201) → `POST .../snapshot` (409, then 201 via the probe/retry
+  above) → `POST .../preflight` (200, 4 checks passed) → clicked
+  `[ START MISSION ]`, confirmed the real dialog → `POST .../start` (202). Mission
+  state observed live, through the real SSE-fed UI and independently via `GET
+  /missions`, progressing `SNAPSHOTTED → VALIDATING → BASELINE → TRIAGE →
+  STRESS_TEST`, with **real `ctest` counts** (`tests_passed: 8, tests_failed: 0`)
+  against the bundled `demo/repositories/pktcfg` fixture — the first time this
+  Command Center has ever driven a mission past creation, and the first live
+  confirmation that D-088's nginx credential injection actually unblocks a real
+  browser session end to end.
+- Run 2 (`mission 90a48ef6`): repeated create/authorize/snapshot/preflight, then
+  clicked `[ CANCEL MISSION ]` → real `ConfirmDialog` rendered exactly the required
+  copy ("Cancel mission 90a48ef6." / "The sandbox is destroyed and any unexported
+  evidence is lost. This cannot be undone."), confirmed → real `POST .../cancel`
+  (202) → mission state and posture both observed `CANCELLED` via `GET /missions`.
+- Screenshots and full console/network logs captured for both runs (paths in the
+  handoff; not committed to the repo — this is a disposable local dev stack, not a
+  new demo artifact).
+- `npm run check` (security/render-safety, ai-core-motion, issue-20, local-intake,
+  generated-api-types, the two new mission-control test scripts, `astro check`,
+  `tsc --noEmit`) and root `npm run lint`: all green, run in this session, actual
+  output included in the handoff.
+
+**Options considered** for the digest problem specifically — (a) leave `source:
+'git'` snapshotting unusable from the browser and only support a hypothetical
+future upload flow; (b) have the frontend attempt to replicate the server's tar
+format in JS to compute a matching digest; (c) the probe/retry pattern, as
+implemented.
+
+**Pros and cons** — (a) ships nothing usable against the one real target this
+finale actually has (`demo/repositories/pktcfg`), failing the task's own
+verification requirement. (b) is fragile by construction: any change to
+`archive.build_tar_from_directory`'s member ordering, mtime handling, or tar format
+silently breaks frontend-side hash computation with no compile-time signal, and
+duplicates server logic in a second language. (c) costs one extra round trip on the
+very first snapshot call per mission (never repeated — `create_mission_snapshot` is
+idempotent on a matching digest), uses only the error contract the API already
+publishes, and is proven correct against the real server, not just plausible.
+
+**Cost implications** — (c) is free; no new backend endpoint, no new dependency.
+
+**Security implications** — neutral. The placeholder digest is syntactically valid
+(64 hex chars) but content-meaningless; the server still independently computes and
+verifies the real digest before anything is trusted (`SnapshotDigestMismatchError`
+on any real mismatch), so this cannot be used to smuggle unverified content in.
+
+**Scalability implications** — none; one extra request per mission, once.
+
+**Recommendation** — (c), as implemented, with the digest-preview-endpoint fix
+flagged to backend-developer as the cleaner long-term replacement.
+
+**Final approval authority** — backend-developer for the digest-preview-endpoint
+question (whether to add one); devops-engineer for the `run_orchestrator` compose
+wiring and the `.env.example` worker-command fix; CTO if the probe/retry pattern is
+judged to need backend involvement before the finale rather than staying a frontend
+workaround.
+
+---
+
+## D-101 — Fragment Mono woff2 measured advance is 0.618em, not the assumed 0.6em (design-system §2.2/§13 Q6, DS-06) · 2026-08-19/20 · `frontend-developer` seat
+
+**Decision/finding** — Per DS-06's own instruction ("first build task on any panel
+that does width arithmetic… measure the shipped Fragment Mono woff2 against a
+60-character ruler string"), rendered the actual shipped
+`@fontsource/fragment-mono` `fragment-mono-latin-400-normal.woff2` (the exact file
+`BaseLayout.astro` imports) in a real headless Chromium (Playwright), a 60-char
+bracket-label-style ruler (`[ HEAP-BUFFER-OVERFLOW parser.c:118 READ 4 AT +2 ASAN
+]`), measured via `getBoundingClientRect().width`, cross-checked with a pure
+`'A'.repeat(60)` ruler at four type-scale sizes (`mono-2xs` 11px, `mono-xs` 12px,
+`mono-sm` 13px, `mono-md` 15px). All four sizes agree to 4 decimal places:
+
+**Measured advance: 0.618em** (9.2701px per character at `mono-md`'s 15px), against
+the document's assumed **0.6em**. **Drift: +3.00–3.01%** — at or just past DS-06's
+own ">3% drift" re-derivation threshold.
+
+This is **not** the visual-panel work itself (out of this task's scope, per the
+dispatching session's explicit instruction — a separate pass builds the Core/
+Stage-Timeline/Findings-rail/Candidate-Compare/Verdict-panel). It is the
+measurement DS-06 asked whoever builds those panels next to have in hand before
+starting, so it is recorded here rather than silently left for that seat to
+re-discover.
+
+**Consequence, stated so the next seat does not have to re-derive it**: every
+column-count figure in §3, §6.4 and §6.5 that assumes 0.6em is ~3% optimistic. At
+`mono-md`, §6.4.1's "652px column holds 72 characters" becomes closer to 70; the
+"77 characters per row" in §6.5 becomes closer to 75. Whether this actually breaks
+any specific line (e.g. the longest `NOT_RUN` reason string fitting inline) needs a
+character-count check against the real longest strings, not just the percentage —
+flagged as the next concrete step, not resolved here.
+
+**Cost implications** — none; this is a factual finding.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation** — Whoever next touches §3/§6.4/§6.5's column arithmetic
+re-derives the affected budgets from 0.618em before building, per DS-06's own
+rule. This entry and `docs/09-company/04-design-system.md` §13 Q6/§2.2/DS-06 should
+be reconciled by the `ui-ux-designer` seat (this seat's authority is measurement
+only, not editing that document, which is frozen/approved — D-017/D-018/product
+review).
+
+**Final approval authority** — `frontend-developer` (this seat) for the
+measurement itself, per DS-06's own final-approval line ("frontend-developer, on
+measurement"); `ui-ux-designer` for updating the design-system document's own
+figures in response.
+
+---
+
+## D-102 — Independent `qa-engineer` verification of the Command Center mission-lifecycle control surface (D-100): verdict APPROVED WITH KNOWN ISSUES · 2026-08-19/20 · `qa-engineer` seat
+
+**Decision** — This is the independent, actually-executed re-check this project's standing
+rule requires before D-100 (commit `ae6f84c`) is called done; the implementer had no
+Agent-tool access and could not dispatch a reviewer itself. Every claim below is traceable to
+a command or Playwright script run in this session, not re-quoted from D-100.
+
+**Stack** — `docker ps -a` showed zero pre-existing `brahmadatta-*` containers before this
+session started one (`DEV_UP_WORKER=1 infrastructure/scripts/dev-up.sh`), so no live collision
+with a concurrent session. One stale artifact from an *earlier, already-torn-down* session was
+found and cleared: a leftover `brahmadatta_command-center-node-modules` Docker volume plus a
+gitignored `apps/command-center/.astro/dev.json` (checked via `git check-ignore -v`, confirmed
+not tracked) held a stale PID that made every fresh `astro dev` refuse to start ("Another astro
+dev server is already running"). Deleting the stale `dev.json` and restarting the
+`command-center` container (not the whole stack; no data loss) fixed it. `run_orchestrator` was
+started manually inside `brahmadatta-control-api`, matching D-100's own documented workaround
+for the same compose gap it flagged (devops-engineer's call, not re-litigated here). Migrations
+were already applied; `.env`'s `CONTROL_API_WORKER_CMD` already carried the corrected
+`run_worker` value from a prior session, matching D-100's documented local fix.
+
+**Automated checks, actually run this session, not pasted from elsewhere**:
+- `apps/command-center`: `npm run check` — exit 0. All nine sub-checks green, including
+  `check:mission-control-client`, `check:mission-control-form`, `astro check` (0 errors/0
+  warnings/0 hints across 29 files), and `tsc --noEmit` (silent/clean).
+- `apps/command-center`: `npm run check:security` — exit 0 ("render safety ok: hostile strings
+  inert, raw HTML absent, finale CSP script-src strict").
+- Repo root: `npm run lint` — exit 0, no findings.
+
+**Live mission drive, run 1 (real create → authorize → snapshot → preflight → start), via a
+real Chromium (Playwright) against `https://localhost:8443/`, cross-checked with raw `curl`
+independent of the UI**:
+- UI step log showed `CREATE · OK` → `AUTHORIZE · OK` → `SNAPSHOT · OK` (`33 files, 58131
+  bytes`) → `PREFLIGHT · OK` (`4 checks passed`), mission `eb2b5290…`.
+- Real network trace captured from the browser: `POST /missions` 201, `POST .../authorize`
+  201, `POST .../snapshot` 409 then 201 (the documented digest probe/retry, reproduced live,
+  not just unit-mocked), `POST .../preflight` 200, `POST .../start` 202.
+- `[ START MISSION ]` confirm dialog read exactly: "Start mission eb2b5290. Starts the
+  autonomous workflow against pktcfg at snapshot b7a82f9fcd03bcef…, egress denied for the whole
+  run. This begins real sandboxed execution." Focus landed on `[ CANCEL ]`, not the destructive
+  action, per §2.7's "never the default focus target."
+- Independent `curl -sk https://localhost:8443/api/v1/missions/eb2b5290-…` (no UI involved)
+  returned, ~35s after start: `"state": "STRESS_TEST"`, `"posture": "INVESTIGATING"`,
+  `"stages_completed": ["AUTHORIZE","INGEST","BASELINE","ANALYZE","STRESS_TEST"]`,
+  `"tests_passed": 8, "tests_failed": 0` — the real backend state machine progressing on its
+  own, not the UI showing anything it made up.
+
+**Live mission drive, run 2 (Cancel)**: created and progressed a second mission
+(`aec9069d…`) the same way, clicked `[ CANCEL MISSION ]`. The `ConfirmDialog` rendered the
+exact copy the design-system document quotes verbatim in §4.2 ("Cancel mission aec9069d. The
+sandbox is destroyed and any unexported evidence is lost. This cannot be undone."), focus on
+`[ CANCEL ]`. `POST .../cancel` → 202. Independent `curl` (not the UI) on the same mission id
+afterward: `"state": "CANCELLED", "posture": "CANCELLED"`, `last_event.type ==
+"TEARDOWN_CONFIRMED"`. Confirmed server-side, not just a UI spinner stopping.
+
+**Live mission drive, run 3 (Emergency Teardown + Pause)**: third mission (`a9a506a8…`),
+started it, `[ PAUSE ]` was correctly disabled (server had not yet reported `PAUSED` in
+`allowed_transitions` — real gating, not a bug). `[ EMERGENCY TEARDOWN ]` dialog read: "Emergency
+teardown. Every held resource for this mission — sandbox and model-host lease — is torn down
+immediately and any unexported evidence is lost. This cannot be undone.", names the resource
+kinds per §4.2's "confirmation names every resource that will be destroyed." `POST .../cancel`
+→ 202 (teardown resolves into the same cancel/teardown surface as the regular path, matching
+§4.2's explicit "one teardown surface, not an emergency one and a normal one" requirement).
+Independent `curl`: `state: CANCELLED`, `last_event.type: TEARDOWN_CONFIRMED`.
+
+**Malicious-input probe (this task's explicit ask, not in D-100)**: submitted
+`repository_ref = "../../../../etc/passwd"`, `name = "<img src=x onerror=alert(1)>QA-XSS-test"`,
+`granted_by = "qa <script>alert(2)</script> tester"`. Server correctly rejected the path
+traversal with `409 CONFLICT`, `"repository_ref does not resolve to a readable local
+directory."` — the allowlist check is backend-owned and worked correctly; nothing in this
+branch's client code attempts to validate or bypass it, it only displays the server's verdict.
+No script tag or `onerror` handler was ever literally present in the DOM
+(`page.content()` checked), and no `page.on('dialog', …)` fired — confirms `sanitizeDisplayText`
+is doing real work and React's own escaping was never bypassed. Reviewed `store.ts` and
+`MissionControlPanel.tsx` line by line: every server-derived string that reaches JSX (mission
+state, repository ref, error messages/details, check names/details, granted-by) is run through
+`sanitizeDisplayText`/`sanitizeDisplayList` — consistent with the repo's existing convention,
+no gaps found.
+
+**A new bug found in this review, not in D-100 — BUG-1, severity MAJOR, owner
+frontend-developer**: `MissionControlPanel.tsx`'s `runCreationFlow` catch block —
+
+```ts
+} catch (error) {
+  const info = describeApiError(error);
+  setLastError(info);
+  const runningStep = steps.find((step) => step.status === 'running');
+  updateStep(runningStep?.key ?? 'CREATE', 'fail', info.message);
+}
+```
+
+— reads `steps` from the enclosing component-render closure, not from live state. Because
+`runCreationFlow` is invoked once per submit and keeps running the *same* closure across all its
+`await`s, `steps` here is frozen at whatever it was when this particular closure was created
+(effectively the pre-run, all-`pending` array) — none of this run's own `updateStep` calls
+inside the same execution are visible to it. `steps.find(status === 'running')` therefore never
+matches, and `?? 'CREATE'` always fires: **every mid-flow request failure (AUTHORIZE, SNAPSHOT,
+or PREFLIGHT) is mislabeled as `[ CREATE · FAIL ]` in the step log**, while the row that actually
+failed is left stuck showing `RUNNING`/`QUEUED` forever. Reproduced live: the malicious-input
+run above failed at `SNAPSHOT` (real 409 CONFLICT from the backend, confirmed in the network
+log), but the UI's step log showed `[ CREATE · FAIL ]` with `SNAPSHOT` stuck at `RUNNING` and
+`PREFLIGHT` stuck at `QUEUED`. This directly contradicts design-system §4.1 row 3's own
+requirement ("Snapshot mismatch → row `[ × FAIL ]` critical") — the *correct* row must show the
+failure, not an unrelated one. Not rated blocker because the real error message, `code`, and
+`trace_id` are still surfaced correctly and legibly in the `bd-alert-line` below the step log
+(`[ × CONFLICT ] repository_ref does not resolve to a readable local directory. (…) · trace
+54677c…`), so an operator is not left without the real diagnosis — only the step-log's own
+per-row attribution is wrong. No test in `check-mission-control-client.mjs` or
+`check-mission-control-form.mjs` covers this path, because the bug lives directly in the `.tsx`
+component's closure, which those two scripts (by design, split out for `node
+--experimental-strip-types` testability) do not exercise. Suggested fix direction, not applied
+here (QA files bugs against code, it does not fix them): resolve the failing step from a
+`useRef` kept in sync by `updateStep` itself, or have each `await` site pass its own step key
+explicitly into the catch handler, rather than deriving it from stale render-time state.
+
+**Re-confirmed, not just re-quoted, from D-100's own flagged items**:
+1. `GET /missions/{id}/baseline` and `GET /missions/{id}/evidence` — reproduced live on this
+   session's own mission `eb2b5290…`: both `500`, `code: INTERNAL_ERROR`. Control-api container
+   log confirms the exact reported root cause: `orchestrator/evidence_repository.py:205,
+   _artifact_ref: TypeError: contracts.schemas.common.ArtifactRef() argument after ** must be a
+   mapping, not str`, raised from `get_baseline_report` at line 75. Real and reproducible on
+   this branch's code as of `ae6f84c`. Per this dispatch's own note, a separate
+   backend-developer worktree is fixing this concurrently — informational here, not a blocker
+   on this review, and not re-owned by this seat.
+2. No `run_orchestrator` process in `docker-compose.yml` — confirmed; had to start it manually
+   for this session's own verification, exactly as D-100 describes. devops-engineer's call.
+3. `.env.example`'s stale `CONTROL_API_WORKER_CMD=python manage.py rqworker default` —
+   confirmed still present in the committed file; this session's own `.env` (untracked) already
+   carried the corrected value from a prior session. backend-developer/devops-engineer's call.
+
+**Options considered** for the verdict — (a) APPROVED outright; (b) APPROVED WITH KNOWN ISSUES;
+(c) REJECTED.
+
+**Pros and cons** — (a) would be wrong: BUG-1 is real, independently reproduced, and not yet
+filed anywhere. (c) is disproportionate: every mission-lifecycle control this task exists to
+deliver (create, authorize, snapshot, preflight, start, cancel, emergency-teardown) was driven
+end-to-end against the real backend in this session and independently cross-checked via raw
+`curl`, and all of it worked correctly; BUG-1 affects only the clarity of the step log on a
+failure path, not any control's actual function, not data integrity, and not any security
+boundary (the backend's own validation caught the malicious input correctly regardless of what
+the step log displayed). (b) matches the evidence: real, working feature; one new MAJOR (not
+blocker) UI-correctness bug to fix; three already-known, already-flagged, already-owned-elsewhere
+infra/backend gaps that are explicitly out of this branch's scope per the dispatching session's
+own instructions.
+
+**Cost implications** — none from this review itself; BUG-1's fix is a small, contained change
+to one catch block.
+
+**Security implications** — none found. The malicious-input probe confirmed the client neither
+attempts nor needs to enforce the repository-path allowlist itself (correctly deferred to and
+enforced by the backend), and confirmed `sanitizeDisplayText`/`sanitizeDisplayList` are applied
+consistently to every server-derived string this branch renders.
+
+**Scalability implications** — none.
+
+**Verdict: APPROVED WITH KNOWN ISSUES.** The mission-lifecycle control surface is real, is
+independently verified end-to-end against the live backend (not just re-quoted from D-100), and
+is safe to merge. One new MAJOR bug (BUG-1, step-log misattribution on request failures) should
+be fixed promptly but does not block merge, since the underlying error information is still
+correctly surfaced to the operator elsewhere on the same screen. The three infra/backend gaps
+D-100 already flagged are re-confirmed real and are owned outside this branch (devops-engineer,
+backend-developer, and the concurrent ArtifactRef fix already in flight).
+
+**Recommendation** — Merge this branch. File BUG-1 against `frontend-developer` for a follow-up
+fix (small, contained). No change needed to this branch before merge on QA's authority alone.
+
+**Final approval authority** — `qa-engineer` (this seat) for the verdict itself, per this
+project's standing QA rule. `frontend-developer`/`engineering-manager` for scheduling BUG-1's
+fix. CTO if anyone wants to escalate past an APPROVED WITH KNOWN ISSUES verdict for a P0-blocking
+feature this close to the finale.

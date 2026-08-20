@@ -14,7 +14,9 @@
     "check:issue-20": "node scripts/check-issue-20-analysis-rail.mjs",
     "check:local-intake": "node scripts/check-local-repository-intake.mjs",
     "check:security": "node scripts/check-render-safety.mjs",
-    "check": "npm run check:security && npm run check:ai-core && npm run check:issue-20 && npm run check:local-intake && npm run check:api && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
+    "check:mission-control-client": "node --experimental-strip-types scripts/check-mission-control-client.mjs",
+    "check:mission-control-form": "node --experimental-strip-types scripts/check-mission-control-form.mjs",
+    "check": "npm run check:security && npm run check:ai-core && npm run check:issue-20 && npm run check:local-intake && npm run check:api && npm run check:mission-control-client && npm run check:mission-control-form && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
     "build": "npm run check && ASTRO_TELEMETRY_DISABLED=1 astro build",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
     "smoke:local": "node scripts/smoke-local-command-center.mjs"
