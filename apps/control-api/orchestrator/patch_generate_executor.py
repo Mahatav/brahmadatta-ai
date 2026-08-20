@@ -193,11 +193,22 @@ def _build_live_backend(settings):
     The only live backend this codebase has (D5, #35/#36) — constructed here, not
     imported at module scope, for the same reason as everything else in this
     section.
+
+    `bearer_token=settings.model_host_bearer_token` is D-075/SEC-50, threaded through
+    the same way `OllamaCodeLlamaBackend`'s own docstring names this exact scenario:
+    the compose `model-host-auth` sidecar (`network_mode: "service:model-host"`)
+    rejects every request without it once the `model` profile is in use. Found live,
+    #50 D7 gate rehearsal run 5 (D-105, `.project/decisions.md`) — `GatewaySettings.
+    model_host_bearer_token` was already computed correctly by `from_environment()`
+    and `OllamaCodeLlamaBackend.bearer_token` was already a real field; this call site
+    simply never connected the two, so every live-model `PATCH_GENERATE` call got a
+    real `401` back from the sidecar instead of ever reaching Ollama.
     """
     from gateway.ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaCodeLlamaBackend
 
     return OllamaCodeLlamaBackend(
         endpoint=settings.endpoint or DEFAULT_OLLAMA_ENDPOINT,
+        bearer_token=settings.model_host_bearer_token,
     )
 
 
