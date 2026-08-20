@@ -10423,3 +10423,206 @@ work and for the close/continue call on #50; this seat, for the live-run finding
 evidence, and verdict recorded here.
 
 ---
+
+## D-106 — CTO ruling on the reproducer-persistence gap (D-098 rec. 3 / D-105 rec. 2):
+build a scoped fix, not full `MINIMIZE`, and not a fallback narrative · 2026-08-20 ·
+`CTO` seat
+
+**Context.** Two independent live rehearsals of the #50 D7 gate (D-098, run 4; D-105,
+run 5), on two different sessions, against two different correct patch candidates,
+both hit the identical wall: `VERIFY`'s `REPRODUCER_ELIMINATED` gate returns `NOT_RUN`
+("reproducer file is missing"), capping every candidate at `HUMAN_REVIEW_REQUIRED`
+regardless of correctness, because no code path anywhere in the live pipeline ever
+writes a `Reproducer` row for a finding it discovers itself. `#50`'s own acceptance
+criteria (`gh issue view 50`) require "both verdicts produced in that single run, one
+Verified, one Rejected" — as the pipeline stands today, `Verified` is structurally
+unreachable for a self-discovered finding, no matter how correct a candidate is. This
+is now confirmed twice, not a fluke, and is D-105's own named single largest remaining
+blocker to a genuine `VERIFIED` verdict.
+
+**What I actually read before ruling**, beyond the two rehearsal reports and issue #50
+itself: D-083 §2 (`_minimize_executor` is a real, registered, honest stub — always
+`FAILED`/`infra_failure=True` — because `run_fuzzing_stage`'s `ContainerJail` deletes
+crash-artifact bytes on `close()` before they can survive to a caller, and
+`run_fuzzing_stage` has no `workspace_root` parameter to receive a durable copy even
+if it tried); D-071/D-096/D-105's confirmation that `JobKind.MINIMIZE` is deliberately
+absent from `orchestrator/queue.py`'s stage-to-job map and enqueued by no production
+code path; the live code itself — `missions/models.py`'s `Reproducer` model (already
+migrated, already read by `orchestrator/evidence_repository.py` and by
+`verify_dispatch.py::_resolve_reproducer_path`, which resolves
+`finding.reproducers.order_by("-minimized", "created_at").first()`'s `artifact.sha256`
+through `authorization/store.py::path_for` — the exact content-addressed lookup
+`REPRODUCER_ELIMINATED`'s `_run_reproducer` (`orchestrator/verification.py`) then
+replays); `orchestrator/findings.py::record_finding`, confirmed to write only `Finding`
+rows, never a `Reproducer` row, on any call path; and `workers/replay/run.py` (#149,
+already merged, already tested, predates the T2/T7 executor work) — a fully real,
+working "replay a stored crash input, build in a `Jail`, replay 5x, produce a
+sanitizer-confirmed finding and a real `Reproducer` record with a real sha256" module,
+proven by `.project/evidence/d5-reproducer-gate.json`'s own recorded output — but never
+wired into the live Job/orchestrator dispatch path, and never given a Django-backed
+persistence call: it "stays as plain dictionaries... no Django app, event bus, or
+evidence persistence is imported from this worker" (its own module docstring). So the
+gap is not "MINIMIZE is unbuilt" in isolation — it is "nothing in this live pipeline,
+on *any* discovery method, has ever written a `Reproducer` database row." Also read:
+`authorization/store.py::ingest_from_path` — the already-built, already-tested
+content-addressed ingest primitive `orchestrator/snapshot.py` already uses to put
+bytes under `ARTIFACT_ROOT`, which `_resolve_reproducer_path` already reads back out.
+
+**Ruling: neither of the two named options as literally framed. A third, narrower
+option — build a real fix, but scope it to what `VERIFY`'s gate actually needs, not to
+full libFuzzer `-minimize_crash=1` minimization.**
+
+**Options considered:**
+
+**(1) Build `MINIMIZE` for real** (as named in the dispatch): wire `JobKind.MINIMIZE`
+into `orchestrator/queue.py`'s stage-to-job map, open a fresh `ContainerJail`, rebuild
+the harness, run libFuzzer's `-minimize_crash=1`, replay the minimized input, write
+`Finding.reproducible=True` and a `Reproducer` row. This is real capability, but it is
+also the heaviest of the three: a new `JobKind` needs its own idempotency key, retry
+policy, transition-policy entry, and dispatch wiring (the same weight of work D-067/
+D-071/D-076/D-080 each paid for `VERIFY`/`CORRELATE`/`PATCH_GENERATE`/`EXPORT`), on top
+of the actual minimization algorithm and a second `ContainerJail` round-trip. It also
+solves a problem `VERIFY`'s gate does not actually have: `_run_reproducer`
+(`orchestrator/verification.py`) replays whatever reproducer bytes exist against the
+rebuilt `pktcfg_replay` binary and checks whether it still faults — it does not care
+whether those bytes are the *smallest* input that triggers the bug, only that they are
+*real, faulting* bytes. Minimization is a genuine, separate capability (smaller inputs
+are easier to read in an evidence bundle, cheaper to replay, better for a human
+reviewer) but is not what stands between this pipeline and a `VERIFIED` verdict today.
+
+**(2) Accept the gap as a named, documented limitation**, and get rehearsal 6's
+`Verified` verdict from the operator-candidate endpoint against `workers/replay`'s
+pre-staged `crash-literal-tab.bin` fixture instead of a live `FUZZING_CAMPAIGN`
+finding — scoping #50's live-discovery story down to "Verified means a real, but
+pre-staged, reproducer; Rejected means a real, live `FUZZING_CAMPAIGN` finding." This
+is the cheapest option and the fixture (`demo/repositories/pktcfg/crash/
+crash-literal-tab.bin`) genuinely exists and genuinely works — `workers/replay/run.py`
+already proved it end to end back in #149/#150. But it trades away the part of the
+demo that is *not* actually broken: two consecutive live rehearsals (D-098, D-105) show
+`FUZZ` finding the exact same real ASan heap-buffer-overflow on 100% of missions driven
+against `pktcfg` — live, autonomous discovery is the proven, reliable part of this
+pipeline. Downgrading `Verified`'s own finding to a pre-staged replay, for a defensive
+CRS competition entry whose entire pitch is autonomous discovery, concedes exactly the
+claim most worth making, to avoid a fix that turns out — once actually scoped, see
+below — to be comparable in size to wiring `workers/replay` into the live dispatch path
+would have been anyway (both need a new `Reproducer`-row-writing code path; option 2
+does not avoid that work, it just avoids writing it against a live finding).
+
+**(3) A scoped fix: persist `FUZZ`'s own crash-artifact bytes durably and write one
+real (unminimized) `Reproducer` row, reusing existing primitives, without wiring
+`JobKind.MINIMIZE` or building any minimization algorithm at all.** Two changes:
+
+  a. `workers/fuzzing/run.py`/`adapters/cpp/fuzzing.py` (compiler-toolchain-engineer,
+     the named owner per D-083 §2's own final-approval-authority split): give
+     `run_fuzzing_stage` a `workspace_root` parameter and copy the crash-artifact bytes
+     `metrics.artifact_paths` names out of the `ContainerJail`'s worktree before
+     `ContainerJail.close()` (context-manager exit) deletes it — mirroring the pattern
+     `workers/baseline/run.py::run_baseline_stage` already uses for its own one durable
+     artifact (the JUnit report), the exact analogy D-083 §2 itself named as the shape
+     to follow.
+
+  b. `workers/fuzzing/dispatch.py::_fuzz_executor` (backend-developer, T2's owner):
+     once `run_fuzzing_stage` returns artifact bytes that survived, `sha256` them,
+     `authorization.store.ingest_from_path(ARTIFACT_ROOT, ...)` them in (the same
+     already-built, already-tested content-addressed primitive `orchestrator/
+     snapshot.py` already calls, and the exact path shape `verify_dispatch.py::
+     _resolve_reproducer_path` already reads back out — no new artifact-storage code,
+     just a second caller of an existing one), and create a `Reproducer` row
+     (`minimized=False` — honest, since no minimization ran; `replay_attempts`/
+     `replay_successes` from whatever confirmation replay `_fuzz_executor` already
+     does or a single confirming replay added alongside it; `test_command` set to the
+     same `pktcfg_replay <path> <n>` shape `workers/replay/run.py` already uses).
+     `Finding.reproducible` stays `False` on this path — correct, since its own
+     docstring reserves `True` for a *minimized* input specifically, and this fix does
+     not minimize anything. That field's semantics are not touched or weakened by this
+     fix.
+
+**Why (3), not (1) or (2):**
+
+- It closes the exact gap both rehearsals hit — `REPRODUCER_ELIMINATED`'s `NOT_RUN` —
+  for a live, self-discovered `FUZZING_CAMPAIGN` finding, which (1) would eventually
+  also do but at several times the engineering cost for capability `VERIFY`'s gate does
+  not need, and which (2) explicitly declines to do at all.
+- It is materially cheaper than (1): no new `JobKind`, no new idempotency/retry/
+  transition-policy machinery, no second `ContainerJail` round-trip, no minimization
+  algorithm — the artifact-storage primitive (`ingest_from_path`) and the `Reproducer`-
+  row-write pattern (mirroring `record_finding`'s own locked-read/write discipline)
+  both already exist and are already tested; this wires two existing, proven
+  mechanisms together across one gap, rather than building either from scratch.
+- It preserves the part of the current demo that already works twice, live, at 100%: a
+  real `FUZZ` campaign finding a real defect on every mission — (2) would spend real
+  engineering effort (the same `Reproducer`-row-writing work (3) needs anyway) to avoid
+  claiming a capability that has already been proven live and reliable twice over.
+- `MINIMIZE` remains exactly what D-083 §2 and D-105 both already documented it as: a
+  real, honest, structural stub, with the durability gap that blocked it now named
+  precisely and the fix for it — real minimization, a genuinely separate capability
+  from what this ruling scopes — left as a clearly-labeled fast-follow, not silently
+  abandoned and not conflated with what (3) actually builds.
+
+**Cost implications.** Real, but small-to-moderate, not the heavy lift the dispatch's
+framing of option 1 implied: one contained change to `workers/fuzzing/run.py`/
+`adapters/cpp/fuzzing.py` (a `workspace_root` parameter, a durable copy-out call), one
+contained change to `workers/fuzzing/dispatch.py::_fuzz_executor` (an `ingest_from_path`
+call, a `Reproducer.objects.create` mirroring `record_finding`'s own locking
+discipline), plus tests for both — this should be achievable well inside the current
+~9-day runway (deadline ≈2026-08-29 per `.project/state.md`'s 2026-08-19 reconciliation
+note, "10 days out" from that date) without displacing D-105's headline-3 fix
+(`patch_generate_executor.py`'s missing `bearer_token`, already independently in
+progress in a parallel worktree as of this dispatch) or a run-6 rehearsal to confirm
+both live.
+
+**Security implications.** This moves bytes across a trust boundary this project
+already treats as security-sensitive — out of a sandboxed `ContainerJail` and into
+persistent, content-addressed storage that `EXPORT`'s evidence bundle can later read
+back and hand to a human reviewer. Per this project's own standing rule (`CLAUDE.md`,
+"Definition of done": isolation, sandboxing, and verification-gate changes need a
+`cybersecurity` review recorded on the PR before merge), this fix requires that review
+before merge — named explicitly here so it is not skipped under deadline pressure the
+way no prior `JobKind` executor's security review ever was. The specific things that
+review should check: the copy-out path does not follow symlinks the sandboxed process
+could have planted, the ingested bytes are size-capped the same way `ingest_from_path`
+already caps snapshot ingestion, and the `Reproducer.artifact` JSON field never carries
+anything beyond the sha256/uri/kind/size shape `workers/replay/run.py` already
+established as the safe, minimal contents.
+
+**Scalability implications.** None — one crash artifact per finding, same order of
+magnitude as `BaselineReport.log_ref`'s existing durable-artifact pattern.
+
+**What this does NOT authorize.** Wiring `JobKind.MINIMIZE` into `orchestrator/
+queue.py`'s stage-to-job map, or building `-minimize_crash=1` logic, remain out of
+scope for this ruling — `orchestrator/queue.py`'s own comment ("`SANITIZER_BUILD` and
+`MINIMIZE` are deliberately absent... composing them is T2's call") stays accurate and
+unchanged. If a future session wants real minimization (smaller reproducers, `Finding.
+reproducible=True`), that is a separate, later decision, layered on top of (3)'s
+`Reproducer` row rather than replacing it.
+
+**What this means for rehearsal 6 / #50, concretely.** Once (3) lands and is
+cybersecurity-reviewed and qa-verified: a live mission's `FUZZ` job should, on its own,
+produce a `Finding` *and* a `Reproducer` row with real, durable artifact bytes; the
+correct candidate (`candidate-a-correct-bounds-fix.patch`) submitted against that
+mission should then reach `REPRODUCER_ELIMINATED: PASS` (the rebuilt binary no longer
+faults on replay) alongside the already-proven `COMPILE`/`REGRESSION_PRESERVED` passes,
+yielding a genuine `VERIFIED` verdict for a self-discovered finding — the exact shape
+#50's acceptance criteria ask for — while the already-twice-proven `REJECTED` path
+(`candidate-b-rejected-crash-only-fix.patch`) needs no further work at all. If (3) is
+not fully landed and cybersecurity-cleared before the next rehearsal is scheduled, run
+6 should still proceed on the already-proven path (`REJECTED` live, `Verified` deferred)
+rather than wait — this fix is a priority, not a blocker to further rehearsal, per
+D-105's own recommendation that reproducer-persistence be prioritized "over further
+blocker-hunting rehearsals," not over rehearsal entirely.
+
+**Recommendation / ruling.** (3), as scoped above. Owners: compiler-toolchain-engineer
+for `workers/fuzzing/run.py`/`adapters/cpp/fuzzing.py`'s durable copy-out (mirrors
+D-083 §2's own attribution); backend-developer for `workers/fuzzing/dispatch.py::
+_fuzz_executor`'s `ingest_from_path` call and `Reproducer` row creation (mirrors T2's
+existing ownership, D-083's own seat); cybersecurity review required before merge per
+the security implications above; qa-engineer re-verification before this is treated as
+closed, matching this project's standing pattern (D-097, D-102, D-104) for every
+prior D7-critical-path fix. engineering-manager to sequence this against D-105's
+headline-3 fix and the next #50 rehearsal — not decided here.
+
+**Final approval authority** — CTO (technical, this ruling); engineering-manager for
+staffing/sequencing; cybersecurity for the pre-merge review named above; qa-engineer for
+the re-verification gate.
+
+---
