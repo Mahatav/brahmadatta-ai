@@ -110,6 +110,18 @@ export const $latestMissionEvent = atom<MissionEvent | null>(null);
 export const $missionSnapshot = atom<MissionSnapshot>(emptyMissionSnapshot);
 export const $localRepository = atom<LocalRepositoryContext | null>(null);
 
+/** The mission the Command Center is currently bound to. Set either by a deep-linked
+ * `?mission=` query param (read once, on load) or by `MissionControlPanel` after a real
+ * `create → authorize → snapshot → preflight` sequence completes. This is the single source of
+ * truth for "which mission" — `MissionCommandCenter` opens the one shared SSE connection
+ * (§12 build note 1, docs/09-company/04-design-system.md) whenever this changes, rather than
+ * each panel resolving the id on its own. */
+export const $activeMissionId = atom<string | null>(null);
+
+export function setActiveMissionId(missionId: string | null): void {
+  $activeMissionId.set(missionId);
+}
+
 export function resetMissionSnapshot(): void {
   $missionSnapshot.set(emptyMissionSnapshot);
   $latestMissionEvent.set(null);

@@ -1,14 +1,17 @@
 import { useStore } from '@nanostores/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 
 import { AIParticleCore } from './AIParticleCore';
 import { VerdictComparePanel } from './VerdictComparePanel';
 import { getMissionDetail } from '../lib/api/client';
 import { connectMissionEvents } from '../lib/events/connection';
 import {
+  $activeMissionId,
   $localRepository,
   $missionSnapshot,
   $streamState,
+  resetMissionSnapshot,
+  setActiveMissionId,
   setMissionRepositoryContext,
   type LocalRepositoryContext,
   type MissionStage,
@@ -23,26 +26,43 @@ export function MissionCommandCenter() {
   const snapshot = useStore($missionSnapshot);
   const localRepository = useStore($localRepository);
   const streamState = useStore($streamState);
-  const [missionId, setMissionId] = useState<string | null>(null);
+  const activeMissionId = useStore($activeMissionId);
+
+  // A deep-linked `?mission=` query param seeds the shared $activeMissionId store once, on
+  // load, so an operator can still bookmark or share a running mission's URL. Every later
+  // binding — including the one MissionControlPanel performs after it creates a real mission —
+  // goes through the same store, which is what keeps this to one SSE connection (§12 build
+  // note 1) no matter which surface picked the mission.
+  useEffect(() => {
+    const fromQuery = new URLSearchParams(window.location.search).get('mission');
+    if (fromQuery && !$activeMissionId.get()) {
+      setActiveMissionId(fromQuery);
+    }
+  }, []);
 
   useEffect(() => {
-    const selectedMission = new URLSearchParams(window.location.search).get('mission');
-    setMissionId(selectedMission);
-    if (!selectedMission) {
+    if (!activeMissionId) {
+      resetMissionSnapshot();
       return undefined;
     }
     const controller = new AbortController();
-    getMissionDetail(selectedMission, controller.signal).then(
+    getMissionDetail(activeMissionId, controller.signal).then(
       (mission) => setMissionRepositoryContext(mission.repository_ref),
       () => undefined,
     );
-    const disconnect = connectMissionEvents(selectedMission);
+    const disconnect = connectMissionEvents(activeMissionId);
+
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('mission') !== activeMissionId) {
+      url.searchParams.set('mission', activeMissionId);
+      window.history.replaceState({}, '', url);
+    }
 
     return () => {
       controller.abort();
       disconnect();
     };
-  }, []);
+  }, [activeMissionId]);
 
   const release = useMemo(() => releaseChip(snapshot), [snapshot]);
   const commandState = commandStateCopy(snapshot, localRepository, streamState);
@@ -121,7 +141,7 @@ export function MissionCommandCenter() {
       <div className={`resource-strip resource-strip--${release.state} resource-strip--${analysis.state}`}>
         <strong>{release.label}</strong>
         <span>
-          stream {streamState} / mission {missionId ?? 'none'} / repo {localRepository?.name ?? 'none'} / event {snapshot.latestSequence ?? 'none'} / gpu {gpuUsageText(snapshot)}
+          stream {streamState} / mission {activeMissionId ?? 'none'} / repo {localRepository?.name ?? 'none'} / event {snapshot.latestSequence ?? 'none'} / gpu {gpuUsageText(snapshot)}
         </span>
       </div>
     </section>

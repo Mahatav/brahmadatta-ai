@@ -9449,3 +9449,160 @@ for the correction itself and for not taking any further unilateral action again
 shared environment.
 
 ---
+
+---
+
+## D-100 — Command Center mission-lifecycle control surface: real create/authorize/snapshot/preflight/start/pause/cancel UI, live-verified end to end · 2026-08-19/20 · `frontend-developer` seat
+
+Numbering note, same pattern D-097 established: this worktree's local
+`.project/decisions.md` tops out at D-097; `origin/main` (fetched fresh before writing
+this) tops out at D-099. This entry is D-100, the next free number after what is
+actually on `origin/main`, so it does not collide on merge. Reconciling any other
+numbering drift between this worktree and `origin/main` is the merging session's job,
+not redone here.
+
+**Decision** — Closed the P0-blocking gap identified in this dispatch: the Command
+Center (`apps/command-center/`) had zero mission-creation or control flow, only ever
+reading a mission by hand-typed `?mission=` query param. Added:
+
+1. `src/lib/api/client.ts` extended from 2 endpoints to the full 20-endpoint surface:
+   all 11 mission-lifecycle operations (`createMission` … `cancelMission`,
+   `preflightMission`, `startMission`, `pauseMission`) and the evidence/export
+   surface (`listFindings`, `getFinding`, `getBaselineReport`, `getFuzzingReport`,
+   `listPatchCandidates`, `submitOperatorPatchCandidate`, `getPatchVerification`,
+   `getEvidenceBundle`, `exportEvidence`), typed directly against
+   `schema.d.ts` (regenerated from `packages/schemas/openapi.json`, which was already
+   stale against the committed openapi dump — `npm run check:api` failed before this
+   work and passes after). One `ApiError` class carries `status`/`code`/`details`/
+   `traceId` uniformly.
+2. `src/components/MissionControlPanel.tsx` (new) — the actual create/authorize/
+   snapshot/preflight/start/pause/cancel/emergency-teardown UI, per design-system
+   §4.1/§4.2. Built as new, self-contained chrome directly against the rev-2 token
+   system (`packages/ui-components/tokens.css`) — bracket-label controls, crop-mark
+   primitive (`.bd-crop-frame`, shared per §12 build note 5), state glyphs, a
+   `ConfirmDialog` primitive for the three destructive/high-consequence actions
+   (start, cancel, emergency teardown) naming the consequence in a full sentence per
+   §2.7. Deliberately does **not** touch the Core/Stage-Timeline/Findings-rail/
+   Candidate-Compare/Verdict-panel visual language (out of scope — separate pass).
+3. `src/lib/events/store.ts` gained `$activeMissionId`/`setActiveMissionId`, and
+   `MissionCommandCenter.tsx` was rewired to bind its one shared SSE connection
+   (§12 build note 1) to that store instead of only a page-load-time URL read —
+   additive: a deep-linked `?mission=` URL still works, seeding the same store once.
+4. `LocalRepositoryIntake.tsx` is wired into the real flow (not rewritten): when its
+   local scan has run, `MissionControlPanel` prefills `repository_ref`/`granted_by`
+   from it, so the operator's local-folder context now feeds a real mission instead
+   of sitting in a disconnected nanostore.
+
+**A genuine contract gap found and worked around, not silently papered over** —
+`SnapshotRequest.archive_sha256` is required and checked server-side against a
+digest the server computes itself from a deterministic tar
+(`authorization/service.py::_materialize_source`); a browser cannot reproduce that
+tar byte-for-byte, so it cannot know the correct digest before the first call, and
+no digest-preview endpoint exists. `snapshotLocalRepository()` uses a two-step
+probe: POST once with a placeholder digest, read the real one back out of the
+guaranteed `SnapshotDigestMismatchError.details.computed_archive_sha256` (`api/
+errors.py::envelope` always returns `ContractError.details`), retry once with the
+corrected value. Proven against the real backend, not just unit-mocked (§ live
+verification below): one real `409` followed by one real `201` on every snapshot
+call. Flagged to backend-developer as the cleaner long-term fix (a real digest-
+preview endpoint) rather than fixed by adding backend surface myself.
+
+**Two more real backend defects found during live verification, reported, not
+fixed here (backend-owned files)** — both share one root cause:
+`orchestrator/evidence_repository.py::_artifact_ref` calls `ArtifactRef(**value)`
+assuming `row.log_ref` is a mapping; on a real `BaselineReport` row it is a plain
+string, so `GET /missions/{id}/baseline` and `GET /missions/{id}/evidence` (which
+calls the former internally) both 500 with
+`TypeError: contracts.schemas.common.ArtifactRef() argument after ** must be a
+mapping, not str`. Reproduced live against mission `0696cf5b-…` created by this
+session's own UI; trace ids `fe117a90320d4337a441dca9bee34238` (baseline) and
+`3aa632d7c71e4129a1aecdbbfdad6e0b` (evidence) are in the control-api container log
+from this run.
+
+**A third gap, infra-scoped, also found live and not fixed in committed files** —
+no `manage.py run_orchestrator` process is wired into
+`infrastructure/compose/docker-compose.yml` at all (no service, no profile). Without
+it, a mission never advances past `VALIDATING` — `run_worker` alone claims and runs
+individual jobs but never dispatches the state transitions between them
+(`orchestrator.queue.tick()`, which only `run_orchestrator` calls). This is
+independent of and additional to the already-known `run_orchestrator` singleton-lock
+work (D-096/SEC-43 elsewhere in this log). Ran it manually
+(`docker exec -d brahmadatta-control-api python manage.py run_orchestrator`) for
+this session's own verification only; not added to the compose file, since service
+topology is devops-engineer's call (candidate framings: its own service, or folded
+into an existing one — not decided here).
+
+**A fourth gap, also infra-scoped**: `.env.example`'s committed
+`CONTROL_API_WORKER_CMD=python manage.py rqworker default` names a command that does
+not exist (`missions/management/commands/run_worker.py` is the real one); every
+fresh `worker` container crash-loops on `Unknown command: 'rqworker'` until this is
+corrected. Worked around locally in this session's own `.env` (untracked) for
+verification; the committed `.env.example` was not edited, since fixing a committed
+default is this seat overriding devops-engineer's/backend-developer's prior work
+without their sign-off — flagged instead.
+
+**Live verification actually performed, not narrated** — full stack brought up via
+`infrastructure/scripts/dev-up.sh` (`DEV_UP_WORKER=1`, plus a manually-started
+`run_orchestrator` and the `.env` worker-command fix above), fresh Postgres 16,
+migrations applied. Playwright drove a real Chromium browser against
+`https://localhost:8443/` (self-signed dev cert, real nginx, real Django/ninja
+control-api, real worker, real orchestrator tick loop):
+
+- Run 1 (`mission 0696cf5b`): filled the real form, clicked
+  `[ CREATE + AUTHORIZE + SNAPSHOT ]` → real `POST /missions` (201) → `POST
+  .../authorize` (201) → `POST .../snapshot` (409, then 201 via the probe/retry
+  above) → `POST .../preflight` (200, 4 checks passed) → clicked
+  `[ START MISSION ]`, confirmed the real dialog → `POST .../start` (202). Mission
+  state observed live, through the real SSE-fed UI and independently via `GET
+  /missions`, progressing `SNAPSHOTTED → VALIDATING → BASELINE → TRIAGE →
+  STRESS_TEST`, with **real `ctest` counts** (`tests_passed: 8, tests_failed: 0`)
+  against the bundled `demo/repositories/pktcfg` fixture — the first time this
+  Command Center has ever driven a mission past creation, and the first live
+  confirmation that D-088's nginx credential injection actually unblocks a real
+  browser session end to end.
+- Run 2 (`mission 90a48ef6`): repeated create/authorize/snapshot/preflight, then
+  clicked `[ CANCEL MISSION ]` → real `ConfirmDialog` rendered exactly the required
+  copy ("Cancel mission 90a48ef6." / "The sandbox is destroyed and any unexported
+  evidence is lost. This cannot be undone."), confirmed → real `POST .../cancel`
+  (202) → mission state and posture both observed `CANCELLED` via `GET /missions`.
+- Screenshots and full console/network logs captured for both runs (paths in the
+  handoff; not committed to the repo — this is a disposable local dev stack, not a
+  new demo artifact).
+- `npm run check` (security/render-safety, ai-core-motion, issue-20, local-intake,
+  generated-api-types, the two new mission-control test scripts, `astro check`,
+  `tsc --noEmit`) and root `npm run lint`: all green, run in this session, actual
+  output included in the handoff.
+
+**Options considered** for the digest problem specifically — (a) leave `source:
+'git'` snapshotting unusable from the browser and only support a hypothetical
+future upload flow; (b) have the frontend attempt to replicate the server's tar
+format in JS to compute a matching digest; (c) the probe/retry pattern, as
+implemented.
+
+**Pros and cons** — (a) ships nothing usable against the one real target this
+finale actually has (`demo/repositories/pktcfg`), failing the task's own
+verification requirement. (b) is fragile by construction: any change to
+`archive.build_tar_from_directory`'s member ordering, mtime handling, or tar format
+silently breaks frontend-side hash computation with no compile-time signal, and
+duplicates server logic in a second language. (c) costs one extra round trip on the
+very first snapshot call per mission (never repeated — `create_mission_snapshot` is
+idempotent on a matching digest), uses only the error contract the API already
+publishes, and is proven correct against the real server, not just plausible.
+
+**Cost implications** — (c) is free; no new backend endpoint, no new dependency.
+
+**Security implications** — neutral. The placeholder digest is syntactically valid
+(64 hex chars) but content-meaningless; the server still independently computes and
+verifies the real digest before anything is trusted (`SnapshotDigestMismatchError`
+on any real mismatch), so this cannot be used to smuggle unverified content in.
+
+**Scalability implications** — none; one extra request per mission, once.
+
+**Recommendation** — (c), as implemented, with the digest-preview-endpoint fix
+flagged to backend-developer as the cleaner long-term replacement.
+
+**Final approval authority** — backend-developer for the digest-preview-endpoint
+question (whether to add one); devops-engineer for the `run_orchestrator` compose
+wiring and the `.env.example` worker-command fix; CTO if the probe/retry pattern is
+judged to need backend involvement before the finale rather than staying a frontend
+workaround.

@@ -1,0 +1,328 @@
+/* ==========================================================================
+   Mission Control Panel — new chrome, built directly against the rev-2
+   token system (packages/ui-components/tokens.css,
+   docs/09-company/04-design-system.md). The surrounding legacy panels
+   (AIParticleCore, the mythic command bar) are a separate visual-rebuild
+   pass and are deliberately left untouched here; this file only styles the
+   mission-creation/control surface this task adds.
+
+   §2.4: no borders, no background, no radius — panels are located by a
+   hairline rule plus four corner crop marks. §2.5: every control label is a
+   bracketed monospace string. §2.7: every control has a real 44px hit area.
+   ========================================================================== */
+
+.bd-mission-control {
+  position: relative;
+  margin-top: var(--bd-space-5);
+  padding: var(--bd-space-5) var(--bd-space-5) var(--bd-space-6);
+  font-family: var(--bd-font-mono);
+  color: var(--bd-text);
+}
+
+/* Crop-mark primitive (§2.4, §12 build note 5) — four corner ticks, each two
+   1px strokes stopping short of the implied corner. Shared by every element
+   that carries `.bd-crop-frame` rather than four positioned divs apiece. */
+.bd-crop-frame {
+  position: relative;
+}
+.bd-crop-frame::before,
+.bd-crop-frame::after {
+  content: '';
+  position: absolute;
+  width: var(--bd-tick-len);
+  height: var(--bd-tick-len);
+  pointer-events: none;
+}
+.bd-crop-frame::before {
+  top: calc(var(--bd-tick-gap) * -1);
+  left: calc(var(--bd-tick-gap) * -1);
+  border-top: var(--bd-rule-hair) solid var(--bd-tick);
+  border-left: var(--bd-rule-hair) solid var(--bd-tick);
+}
+.bd-crop-frame::after {
+  bottom: calc(var(--bd-tick-gap) * -1);
+  right: calc(var(--bd-tick-gap) * -1);
+  border-bottom: var(--bd-rule-hair) solid var(--bd-tick);
+  border-right: var(--bd-rule-hair) solid var(--bd-tick);
+}
+
+.bd-mission-control {
+  border-top: var(--bd-rule-hair) solid var(--bd-rule);
+}
+
+.bd-panel-title {
+  font-size: var(--bd-type-mono-2xs);
+  line-height: var(--bd-type-mono-2xs-lh);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+  color: var(--bd-text-secondary);
+  margin: var(--bd-space-5) 0 var(--bd-space-3);
+}
+
+.bd-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--bd-space-4) var(--bd-space-5);
+}
+
+.bd-form-lede {
+  grid-column: 1 / -1;
+  font-size: var(--bd-type-mono-xs);
+  line-height: var(--bd-type-mono-xs-lh);
+  color: var(--bd-text-secondary);
+  margin: 0 0 var(--bd-space-2);
+}
+
+.bd-form-lede code {
+  color: var(--bd-text);
+  font-family: var(--bd-font-mono);
+}
+
+.bd-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bd-space-1);
+}
+
+.bd-field--wide {
+  grid-column: 1 / -1;
+}
+
+.bd-field > span {
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  color: var(--bd-text-secondary);
+  text-transform: uppercase;
+}
+
+.bd-field input,
+.bd-field select,
+.bd-field textarea {
+  background: transparent;
+  border: none;
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule);
+  color: var(--bd-text);
+  font-family: var(--bd-font-mono);
+  font-size: var(--bd-type-mono-sm);
+  line-height: var(--bd-type-mono-sm-lh);
+  padding: var(--bd-space-2) var(--bd-space-1);
+  min-height: var(--bd-control-h);
+}
+
+.bd-field textarea {
+  min-height: calc(var(--bd-control-h) * 2);
+  resize: vertical;
+}
+
+.bd-field input:focus-visible,
+.bd-field select:focus-visible,
+.bd-field textarea:focus-visible {
+  outline: var(--bd-rule-heavy) solid var(--bd-focus-ring);
+  outline-offset: var(--bd-space-1);
+}
+
+.bd-field input[aria-invalid='true'],
+.bd-field textarea[aria-invalid='true'] {
+  border-bottom-color: var(--bd-state-critical);
+}
+
+.bd-field-error {
+  font-style: normal;
+  font-size: var(--bd-type-mono-xs);
+  color: var(--bd-state-critical);
+}
+
+/* Bracket-label control (§2.5, §2.7): the brackets ARE the button. Colour-only
+   hover, 150ms, no transform, no size change. 44px minimum hit area even
+   though the visible label is smaller. */
+.bd-bracket-control {
+  grid-column: 1 / -1;
+  justify-self: start;
+  background: transparent;
+  border: none;
+  color: var(--bd-text-secondary);
+  font-family: var(--bd-font-mono);
+  font-size: var(--bd-type-mono-sm);
+  letter-spacing: var(--bd-type-mono-sm-ls);
+  text-transform: uppercase;
+  cursor: pointer;
+  min-height: var(--bd-control-h);
+  min-width: var(--bd-control-h);
+  padding: var(--bd-space-2) var(--bd-space-1);
+  transition: color var(--bd-motion-fast) var(--bd-motion-ease);
+}
+
+.bd-bracket-control:hover:not(:disabled),
+.bd-bracket-control:focus-visible {
+  color: var(--bd-text);
+}
+
+.bd-bracket-control:focus-visible {
+  outline: var(--bd-rule-heavy) solid var(--bd-focus-ring);
+  outline-offset: var(--bd-space-1);
+}
+
+.bd-bracket-control:disabled {
+  color: var(--bd-text-disabled);
+  cursor: not-allowed;
+}
+
+.bd-bracket-control--primary {
+  color: var(--bd-text);
+}
+
+.bd-bracket-control--critical {
+  color: var(--bd-state-critical);
+}
+
+.bd-step-log {
+  list-style: none;
+  margin: var(--bd-space-4) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bd-step-log__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--bd-space-2);
+  min-height: var(--bd-row-event-h);
+  font-size: var(--bd-type-mono-sm);
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule-construction);
+  padding: var(--bd-space-1) 0;
+}
+
+.bd-glyph {
+  width: 1ch;
+  text-align: center;
+}
+
+.bd-step-log__label {
+  color: var(--bd-text-secondary);
+  white-space: nowrap;
+}
+
+.bd-step-log__row--running .bd-step-log__label,
+.bd-step-log__row--running .bd-glyph {
+  color: var(--bd-state-running);
+}
+.bd-step-log__row--ok .bd-step-log__label,
+.bd-step-log__row--ok .bd-glyph {
+  color: var(--bd-state-verified);
+}
+.bd-step-log__row--warn .bd-step-log__label,
+.bd-step-log__row--warn .bd-glyph {
+  color: var(--bd-state-warning);
+}
+.bd-step-log__row--fail .bd-step-log__label,
+.bd-step-log__row--fail .bd-glyph {
+  color: var(--bd-state-critical);
+}
+
+.bd-step-log__detail {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-xs);
+  overflow-wrap: anywhere;
+}
+
+.bd-preflight {
+  margin-top: var(--bd-space-4);
+}
+
+.bd-preflight ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--bd-space-1);
+  font-size: var(--bd-type-mono-xs);
+}
+
+.bd-check--ok {
+  color: var(--bd-state-verified);
+}
+.bd-check--fail {
+  color: var(--bd-state-critical);
+}
+.bd-check--ok span,
+.bd-check--fail span {
+  color: var(--bd-text-secondary);
+  margin-left: var(--bd-space-2);
+}
+
+.bd-alert-line {
+  margin-top: var(--bd-space-4);
+  color: var(--bd-state-critical);
+  font-size: var(--bd-type-mono-sm);
+  overflow-wrap: anywhere;
+}
+
+.bd-controls {
+  margin-top: var(--bd-space-5);
+}
+
+.bd-mission-id {
+  font-size: var(--bd-type-mono-md);
+  color: var(--bd-text);
+  margin: 0 0 var(--bd-space-2);
+}
+
+.bd-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bd-space-4);
+}
+
+.bd-control-row .bd-bracket-control {
+  grid-column: auto;
+}
+
+.bd-note {
+  margin-top: var(--bd-space-2);
+  font-size: var(--bd-type-mono-xs);
+  color: var(--bd-state-warning);
+}
+
+/* ConfirmDialog — §2.7, §11 (`ConfirmationDialog`, kept). Opaque, no glass;
+   the field colour is the whole surface in this system. */
+.bd-confirm-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--bd-c-field);
+  z-index: var(--bd-z-dialog);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bd-confirm-dialog {
+  position: relative;
+  max-width: 520px;
+  width: 90%;
+  padding: var(--bd-space-6);
+  border-top: var(--bd-rule-heavy) solid var(--bd-c-white);
+  font-family: var(--bd-font-mono);
+}
+
+.bd-confirm-title {
+  font-size: var(--bd-type-mono-lg);
+  color: var(--bd-text);
+  margin: 0 0 var(--bd-space-3);
+}
+
+.bd-confirm-consequence {
+  font-size: var(--bd-type-mono-sm);
+  color: var(--bd-text-secondary);
+  margin: 0 0 var(--bd-space-5);
+}
+
+.bd-confirm-actions {
+  display: flex;
+  gap: var(--bd-space-5);
+}
+
+.bd-confirm-actions .bd-bracket-control {
+  grid-column: auto;
+}
