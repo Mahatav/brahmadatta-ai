@@ -1,0 +1,280 @@
+{
+  "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+  "generated_at": "2026-08-20T04:20:46.363419Z",
+  "snapshot_sha256": "b7a82f9fcd03bcef24ff3b275b51e6fd916ef2d9b78357975796256fec4b5fe3",
+  "authorization_statement": "I am authorized to test this repository on behalf of the owner, for the D7 gate live rehearsal run 6.",
+  "baseline": {
+    "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+    "configure_ok": true,
+    "build_ok": true,
+    "tests_total": 8,
+    "tests_passed": 8,
+    "tests_failed": 0,
+    "duration_seconds": 1.189034583978355,
+    "adapter": "C_CMAKE_CTEST",
+    "recorded_at": "2026-08-20T04:19:33.201291Z",
+    "log_ref": {
+      "uri": "artifact://d6897640-8212-45d8-9914-b3e0d1ae0c52/baseline_ctest_junit/4f283873130dd741decc425361d3eeb252b45d30dac8ea8ffd729ef47083ee14",
+      "kind": "baseline_ctest_junit",
+      "sha256": "4f283873130dd741decc425361d3eeb252b45d30dac8ea8ffd729ef47083ee14",
+      "size_bytes": 1551
+    },
+    "passed": true
+  },
+  "findings": [
+    {
+      "id": "30702266-4a03-43cb-aecf-68bccb4034a8",
+      "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+      "category": "HEAP_BUFFER_OVERFLOW",
+      "severity": "CRITICAL",
+      "tool": "ADDRESS_SANITIZER",
+      "discovery_method": "FUZZING_CAMPAIGN",
+      "replay_source": null,
+      "location": {
+        "file_path": "<unknown>",
+        "line": null,
+        "function": null
+      },
+      "fingerprint": "fuzz:ADDRESS_SANITIZER:heap-buffer-overflow:<unknown>:c681cf5d2aecdc0d",
+      "reproducible": false,
+      "detected_at": "2026-08-20T04:19:34.993420Z",
+      "title": "heap buffer overflow at <unknown>"
+    }
+  ],
+  "reproducers": [
+    {
+      "id": "2c4adf66-4e0b-4446-b649-f3e172834022",
+      "finding_id": "30702266-4a03-43cb-aecf-68bccb4034a8",
+      "minimized": false,
+      "replay_attempts": 0,
+      "replay_successes": 0,
+      "test_command": "./pktcfg_replay crash-424dd526649e83bf1e85ac64b2bd798ff94a528e x1",
+      "artifact": {
+        "uri": "artifact://d6897640-8212-45d8-9914-b3e0d1ae0c52/reproducer/31156fbf79ba6caf1344327bab18e646f6ff574f2a67ab1b7f0a04fc3cd38ab0",
+        "kind": "reproducer_input",
+        "sha256": "31156fbf79ba6caf1344327bab18e646f6ff574f2a67ab1b7f0a04fc3cd38ab0",
+        "size_bytes": 54
+      },
+      "created_at": "2026-08-20T04:19:34.993420Z"
+    }
+  ],
+  "fuzzing": {
+    "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+    "mode": "LIVE_CAMPAIGN",
+    "harness": "pktcfg_fuzz_one_input",
+    "engine": "libFuzzer",
+    "runtime_seconds": 0.3239100419450551,
+    "executions": 4400,
+    "crashes_found": 1,
+    "unique_crashes": 1,
+    "corpus_size": 8,
+    "sanitizers": [
+      "address"
+    ],
+    "finding_ids": [
+      "30702266-4a03-43cb-aecf-68bccb4034a8"
+    ],
+    "replay_source": null,
+    "recorded_at": "2026-08-20T04:19:34.993420Z"
+  },
+  "patches": [
+    {
+      "id": "280d8894-d3a8-4136-b373-30d8ebfe6bc9",
+      "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+      "finding_id": "30702266-4a03-43cb-aecf-68bccb4034a8",
+      "provenance": "OPERATOR_SUPPLIED",
+      "model": null,
+      "diff": "diff --git a/src/decode.c b/src/decode.c\nindex 0180959..a06b601 100644\n--- a/src/decode.c\n+++ b/src/decode.c\n@@ -72,6 +72,13 @@ size_t pkt_decoded_length(const uint8_t *src, size_t len, int escaped)\n             continue;\n         }\n \n+        if (c == '\\t') {\n+            /* A literal tab is expanded by pkt_decode_into(); size for it. */\n+            need += PKT_TAB_WIDTH;\n+            i += 1;\n+            continue;\n+        }\n+\n         /* Every remaining byte is copied through as-is. */\n         need += 1;\n         i += 1;\n",
+      "files_changed": 1,
+      "lines_changed": 7,
+      "policy_status": "ACCEPTED",
+      "policy_detail": "accepted; files=1/1; lines=7/40; paths=src/decode.c; allowed_paths=src/decode.c",
+      "rationale": "D7 gate rehearsal run 6: operator-supplied correct bounds-check fix (candidate A), aiming for VERIFIED.",
+      "created_at": "2026-08-20T04:19:56.506635Z"
+    },
+    {
+      "id": "75383f61-057f-4c7e-80df-98b802e3c170",
+      "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+      "finding_id": "30702266-4a03-43cb-aecf-68bccb4034a8",
+      "provenance": "OPERATOR_SUPPLIED",
+      "model": null,
+      "diff": "diff --git a/src/decode.c b/src/decode.c\nindex 0180959..0a710a2 100644\n--- a/src/decode.c\n+++ b/src/decode.c\n@@ -27,9 +27,9 @@ static uint8_t hex_val(uint8_t c)\n  * the literal branch so both forms normalise identically. */\n static size_t emit_tab(char *dst, size_t out)\n {\n-    for (unsigned k = 0; k < PKT_TAB_WIDTH; k++) {\n-        dst[out++] = ' ';\n-    }\n+    /* Writing PKT_TAB_WIDTH spaces overruns the buffer pkt_parse() allocated,\n+     * so write a single space instead and stay inside it. */\n+    dst[out++] = ' ';\n     return out;\n }\n \n",
+      "files_changed": 1,
+      "lines_changed": 6,
+      "policy_status": "ACCEPTED",
+      "policy_detail": "accepted; files=1/1; lines=6/40; paths=src/decode.c; allowed_paths=src/decode.c",
+      "rationale": "D7 gate rehearsal run 6: operator-supplied tempting-but-wrong crash-only fix (candidate B), aiming for REJECTED, same mission as candidate A.",
+      "created_at": "2026-08-20T04:20:04.749136Z"
+    }
+  ],
+  "verifications": [
+    {
+      "id": "a6b3aaca-a31d-43b3-ae99-ab31020ffedb",
+      "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+      "patch_id": "280d8894-d3a8-4136-b373-30d8ebfe6bc9",
+      "gates": {
+        "compile": {
+          "name": "COMPILE",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "cmake",
+          "detail": "",
+          "evidence_ref": null
+        },
+        "reproducer_eliminated": {
+          "name": "REPRODUCER_ELIMINATED",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "pktcfg_replay",
+          "detail": "Crash reproducer replay completed without a sanitizer fault.",
+          "evidence_ref": null
+        },
+        "regression_preserved": {
+          "name": "REGRESSION_PRESERVED",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "ctest",
+          "detail": "Regression suite passed: 8 tests ran.",
+          "evidence_ref": null
+        },
+        "static_delta": {
+          "name": "STATIC_DELTA",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        },
+        "renewed_fuzzing": {
+          "name": "RENEWED_FUZZING",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        }
+      },
+      "verdict": "VERIFIED",
+      "started_at": "2026-08-20T04:19:56.745003Z",
+      "finished_at": "2026-08-20T04:20:07.502105Z",
+      "worktree_sha256": null,
+      "resource_usage": null
+    },
+    {
+      "id": "a7297fd4-820e-4fbf-8309-09bcd90838e3",
+      "mission_id": "d6897640-8212-45d8-9914-b3e0d1ae0c52",
+      "patch_id": "75383f61-057f-4c7e-80df-98b802e3c170",
+      "gates": {
+        "compile": {
+          "name": "COMPILE",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "cmake",
+          "detail": "",
+          "evidence_ref": null
+        },
+        "reproducer_eliminated": {
+          "name": "REPRODUCER_ELIMINATED",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "pktcfg_replay",
+          "detail": "Crash reproducer replay completed without a sanitizer fault.",
+          "evidence_ref": null
+        },
+        "regression_preserved": {
+          "name": "REGRESSION_PRESERVED",
+          "status": "FAIL",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "ctest",
+          "detail": "ctest: Regression suite failed: 1 of 8 tests failed. exit=8",
+          "evidence_ref": null
+        },
+        "static_delta": {
+          "name": "STATIC_DELTA",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        },
+        "renewed_fuzzing": {
+          "name": "RENEWED_FUZZING",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        }
+      },
+      "verdict": "REJECTED",
+      "started_at": "2026-08-20T04:20:07.585372Z",
+      "finished_at": "2026-08-20T04:20:18.501710Z",
+      "worktree_sha256": null,
+      "resource_usage": null
+    }
+  ],
+  "verdict_summary": {
+    "mission_verdict": "VERIFIED",
+    "candidates": [
+      {
+        "patch_id": "280d8894-d3a8-4136-b373-30d8ebfe6bc9",
+        "verification_id": "a6b3aaca-a31d-43b3-ae99-ab31020ffedb",
+        "verdict": "VERIFIED",
+        "provenance": "OPERATOR_SUPPLIED",
+        "summary": "Did not clear: STATIC_DELTA, RENEWED_FUZZING."
+      },
+      {
+        "patch_id": "75383f61-057f-4c7e-80df-98b802e3c170",
+        "verification_id": "a7297fd4-820e-4fbf-8309-09bcd90838e3",
+        "verdict": "REJECTED",
+        "provenance": "OPERATOR_SUPPLIED",
+        "summary": "Did not clear: REGRESSION_PRESERVED, STATIC_DELTA, RENEWED_FUZZING."
+      }
+    ],
+    "verified_count": 1,
+    "rejected_count": 1,
+    "human_review_count": 0
+  },
+  "recommended_patch_id": "280d8894-d3a8-4136-b373-30d8ebfe6bc9",
+  "resource_usage": {
+    "cpu_seconds": 0.0,
+    "peak_memory_mb": 0.0,
+    "wall_seconds": 0.0,
+    "sandbox_count": 0,
+    "gpu_seconds": 0.0
+  },
+  "gates_not_run": [
+    "patch 280d8894: STATIC_DELTA NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+    "patch 280d8894: RENEWED_FUZZING NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+    "patch 75383f61: STATIC_DELTA NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+    "patch 75383f61: RENEWED_FUZZING NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+  ],
+  "substitutions": [
+    {
+      "kind": "SUBPROCESS_JAIL_ISOLATION",
+      "reason": "The rootless-container sandbox backend (#15) is not built in this checkout; stages ran inside packages.sandbox's subprocess jail (#81) instead — a weaker isolation posture than a container, reported as what it is (D-049).",
+      "artifact_ref": null,
+      "recorded_at": "2026-08-20T04:20:46.363419Z"
+    },
+    {
+      "kind": "OPERATOR_SUPPLIED_PATCH",
+      "reason": "Patch candidate 280d8894-d3a8-4136-b373-30d8ebfe6bc9 was supplied by an operator, not generated by the model.",
+      "artifact_ref": null,
+      "recorded_at": "2026-08-20T04:20:46.363419Z"
+    },
+    {
+      "kind": "OPERATOR_SUPPLIED_PATCH",
+      "reason": "Patch candidate 75383f61-057f-4c7e-80df-98b802e3c170 was supplied by an operator, not generated by the model.",
+      "artifact_ref": null,
+      "recorded_at": "2026-08-20T04:20:46.363419Z"
+    }
+  ],
+  "isolation_mode": "SUBPROCESS_JAIL",
+  "tool_versions": {
+    "adapter": "C_CMAKE_CTEST",
+    "fuzzer": "libFuzzer",
+    "compile": "cmake",
+    "reproducer_eliminated": "pktcfg_replay",
+    "regression_preserved": "ctest"
+  }
+}
