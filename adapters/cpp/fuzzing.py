@@ -7,6 +7,7 @@ harness behind a CMake cache option. Reproducer replay remains separate (#83).
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -28,6 +29,8 @@ from .toolchain import ToolVersion, require_pinned
 __all__ = [
     "FUZZ_ARTIFACT_DIR",
     "FUZZ_BUILD_DIR",
+    "MAX_DURABLE_ARTIFACT_BYTES",
+    "DurableArtifact",
     "FuzzFailure",
     "FuzzToolchainRecord",
     "LibFuzzerMetrics",
@@ -38,6 +41,22 @@ __all__ = [
 
 FUZZ_BUILD_DIR = "build-libfuzzer"
 FUZZ_ARTIFACT_DIR = "fuzz-artifacts"
+
+#: Conservative ceiling for one crash artifact copied out of a `ContainerJail`
+#: worktree before it tears down (D-106; see `_copy_crash_artifacts_durably`'s own
+#: docstring for the full security reasoning). This module has no Django dependency
+#: (D-026 boundary — it does not import `config.settings`), so this is a plain
+#: constant, not a settings-derived value; `workers.fuzzing.dispatch` applies its own,
+#: Django-configurable ceiling (`FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES`) a second time
+#: when it ingests these bytes into the content-addressed store, mirroring the
+#: belt-and-suspenders pattern `orchestrator/evidence_export.py` already uses for the
+#: evidence bundle tarball (size checked once before `store.ingest_from_path`, and
+#: `ingest_from_path` enforces its own ceiling independently). libFuzzer crash inputs
+#: for this project's demo-sized targets are single-digit kilobytes; 64 MiB is
+#: generous headroom, not a realistic expectation.
+MAX_DURABLE_ARTIFACT_BYTES = 64 * 1024 * 1024
+
+_COPY_CHUNK_SIZE = 1024 * 1024
 
 _EXEC_RE = re.compile(r"^#(?P<execs>\d+)\b(?P<body>.*)$", re.MULTILINE)
 _COV_RE = re.compile(r"\bcov:\s*(?P<cov>\d+)")
@@ -120,6 +139,26 @@ class FuzzFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableArtifact:
+    """One crash artifact whose bytes survived `ContainerJail.close()` (D-106).
+
+    `relative_path` is the same workspace-relative string `LibFuzzerMetrics.
+    artifact_paths` already carries (`fuzz-artifacts/<name>`) — kept alongside the
+    durable copy so a caller can still match a durable artifact back to the metrics
+    entry it came from. `host_path` is the durable, non-jail location
+    (`workers.fuzzing.dispatch` reads bytes from here to ingest into the
+    content-addressed store); it is never included in `FuzzingOutcome.as_dict()` or
+    any mission event payload — same "no raw filesystem path leaves this boundary"
+    discipline `orchestrator/evidence_repository.py` documents for every other
+    artifact kind (callers receive hash-addressed pointers, never a path, once this
+    reaches persistence)."""
+
+    relative_path: str
+    host_path: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class LibFuzzerRunResult:
     """Complete result of one headless libFuzzer campaign."""
 
@@ -133,6 +172,7 @@ class LibFuzzerRunResult:
     run: ContainerJailResult | None = None
     failure: FuzzFailure | None = None
     events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    durable_artifacts: tuple[DurableArtifact, ...] = field(default_factory=tuple)
 
     @property
     def completed(self) -> bool:
@@ -204,8 +244,21 @@ def run_libfuzzer_campaign(
     corpus_dir: str = "corpus",
     budget_seconds: int = 1800,
     mission_ref: str = "libfuzzer",
+    workspace_root: Path | str | None = None,
 ) -> LibFuzzerRunResult:
-    """Build and run a libFuzzer harness in a no-network container."""
+    """Build and run a libFuzzer harness in a no-network container.
+
+    `workspace_root` (D-106; mirrors `workers/baseline/run.py::run_baseline_stage`'s
+    existing `workspace_root` parameter) is host-side scratch space that is NOT
+    inside `sandbox`'s worktree and does not get deleted when `ContainerJail.close()`
+    runs `shutil.rmtree` on `sandbox.root` at the bottom of this `with` block. When
+    provided and the campaign discovers at least one crash artifact, each artifact's
+    bytes are copied there — safely, see `_copy_crash_artifacts_durably` — before the
+    jail tears down, and the durable copies are returned on
+    `LibFuzzerRunResult.durable_artifacts`. `None` (the default) preserves this
+    function's prior behaviour exactly: no copy attempted, `durable_artifacts` stays
+    empty, matching every caller that predates D-106 (`workers/fuzzing/cli.py`, this
+    module's own tests)."""
     started = time.monotonic()
     image = require_pinned(policy.image)
     source = Path(source_dir).resolve()
@@ -297,6 +350,20 @@ def run_libfuzzer_campaign(
             corpus_size=len(seeds),
             artifact_paths=artifact_paths,
         )
+        durable_artifacts: tuple[DurableArtifact, ...] = ()
+        if workspace_root is not None and artifact_paths:
+            # Copied here, still inside the `with ContainerJail.create(...)` block —
+            # `sandbox.root` (and everything under it, including the artifact bytes
+            # `artifact_paths` names) is `shutil.rmtree`'d by `ContainerJail.close()`
+            # the moment this block exits (D-106's own gap statement). Never raises:
+            # a hostile or corrupted artifact is skipped, not allowed to fail an
+            # otherwise-real crash-discovery result — see the helper's own docstring.
+            durable_artifacts = _copy_crash_artifacts_durably(
+                sandbox,
+                artifact_paths,
+                Path(workspace_root),
+                mission_ref,
+            )
         return LibFuzzerRunResult(
             harness=harness_binary,
             engine="libFuzzer",
@@ -307,7 +374,117 @@ def run_libfuzzer_campaign(
             build=build,
             run=run,
             events=tuple(_events_from_metrics(metrics, runtime_seconds=run.wall_seconds)),
+            durable_artifacts=durable_artifacts,
         )
+
+
+def _copy_crash_artifacts_durably(
+    sandbox: ContainerJail,
+    artifact_paths: tuple[str, ...],
+    workspace_root: Path,
+    mission_ref: str,
+    *,
+    max_bytes: int = MAX_DURABLE_ARTIFACT_BYTES,
+) -> tuple[DurableArtifact, ...]:
+    """Copy each discovered crash artifact's bytes out of `sandbox.root` into
+    `workspace_root`, before `ContainerJail.close()` deletes the former (D-106).
+
+    `sandbox.root` is a host directory bind-mounted read-write into the container
+    (`_docker_run_args`'s one `-v` mount, `packages/sandbox/container.py`); the
+    fuzzed target runs as a fixed non-root uid under `--cap-drop ALL`/
+    `--security-opt no-new-privileges` but is still, by this module's own security
+    model, untrusted code (`ContainerJailPolicy`'s own docstring: this is the sandbox
+    #28's fuzzing worker runs *untrusted* target code inside) — so a crash artifact
+    discovered under it is untrusted input, not a trusted log the way `run_baseline_
+    stage`'s JUnit report is. Two safeguards this function applies that a plain
+    `shutil.copy` would not, both exercised directly by
+    `adapters/cpp/tests/test_fuzzing.py` against a hostile fixture, not just asserted
+    here:
+
+    * **No symlink is ever followed.** Opened with `os.O_NOFOLLOW` — if the fuzzed
+      process replaced a crash-artifact path with a symlink (to `/etc/passwd`, to a
+      path outside `sandbox.root` the orchestrator's own host uid can read, or
+      anywhere else), the `open()` call raises `OSError` (`ELOOP`) instead of
+      dereferencing it, and this function skips that entry rather than copying
+      whatever the symlink points at. `Path.resolve()` is also checked against
+      `sandbox.root` first, as a second, independent check against the same class of
+      escape (a `..`-shaped relative target, or a resolved path that leaves the
+      sandbox root some other way) — belt and suspenders, not either/or.
+    * **A hard per-file byte ceiling, enforced while reading, not after.** Mirrors
+      `authorization.store.ingest_from_path`'s own "the read stops the instant the
+      ceiling is crossed" discipline (that module's docstring) — an oversized or
+      corrupted artifact is never fully buffered in memory or written to disk before
+      the ceiling is discovered; the partial file that was written is removed.
+
+    A rejected or vanished artifact (symlink, oversized, removed between discovery
+    and copy) is skipped, not raised past this function — a hostile or corrupted
+    crash artifact must not take down an otherwise-real fuzzing outcome, the same
+    "a red result is a valid result, not an exception" discipline
+    `workers/baseline/run.py`'s module docstring states for a failed build. A caller
+    that needs to know whether every discovered artifact actually survived compares
+    `len(artifact_paths)` against `len(durable_artifacts)`; `workers/fuzzing/
+    dispatch.py` does exactly that before attaching a `Reproducer` row to a `Finding`
+    (see that module's own docstring on why a mismatch means no reproducer is
+    recorded at all, not a guessed one).
+    """
+    try:
+        sandbox_root = sandbox.root.resolve(strict=True)
+    except OSError:
+        return ()
+
+    destination_dir = workspace_root / f"{mission_ref}-fuzz-artifacts"
+    copied: list[DurableArtifact] = []
+    for relative in artifact_paths:
+        name = Path(relative).name
+        if not name or name in (".", ".."):
+            continue
+        source = sandbox.root / relative
+
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(sandbox_root)
+        except (OSError, ValueError):
+            # Vanished since discovery, or would resolve outside the sandbox root
+            # (a symlink target, most likely) — refused regardless of cause.
+            continue
+
+        fd = -1
+        destination = destination_dir / name
+        try:
+            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            # A symlink (ELOOP) or otherwise unreadable — never followed, never
+            # copied.
+            continue
+
+        written = 0
+        ok = True
+        try:
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            with os.fdopen(fd, "rb") as src, destination.open("wb") as dst:
+                fd = -1  # ownership transferred to the file object
+                while True:
+                    chunk = src.read(_COPY_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        ok = False
+                        break
+                    dst.write(chunk)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        if not ok:
+            destination.unlink(missing_ok=True)
+            continue
+
+        copied.append(
+            DurableArtifact(relative_path=relative, host_path=str(destination), size_bytes=written)
+        )
+
+    return tuple(copied)
 
 
 def _probe_fuzz_toolchain(sandbox: ContainerJail, image: str) -> FuzzToolchainRecord:

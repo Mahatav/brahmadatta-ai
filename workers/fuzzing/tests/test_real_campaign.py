@@ -157,6 +157,54 @@ def test_real_libfuzzer_campaign_finds_the_seeded_heap_overflow(fuzz_image: str)
     )
 
 
+@needs_real_fuzz_run
+def test_real_campaign_crash_bytes_survive_the_jails_own_teardown(
+    fuzz_image: str, tmp_path
+) -> None:
+    """D-106's actual proof: the real crash-artifact bytes a live campaign discovers
+    against pktcfg's seeded heap-buffer-overflow are still on disk, still readable,
+    still non-empty, after `run_fuzzing_stage` returns — i.e. after
+    `adapters.cpp.fuzzing.run_libfuzzer_campaign`'s own `ContainerJail` has already
+    `shutil.rmtree`d its ephemeral worktree. This is the exact gap D-098/D-105 both
+    hit live: before D-106, nothing survived this point for any caller to persist.
+    """
+    policy = ContainerJailPolicy(
+        image=fuzz_image,
+        memory_mb=2048,
+        cpu_limit=2.0,
+        wall_clock_seconds=180.0,
+    )
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+
+    outcome = run_fuzzing_stage(
+        "test-d106-durable-copy",
+        PKTCFG_SOURCE,
+        policy=policy,
+        budget_seconds=90,
+        workspace_root=workspace_root,
+    )
+
+    assert outcome.mode == "LIVE_CAMPAIGN", (
+        f"expected a real campaign, got mode={outcome.mode!r} "
+        f"failure={outcome.failure.as_dict() if outcome.failure else None}"
+    )
+    assert outcome.unique_crashes >= 1, "no crash found against the seeded defect"
+    assert outcome.durable_artifacts, (
+        "a crash was found but no durable copy survived the ContainerJail's own "
+        "teardown — the exact D-106 gap this test exists to prove closed"
+    )
+
+    for artifact in outcome.durable_artifacts:
+        host_path = Path(artifact.host_path)
+        assert host_path.is_file(), f"{host_path} does not exist after run_fuzzing_stage returned"
+        assert host_path.stat().st_size > 0
+        assert host_path.stat().st_size == artifact.size_bytes
+        # Durable really does mean "outside the jail": it lives under workspace_root,
+        # never under any path this test itself created inside a jail worktree.
+        assert workspace_root.resolve() in host_path.resolve().parents
+
+
 @needs_docker
 @pytest.mark.xfail(
     strict=True,

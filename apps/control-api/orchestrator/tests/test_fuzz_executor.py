@@ -26,12 +26,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from adapters.cpp.fuzzing import FuzzFailure
+from adapters.cpp.fuzzing import DurableArtifact, FuzzFailure
 from contracts.enums import ErrorCode, MissionState
-from missions.models import Finding, FuzzingReport, Job, JobKind, JobState, Mission
+from missions.models import Finding, FuzzingReport, Job, JobKind, JobState, Mission, Reproducer
 from orchestrator.executors import ExecutorContext, JobOutcome, executor_for, transition_policy_for
 from orchestrator.tests.conftest import NOW, TRACE, walk_to
 from packages.sandbox.errors import ContainerUnavailableError
@@ -92,6 +93,7 @@ def _clean_outcome(
     crashes: int = 0,
     excerpt: str = "",
     artifact_refs: tuple[str, ...] = (),
+    durable_artifacts: tuple[DurableArtifact, ...] = (),
 ) -> FuzzingOutcome:
     return FuzzingOutcome(
         mission_id="whatever",
@@ -107,6 +109,7 @@ def _clean_outcome(
         recorded_at=datetime.now(UTC),
         run_output_excerpt=excerpt,
         artifact_refs=artifact_refs,
+        durable_artifacts=durable_artifacts,
     )
 
 
@@ -330,6 +333,107 @@ def test_a_real_crash_persists_a_report_and_a_structured_finding(mission: Missio
     assert finding.replay_source is None
 
 
+# ---------------------------------------------------------------------------------
+# D-106: a durably-copied crash artifact becomes a real Reproducer row, and the row
+# is what VERIFY's own resolver actually reads back — this is the fix for the exact
+# gap D-098/D-105 hit live, twice: REPRODUCER_ELIMINATED always NOT_RUN.
+# ---------------------------------------------------------------------------------
+
+
+def test_a_real_crash_with_a_durable_artifact_persists_a_reproducer(
+    mission: Mission, monkeypatch, tmp_path, settings
+):
+    from django.test import override_settings
+
+    from orchestrator.verify_dispatch import _resolve_reproducer_path
+
+    crash_bytes = b"a real, faulting crash input"
+    source = tmp_path / "crash-abc123"
+    source.write_bytes(crash_bytes)
+    artifact_root = tmp_path / "artifacts"
+
+    outcome = _clean_outcome(
+        executions=4096,
+        crashes=1,
+        excerpt=_REAL_ASAN_CAPTURE,
+        durable_artifacts=(
+            DurableArtifact(
+                relative_path="fuzz-artifacts/crash-abc123",
+                host_path=str(source),
+                size_bytes=len(crash_bytes),
+            ),
+        ),
+    )
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", lambda *a, **k: outcome)
+
+    with override_settings(ARTIFACT_ROOT=artifact_root):
+        job = _job(mission)
+        result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+
+        assert result.outcome == JobOutcome.SUCCEEDED
+        finding = Finding.objects.get(mission=mission)
+        reproducer = Reproducer.objects.get(finding=finding)
+
+        assert reproducer.minimized is False
+        assert reproducer.artifact["size_bytes"] == len(crash_bytes)
+        sha256 = reproducer.artifact["sha256"]
+        assert (artifact_root / sha256[:2] / sha256).read_bytes() == crash_bytes
+
+        # The actual acceptance criterion: VERIFY's own resolver finds real bytes.
+        fake_patch = SimpleNamespace(finding=finding)
+        fake_ctx = SimpleNamespace(workspace_root=tmp_path / "workspace")
+
+        resolved = _resolve_reproducer_path(fake_ctx, fake_patch)
+        assert resolved.is_file()
+        assert resolved.read_bytes() == crash_bytes
+
+
+def test_no_reproducer_when_no_durable_artifact_survived(mission: Mission, monkeypatch, settings):
+    """The honest case: `run_fuzzing_stage` found a crash but no durable copy came
+    back (no `workspace_root` given, or `_copy_crash_artifacts_durably` rejected
+    every candidate). A `Finding` is still recorded — `VERIFY`'s
+    `REPRODUCER_ELIMINATED` gate stays `NOT_RUN`, not a fabricated pass."""
+    outcome = _clean_outcome(executions=4096, crashes=1, excerpt=_REAL_ASAN_CAPTURE)
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", lambda *a, **k: outcome)
+
+    job = _job(mission)
+    result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+
+    assert result.outcome == JobOutcome.SUCCEEDED
+    finding = Finding.objects.get(mission=mission)
+    assert Reproducer.objects.filter(finding=finding).count() == 0
+
+
+def test_no_reproducer_when_durable_artifact_count_does_not_match_findings(
+    mission: Mission, monkeypatch, tmp_path, settings
+):
+    """Two findings (structured + unstructured, forced via two artifact refs with no
+    sanitizer text) but only one durable artifact — an ambiguous mapping this
+    module's own docstring says must not guess. No Reproducer for either finding."""
+    source = tmp_path / "crash-only-one"
+    source.write_bytes(b"one artifact")
+
+    outcome = _clean_outcome(
+        executions=4096,
+        crashes=1,
+        excerpt="",
+        artifact_refs=("fuzz-artifacts/crash-a", "fuzz-artifacts/crash-b"),
+        durable_artifacts=(
+            DurableArtifact(
+                relative_path="fuzz-artifacts/crash-a", host_path=str(source), size_bytes=12
+            ),
+        ),
+    )
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", lambda *a, **k: outcome)
+
+    job = _job(mission)
+    result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+
+    assert result.outcome == JobOutcome.SUCCEEDED
+    assert Finding.objects.filter(mission=mission).count() == 2
+    assert Reproducer.objects.count() == 0
+
+
 def test_a_crash_with_no_parseable_sanitizer_report_still_records_a_finding(
     mission: Mission, monkeypatch
 ):
@@ -399,7 +503,7 @@ def test_minimize_executor_is_real_not_a_not_implemented_stub(mission: Mission):
 
     assert result.outcome == JobOutcome.FAILED
     assert result.result["infra_failure"] is True
-    assert result.result["blocked_reason"] == "no_durable_crash_artifact"
+    assert result.result["blocked_reason"] == "minimize_not_implemented"
     assert result.retry is False
 
 

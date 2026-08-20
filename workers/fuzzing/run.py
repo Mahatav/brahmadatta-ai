@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from adapters.cpp.errors import AdapterError, StepFailure
-from adapters.cpp.fuzzing import FuzzFailure, FuzzToolchainRecord, run_libfuzzer_campaign
+from adapters.cpp.fuzzing import (
+    DurableArtifact,
+    FuzzFailure,
+    FuzzToolchainRecord,
+    run_libfuzzer_campaign,
+)
 from packages.sandbox.container import ContainerJailPolicy
 
 __all__ = ["FuzzingOutcome", "emit_fuzzing_events", "run_fuzzing_stage"]
@@ -44,6 +49,13 @@ class FuzzingOutcome:
     failure: FuzzFailure | None = None
     run_output_excerpt: str = ""
     raw_events: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    #: Crash-artifact bytes copied out of the `ContainerJail` before it tore down
+    #: (D-106) — only populated when `run_fuzzing_stage` was given a `workspace_root`.
+    #: Internal wiring for `workers/fuzzing/dispatch.py` to ingest into the
+    #: content-addressed store; deliberately excluded from `as_dict()` (see
+    #: `DurableArtifact`'s own docstring — a host filesystem path never belongs in a
+    #: mission event payload).
+    durable_artifacts: tuple[DurableArtifact, ...] = field(default_factory=tuple)
 
     @property
     def ran(self) -> bool:
@@ -78,8 +90,19 @@ def run_fuzzing_stage(
     *,
     policy: ContainerJailPolicy,
     budget_seconds: int = 1800,
+    workspace_root: Path | str | None = None,
 ) -> FuzzingOutcome:
-    """Run the D4 live libFuzzer campaign and return an evidence-shaped outcome."""
+    """Run the D4 live libFuzzer campaign and return an evidence-shaped outcome.
+
+    `workspace_root` (D-106) mirrors `workers/baseline/run.py::run_baseline_stage`'s
+    own parameter of the same name: scratch space that is NOT inside the
+    `ContainerJail`'s worktree and survives `run_libfuzzer_campaign`'s own jail
+    teardown. When given, and the campaign finds at least one crash, the real
+    crash-artifact bytes are durably copied out and returned on
+    `FuzzingOutcome.durable_artifacts` — see `adapters.cpp.fuzzing.
+    run_libfuzzer_campaign`'s own docstring for the copy-out mechanism and its
+    symlink/size safeguards. `None` (the default) keeps every caller that predates
+    D-106 working exactly as before, with an empty `durable_artifacts`."""
     mission_id_str = str(mission_id)
     recorded_at = datetime.now(UTC)
     try:
@@ -88,6 +111,7 @@ def run_fuzzing_stage(
             policy,
             budget_seconds=budget_seconds,
             mission_ref=mission_id_str,
+            workspace_root=workspace_root,
         )
     except StepFailure as exc:
         return _not_run_from_failure(
@@ -137,6 +161,7 @@ def run_fuzzing_stage(
         if result.run is not None
         else "",
         raw_events=result.events,
+        durable_artifacts=result.durable_artifacts,
     )
 
 
