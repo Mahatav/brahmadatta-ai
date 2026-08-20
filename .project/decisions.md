@@ -10738,3 +10738,123 @@ dispatched `cybersecurity` seat is recommended before this merges, if that tool 
 becomes available to the orchestrating session).
 
 ---
+
+## D-108 — Independent `cybersecurity` review of D-107 (PATCH_GENERATE live-model
+bearer-token threading fix): verdict **CLEARED** · 2026-08-19 · `cybersecurity` seat
+
+**Context.** D-107's own record explicitly flagged that its security review was
+self-performed (the implementing seat had no separate `cybersecurity` subagent dispatch
+available) and recommended an independent second pass before merge — this entry is that
+pass, dispatched with full tool access (Read/Bash/Edit).
+
+**Scope reviewed.** `git show f71282a` in full: the one-line diff to
+`apps/control-api/orchestrator/patch_generate_executor.py::_build_live_backend()`, the
+four new tests in `orchestrator/tests/test_patch_generate_executor.py`, and D-107 itself.
+
+**Findings, against the four checks this review was scoped to:**
+
+1. *Token threaded correctly, no broader flow change.* Confirmed by grep across
+   `apps/control-api` and `services/model-gateway`:
+   `_build_live_backend` is the only construction site of `OllamaCodeLlamaBackend` in
+   `apps/control-api`, and the only place `GatewaySettings.model_host_bearer_token`
+   newly reaches a call site. `gateway/tools/model_prep.py`'s own `OllamaCodeLlamaBackend`
+   construction (line 462) is untouched and independently sources its own token via
+   `--bearer-token`/`MODEL_HOST_BEARER_TOKEN`, as it did before this diff. No other file
+   changed except the decisions log and the new test file.
+
+2. *No leak into logs/exceptions/repr.* Read `gateway/client.py::_auth_headers` (token
+   only ever becomes the literal `Authorization: Bearer <token>` header, never
+   interpolated into any string used for logging or errors),
+   `gateway/errors.py` (every `GatewayError` subclass's `details=`/message construction
+   was inspected — none touches `bearer_token` or the settings/backend objects), and
+   `gateway/service.py`'s two `logger.info`/`logger.error` call sites (neither logs
+   `settings`, `backend`, or the token; the structured fields are provenance/timing
+   metadata only). Verified experimentally that `str()`/`repr()` of
+   `urllib.error.HTTPError` — the raw exception a real 401 raises — contains only the
+   HTTP status code and reason phrase, never request headers:
+   `str(HTTPError(...)) == "HTTP Error 401: Unauthorized"`,
+   `repr(...) == "<HTTPError 401: 'Unauthorized'>"`. Traced the catch sites in
+   `_patch_generate_executor`/`_generate_with_ladder`/`run_worker.py`'s
+   `logger.exception(...)` — all interpolate `str(exc)` or `type(exc).__name__`, never
+   the settings/backend object itself, so the token cannot reach a log line even through
+   the already-flagged unwrapped-HTTPError gap.
+
+3. *`repr=False` gap pre-existing, not worsened.* Confirmed both `GatewaySettings`
+   (`services/model-gateway/gateway/settings.py:41-42`) and `OllamaCodeLlamaBackend`
+   (`gateway/ollama.py:28-29`) are `@dataclass(frozen=True)` without `repr=False` on the
+   token field, exactly as D-107 characterized — this predates the diff (the field
+   already existed on both sides; the diff only adds one keyword argument at one call
+   site) and this fix does not add any new place either object is passed to a logger,
+   `print`, or string-formatted. Agreed this is a real defense-in-depth item, correctly
+   scoped as a non-blocking follow-up.
+
+4. *Tests, run independently, not trusted from the report.*
+   `orchestrator/tests/test_patch_generate_executor.py` (venv
+   `/tmp/t5-verify-venv`, `DJANGO_SECRET_KEY`/`POSTGRES_PASSWORD`/`DATABASE_URL` set per
+   the dispatch instructions): **24 passed** (the 4 new bearer-token tests plus the
+   existing 20). Full `apps/control-api` suite: **693 passed, 19 skipped, 0 failed** —
+   matches the reported number exactly, independently reproduced rather than trusted.
+   Also ran, beyond what was strictly asked, `services/model-gateway`'s own suite
+   (**371 passed**) and the repo-root architecture-invariant suite
+   (`tests/architecture/test_compose_topology.py` +
+   `tests/architecture/test_import_direction.py`, **34 passed**), specifically
+   including `test_model_host_bearer_token_is_declared_only_in_the_compose_env_example`
+   and `test_importing_the_asgi_app_does_not_load_the_gateway` — the two invariants
+   D-107's security-implications section named as unbroken. Confirmed unbroken.
+
+5. *Live verification against the real sidecar.* `docker ps -a` first: no pre-existing
+   `brahmadatta-*` stack (only an unrelated `infra-postgres-1` and stopped
+   `good_marketer_web-*` containers from other projects). Brought up
+   `infrastructure/compose/docker-compose.yml --profile model` (`model-host` +
+   `model-host-auth` only) with a freshly generated `MODEL_HOST_BEARER_TOKEN`, confirmed
+   via `curl` from a throwaway container on `brahmadatta_backend` that the sidecar itself
+   returns `401` with no token and `200` with the correct one. Then ran the actual
+   `gateway.ollama.OllamaCodeLlamaBackend` / `gateway.settings.GatewaySettings` code
+   (not a hand-reimplementation — the real package, imported from the mounted worktree)
+   against the real sidecar from a container joined to `brahmadatta_backend`:
+   - Pre-fix call shape (`OllamaCodeLlamaBackend(endpoint=...)`, no `bearer_token=`,
+     i.e. exactly what the code looked like before this diff): **`HTTPError 401
+     Unauthorized`** — reproduces D-105/D-107's original finding exactly.
+   - Post-fix call shape (`_build_live_backend`'s actual new body, `bearer_token=
+     settings.model_host_bearer_token`): **no 401** — the sidecar accepted the token
+     and forwarded to Ollama, which returned `HTTPError 500` with body
+     `{"error":"model requires more system memory (8.4 GiB) than is available (7.2
+     GiB)"}`. This is a *different* failure than D-107's reported post-fix 404
+     (model-not-pulled) — expected, since this sandbox's Ollama volume has no model
+     pulled and its available memory differs from D-107's environment — but it is
+     unambiguous independent proof the request now clears the bearer-token gate and
+     reaches Ollama itself: nginx never returns a JSON body shaped like an Ollama
+     memory-admission error, only Ollama does. Cleaned up afterward: removed the
+     throwaway container, ran `docker compose --profile model down` (removed
+     `brahmadatta-model-host`, `brahmadatta-model-host-auth`, and the
+     `brahmadatta_backend` network it created), and confirmed via `docker ps -a` that
+     the environment was restored to exactly its pre-review state — nothing pre-existing
+     was touched.
+
+**Additional check not in the original four, done because it is standard for this seat's
+pass.** Grepped the diff itself (`git show f71282a`) for anything token-shaped beyond the
+one legitimate field reference — only the test fixture literal `"s3cr3t-sidecar-token"`
+appears, a placeholder value, not a real credential. `.env`/`.env.example` were not
+touched by this diff (confirmed by `git show --stat`), consistent with D-075's isolation
+requirement that `MODEL_HOST_BEARER_TOKEN` never appear in `apps/control-api/.env.example`.
+
+**Verdict: CLEARED.** No critical, high, or medium finding. Two pre-existing, non-blocking
+items — both already correctly identified and scoped by D-107 itself, and independently
+confirmed here to be accurate and unworsened by this diff:
+- `gateway.ollama.OllamaCodeLlamaBackend.generate()` does not wrap raw
+  `urllib.error.HTTPError`/`URLError`/timeout into `GatewayError`, so the degradation
+  ladder does not catch non-auth HTTP failures (availability, not confidentiality —
+  confirmed the raw exception's `str()`/`repr()` carries no secret even when uncaught).
+  Recommend tracking as a follow-up issue against `gateway/ollama.py`, owner
+  backend-developer, not blocking this merge.
+- `GatewaySettings.model_host_bearer_token` / `OllamaCodeLlamaBackend.bearer_token` lack
+  `repr=False`, a latent stray-repr risk if some future caller ever logs either object
+  wholesale. Recommend as a low-severity hardening backlog item, not blocking.
+
+**Recommendation.** Merge D-107 (commit `f71282a`) as-is. No risk-acceptance needed —
+there is no critical finding to accept.
+
+**Final approval authority** — cybersecurity (this seat), for the security verdict itself
+(CLEARED, recorded here); CTO retains authority to merge.
+
+---
