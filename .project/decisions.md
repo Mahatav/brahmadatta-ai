@@ -10228,3 +10228,198 @@ numbering collision this entry flags in its own header still needs reconciling b
 whichever session merges second, per the orchestrating session's own instruction.
 
 ---
+
+## D-105 — #50 D7 gate, live rehearsal run 5 (2026-08-20): D-103's two fixes confirmed
+live, evidence bundle exported AND read back for the first time ever, one real REJECTED
+verdict, one new PATCH_GENERATE live-model blocker found (bearer token not threaded
+through), VERIFIED still capped by the pre-existing reproducer-persistence gap ·
+2026-08-20 · `devops-engineer` seat
+
+**Context.** Fifth live attempt at the #50 D7 gate, dispatched specifically to exercise
+D-103/D-104's two landed fixes (PATCH_GENERATE `IndexError`, evidence-export
+`ArtifactRef` `TypeError`) live, drive a real mission through all nine steps against
+`pktcfg`, obtain both a Verified and a Rejected verdict, and — for the first time in
+this project's history — actually export and read back an evidence bundle rather than
+only calling the endpoint. Full detail: `.project/evidence/
+d7-gate-50-live-run-2026-08-20-run5.{json,md}`, plus the extracted, checksum-verified
+evidence bundle itself at `.project/evidence/
+d7-gate-50-live-run-2026-08-20-run5-evidence-bundle/` and the post-teardown `docker ps
+-a` capture alongside them.
+
+**Headline 1 — both D-103 fixes confirmed live.** No `IndexError`: the `gateway`
+package now imports and executes inside the containerized `worker` process for the
+first time ever, reaching all the way to an actual HTTP call against `model-host`
+(blocked only by a new, different bug — see headline 3). `BaselineReport.log_ref`
+round-trips as a real `ArtifactRef` dict on every mission this run (confirmed both via
+direct `GET /missions/{id}/evidence` and inside the exported bundle's `report.md`) —
+zero `ArtifactRef` `TypeError`s, on any of the three missions driven this run.
+
+**Headline 2 — evidence export and read-back both confirmed working, for the first time
+this project has ever tested either.** `POST /missions/{id}/export` returned `200` with
+a real, content-addressed `evidence_bundle` artifact (both via a manual call and via the
+orchestrator's own automatic `EXPORT` job firing on entry to `EXPORTING`, on both
+missions this run reached that state). This seat then `docker cp`'d the actual artifact
+bytes out of `brahmadatta-control-api`'s `ARTIFACT_ROOT` store — not merely trusting the
+`200` — extracted the tarball, and independently recomputed every one of its 5 files'
+sha256 against the bundle's own `manifest.json`: 5/5 matched. `report.md` reads as a
+genuinely complete, self-contained account a reader who never built this system could
+follow: mission verdict, baseline result, fuzzing-campaign stats, the finding, the one
+patch candidate's full five-gate table, an honest "gates that did not run and why"
+section, an honest "substitutions (fallback paths used)" section naming the
+subprocess-jail isolation posture and the operator-supplied-patch substitution by name,
+and a resource-usage section that explicitly discloses its own zero values are "not
+measured" rather than silently presenting them as real zero usage. One further honest
+disclosure worth naming: `include_artifacts=true` was requested and the bundle openly
+states in `artifacts/NOTE.txt` that raw stage artifacts are not actually copied in this
+build ("no function in this codebase yet resolves an ArtifactRef back to its stored
+bytes generically") rather than silently ignoring the flag — a real, disclosed gap, not
+a defect in what shipped.
+
+**Headline 3 — a new, distinct PATCH_GENERATE live-model blocker, found immediately
+after D-103's IndexError fix opened the door to it.** The first mission this run
+(default, unrestricted containerized worker, live-model path tried first per this
+task's own instruction) reached `PATCH_GENERATE` cleanly — no crash on import or path
+arithmetic — and then failed with `HTTP Error 401: Unauthorized` calling `model-host`.
+Root-caused precisely: `orchestrator/patch_generate_executor.py::_build_live_backend()`
+constructs `OllamaCodeLlamaBackend(endpoint=settings.endpoint or DEFAULT_OLLAMA_ENDPOINT)`
+— it never passes `bearer_token=settings.model_host_bearer_token`, even though
+`GatewaySettings.model_host_bearer_token` is computed correctly by
+`gateway.settings.from_environment()` (confirmed: the exact right token is present in
+the worker container's own environment, and a manual request sent with that token by
+hand from inside the same container gets a real `200` from `model-host`) and
+`OllamaCodeLlamaBackend.bearer_token` is a real field whose own docstring names this
+exact D-075/SEC-50 scenario. This is a one-line call-site omission, not a design gap —
+the settings value and the backend field both already exist correctly; they are simply
+never connected. Distinct from D-098's blocker 1 (which prevented reaching this code at
+all) and reachable only because that fix landed. **Not fixed** — application code
+(`orchestrator/patch_generate_executor.py`, the same module D-103 touched), out of this
+seat's authority per this project's standing rule against altering another role's code
+to make it deploy. Reported for backend-developer.
+
+**Headline 4 — one real verdict achieved live: REJECTED, a second confirmation.**
+Worked around headline 3 via the same devops-scoped topology control D-098 established
+(`CONTROL_API_WORKER_CMD` restarted excluding `PATCH_GENERATE`, so missions park
+cleanly in `PATCH` instead of auto-advancing on a fast, single-attempt
+`PATCH_GENERATE` failure — `MAX_ATTEMPTS_BY_KIND[JobKind.PATCH_GENERATE] == 1`,
+confirmed by reading `missions/models.py` directly), then submitted the fixture's own
+`candidate-b-rejected-crash-only-fix.patch` via the operator-candidate endpoint
+(D-090/D-091) on a mission whose policy set `patch.allowed_paths=["src/decode.c"]` (the
+default empty allowlist rejects everything before it is ever built — hit this once,
+diagnosed it from the `PatchPolicy` schema, and corrected the next mission's policy
+rather than treating it as a blocker). Real `VerificationRecord`:
+`regression_preserved: FAIL` — `"ctest: Regression suite failed: 1 of 8 tests failed.
+exit=8"` — overall verdict `REJECTED`. Same live gate failure mechanism D-098 first
+proved, now reproduced a second time on a different session.
+
+**Headline 5 — VERIFIED still not reached, reconfirmed as the same pre-existing gap,
+not a new defect.** The fixture's `candidate-a-correct-bounds-fix.patch`, submitted the
+same way on a sibling mission, reached `VERIFY`: `COMPILE` passed, `REGRESSION_PRESERVED`
+passed (8/8), but `REPRODUCER_ELIMINATED` came back `NOT_RUN` ("reproducer file is
+missing") for the identical reason D-098 named as recommendation 3 — no reproducer/
+minimized-crash artifact is ever persisted onto a `FUZZING_CAMPAIGN`-discovered
+`Finding` in this live pipeline, because `MINIMIZE` is still never enqueued by any
+current production code path (reconfirmed by reading `orchestrator/queue.py`'s own
+comment: "`JobKind.SANITIZER_BUILD` and `JobKind.MINIMIZE` are deliberately absent
+[from the stage-to-job map] ... composing them is T2's call ... not something this
+top-level map should guess at"). Verdict capped at `HUMAN_REVIEW_REQUIRED`, identical
+shape to run 4's own finding. This is now confirmed twice, on two different sessions,
+against two different correct candidates — strong evidence this is a structural gap in
+the pipeline as currently built, not noise.
+
+**A new environment note, not previously documented.** A pre-existing named `pgdata`
+Docker volume (left over from an earlier session) carried a `POSTGRES_PASSWORD` baked
+in at first `initdb` that no longer matched the current `.env`'s regenerated value —
+`worker`/`command-center` crash-looped on `password authentication failed for user
+"brahmadatta"` until fixed. Fixed non-destructively: `ALTER ROLE brahmadatta WITH
+PASSWORD '<the .env value>'` run directly against the live `db` container (reachable
+locally via its own trust-authenticated Unix socket even while TCP auth was failing) —
+no volume reset, no data loss; migrations and all prior sessions' mission history were
+confirmed intact immediately afterward. Flagged for whoever owns the next rehearsal: a
+named volume surviving across sessions can silently disagree with a regenerated `.env`'s
+Postgres credentials; keep `.env`'s Postgres credentials stable across a project's
+lifetime, reset the volume, or apply the same `ALTER ROLE` fix.
+
+**Environment notes, reconfirmed, no new findings.** `POSTGRES_PORT`, pre-staged
+`codellama:7b-instruct`, `command-center-node-modules` chown, `db`'s internal-only
+network not publishing its loopback port on this Docker Desktop host — all exactly as
+D-084/D-085/D-098 documented. `run_orchestrator` is still not wired into
+`docker-compose.yml` at all (D-100's own finding, unchanged) — started manually this
+run, same as D-100 and D-098 both had to. This session ran from the **primary
+worktree**, not a linked one, so `dev-up.sh`'s new auto-isolation (landed since D-098/
+D-099, PR #219) correctly left `COMPOSE_PROJECT_NAME` unset — confirmed no other
+worktree had a colliding `brahmadatta` compose project running, both before starting
+and after teardown.
+
+**Nine-step demo, actual outcome.** 1. Target — pktcfg, PASS. 2. Authorize + snapshot —
+PASS x3 missions, including further live reconfirmations of #207's fix (identical
+digest reused across two sibling missions with no `409`). 3. Baseline — PASS x3, live,
+real ctest 8/8 each time, `log_ref` correctly resolving as a real `ArtifactRef` dict. 4.
+Finding — PASS x3, real ASan heap-buffer-overflow from a real live FUZZ campaign each
+time. 5. Patch candidates — PARTIAL: live-model path tried first as instructed, hit
+headline 3's new blocker; operator-candidate fallback used for both verdict shapes, as
+this task's own brief pre-authorized. 6. Verdict A (Verified) — NOT ACHIEVED
+(`HUMAN_REVIEW_REQUIRED`, pre-existing gap); Verdict B (Rejected) — PASS, real, live,
+second confirmation. 7. Evidence export — PASS, first time ever. 8. Evidence read-back —
+PASS, first time ever tested at all, checksum-verified. 9. Teardown — PASS: `docker ps
+-a` after teardown identical to the pre-run baseline (`infra-postgres-1` plus four
+stopped, unrelated `good_marketer_web-*`/`ollama` containers; zero `brahmadatta-*`);
+`docker compose ls -a` shows **zero** `brahmadatta` compose projects registered at all
+(stronger than D-098/D-099's own teardown, which left the project registered but
+stopped); reconfirmed durable after an explicit 60-second wait, per D-099's own lesson
+about not trusting an instantaneous check; zero stray `run_worker`/`run_orchestrator`/
+`run-fuzz-worker` host processes.
+
+**Explicit gate verdict, posted to issue #50** — **FAIL**, closer than any prior
+rehearsal. Genuinely new ground broken: the evidence-export/read-back acceptance
+criterion — the one criterion no rehearsal had ever gotten far enough to test at all —
+is now fully confirmed working end to end, independently checksum-verified. The
+`REJECTED` verdict was reproduced live a second time. Not a PASS: `VERIFIED` was still
+not reached (reconfirmed pre-existing, structural gap, not this run's doing), and a new,
+precisely-diagnosed blocker was found on the live-model `PATCH_GENERATE` path (reported,
+not fixed, out of this seat's scope). Fallback recording: not attempted, as in every
+prior rehearsal — remains a standing human task.
+
+**Options considered for how far to push this run** — same framing D-098 used: (a) stop
+at the first blocker (the new bearer-token 401) and report; (b) work around it via the
+already-established operator-candidate fallback and topology control, and push as far as
+real infrastructure/operational work (not application-code fixes) could take it.
+**Chosen: (b)**, for the same reason D-098 gave — this task's own brief explicitly
+pre-authorized exactly this fallback, and doing so is what let this run reach and
+confirm the evidence-export/read-back criterion for the first time ever, which stopping
+at headline 3 would have left untested yet again.
+
+**Cost implications** — none beyond the existing image/compute costs this project
+already accounts for; no new infrastructure introduced.
+
+**Security implications** — none. No isolation, auth, sandboxing, or secrets-handling
+code was touched by this seat. The one blocker found (headline 3) is itself a
+security-relevant gap — a live-model call silently sending no `Authorization` header —
+but it fails *closed* (the D-075/SEC-50 sidecar correctly 401s it rather than falling
+back to an unauthenticated path), so its practical effect this run was "the live-model
+path doesn't work yet," not a security hole to fix urgently. The `ALTER ROLE` password
+fix touched only this session's own already-authorized local dev database, using a
+value already present in this session's own `.env`.
+
+**Scalability implications** — none; every finding this run is a correctness/
+completeness gap in the pipeline, not scale-sensitive.
+
+**Recommendation.** (1) backend-developer: fix headline 3 —
+`orchestrator/patch_generate_executor.py::_build_live_backend()` should pass
+`bearer_token=settings.model_host_bearer_token` into `OllamaCodeLlamaBackend(...)`; both
+sides of the fix already exist and are already correct, they are simply not connected,
+so this should be a small, contained, low-risk change. (2) CTO/backend-developer: the
+reproducer-persistence product decision (D-098 recommendation 3) is now this project's
+single largest remaining structural blocker to a genuine `VERIFIED` verdict — every
+other stage of the pipeline (baseline, fuzz, correlate, patch policy, verify, export,
+evidence read-back) has now been proven live, across two separate rehearsals. This is
+worth prioritizing over further blocker-hunting rehearsals. (3) This run's own scope is
+complete; recommend the orchestrating session review this record together with
+D-098/D-099/D-103/D-104 before deciding whether to schedule a run 6 focused narrowly on
+items (1) and (2) above, or to close #50 with those two named as the residual gap — not
+this seat's call to make.
+
+**Final approval authority** — CTO / orchestrating session, for scheduling any follow-up
+work and for the close/continue call on #50; this seat, for the live-run findings,
+evidence, and verdict recorded here.
+
+---

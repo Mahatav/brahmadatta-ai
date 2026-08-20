@@ -1,0 +1,183 @@
+{
+  "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+  "generated_at": "2026-08-20T02:49:20.110836Z",
+  "snapshot_sha256": "b7a82f9fcd03bcef24ff3b275b51e6fd916ef2d9b78357975796256fec4b5fe3",
+  "authorization_statement": "D7 gate rehearsal run 5, allowed_paths=[src/decode.c], authorized isolated sandbox test against pktcfg fixture only.",
+  "baseline": {
+    "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+    "configure_ok": true,
+    "build_ok": true,
+    "tests_total": 8,
+    "tests_passed": 8,
+    "tests_failed": 0,
+    "duration_seconds": 1.3808199591003358,
+    "adapter": "C_CMAKE_CTEST",
+    "recorded_at": "2026-08-20T02:46:31.769535Z",
+    "log_ref": {
+      "uri": "artifact://505cfd15-4239-43fe-8e57-c5eab3b9d3bd/baseline_ctest_junit/e2866d6951152509fe9c4d7cde3ffeedf284c437eed3cd646c50d34ce1a7db11",
+      "kind": "baseline_ctest_junit",
+      "sha256": "e2866d6951152509fe9c4d7cde3ffeedf284c437eed3cd646c50d34ce1a7db11",
+      "size_bytes": 1551
+    },
+    "passed": true
+  },
+  "findings": [
+    {
+      "id": "d8231479-17e0-463f-a5f7-27e97cfba04f",
+      "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+      "category": "HEAP_BUFFER_OVERFLOW",
+      "severity": "CRITICAL",
+      "tool": "ADDRESS_SANITIZER",
+      "discovery_method": "FUZZING_CAMPAIGN",
+      "replay_source": null,
+      "location": {
+        "file_path": "<unknown>",
+        "line": null,
+        "function": null
+      },
+      "fingerprint": "fuzz:ADDRESS_SANITIZER:heap-buffer-overflow:<unknown>:c681cf5d2aecdc0d",
+      "reproducible": false,
+      "detected_at": "2026-08-20T02:46:33.386028Z",
+      "title": "heap buffer overflow at <unknown>"
+    }
+  ],
+  "reproducers": [],
+  "fuzzing": {
+    "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+    "mode": "LIVE_CAMPAIGN",
+    "harness": "pktcfg_fuzz_one_input",
+    "engine": "libFuzzer",
+    "runtime_seconds": 0.29765058297198266,
+    "executions": 809,
+    "crashes_found": 1,
+    "unique_crashes": 1,
+    "corpus_size": 8,
+    "sanitizers": [
+      "address"
+    ],
+    "finding_ids": [
+      "d8231479-17e0-463f-a5f7-27e97cfba04f"
+    ],
+    "replay_source": null,
+    "recorded_at": "2026-08-20T02:46:33.386028Z"
+  },
+  "patches": [
+    {
+      "id": "763c8997-6220-4e6b-b71b-1eb91a8da935",
+      "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+      "finding_id": "d8231479-17e0-463f-a5f7-27e97cfba04f",
+      "provenance": "OPERATOR_SUPPLIED",
+      "model": null,
+      "diff": "diff --git a/src/decode.c b/src/decode.c\nindex 0180959..a06b601 100644\n--- a/src/decode.c\n+++ b/src/decode.c\n@@ -72,6 +72,13 @@ size_t pkt_decoded_length(const uint8_t *src, size_t len, int escaped)\n             continue;\n         }\n \n+        if (c == '\\t') {\n+            /* A literal tab is expanded by pkt_decode_into(); size for it. */\n+            need += PKT_TAB_WIDTH;\n+            i += 1;\n+            continue;\n+        }\n+\n         /* Every remaining byte is copied through as-is. */\n         need += 1;\n         i += 1;\n",
+      "files_changed": 1,
+      "lines_changed": 7,
+      "policy_status": "ACCEPTED",
+      "policy_detail": "accepted; files=1/1; lines=7/40; paths=src/decode.c; allowed_paths=src/decode.c",
+      "rationale": "candidate A - correct bounds fix (D7 gate rehearsal run 5)",
+      "created_at": "2026-08-20T02:48:05.442762Z"
+    }
+  ],
+  "verifications": [
+    {
+      "id": "9f39b8bc-3118-4e9b-84a0-868be404c4ad",
+      "mission_id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+      "patch_id": "763c8997-6220-4e6b-b71b-1eb91a8da935",
+      "gates": {
+        "compile": {
+          "name": "COMPILE",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "cmake",
+          "detail": "",
+          "evidence_ref": null
+        },
+        "reproducer_eliminated": {
+          "name": "REPRODUCER_ELIMINATED",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: reproducer file is missing: /app/var/workspaces/505cfd15-4239-43fe-8e57-c5eab3b9d3bd/no-reproducer-recorded",
+          "evidence_ref": null
+        },
+        "regression_preserved": {
+          "name": "REGRESSION_PRESERVED",
+          "status": "PASS",
+          "evidence_source": "TOOL_EXECUTION",
+          "tool": "ctest",
+          "detail": "Regression suite passed: 8 tests ran.",
+          "evidence_ref": null
+        },
+        "static_delta": {
+          "name": "STATIC_DELTA",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        },
+        "renewed_fuzzing": {
+          "name": "RENEWED_FUZZING",
+          "status": "NOT_RUN",
+          "evidence_source": "REPLAYED_ARTIFACT",
+          "tool": "",
+          "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+          "evidence_ref": null
+        }
+      },
+      "verdict": "HUMAN_REVIEW_REQUIRED",
+      "started_at": "2026-08-20T02:48:06.264360Z",
+      "finished_at": "2026-08-20T02:48:16.168830Z",
+      "worktree_sha256": null,
+      "resource_usage": null
+    }
+  ],
+  "verdict_summary": {
+    "mission_verdict": "HUMAN_REVIEW_REQUIRED",
+    "candidates": [
+      {
+        "patch_id": "763c8997-6220-4e6b-b71b-1eb91a8da935",
+        "verification_id": "9f39b8bc-3118-4e9b-84a0-868be404c4ad",
+        "verdict": "HUMAN_REVIEW_REQUIRED",
+        "provenance": "OPERATOR_SUPPLIED",
+        "summary": "Did not clear: REPRODUCER_ELIMINATED, STATIC_DELTA, RENEWED_FUZZING."
+      }
+    ],
+    "verified_count": 0,
+    "rejected_count": 0,
+    "human_review_count": 1
+  },
+  "recommended_patch_id": null,
+  "resource_usage": {
+    "cpu_seconds": 0.0,
+    "peak_memory_mb": 0.0,
+    "wall_seconds": 0.0,
+    "sandbox_count": 0,
+    "gpu_seconds": 0.0
+  },
+  "gates_not_run": [
+    "patch 763c8997: REPRODUCER_ELIMINATED NOT_RUN — Not run: reproducer file is missing: /app/var/workspaces/505cfd15-4239-43fe-8e57-c5eab3b9d3bd/no-reproducer-recorded",
+    "patch 763c8997: STATIC_DELTA NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md).",
+    "patch 763c8997: RENEWED_FUZZING NOT_RUN — Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+  ],
+  "substitutions": [
+    {
+      "kind": "SUBPROCESS_JAIL_ISOLATION",
+      "reason": "The rootless-container sandbox backend (#15) is not built in this checkout; stages ran inside packages.sandbox's subprocess jail (#81) instead — a weaker isolation posture than a container, reported as what it is (D-049).",
+      "artifact_ref": null,
+      "recorded_at": "2026-08-20T02:49:20.110836Z"
+    },
+    {
+      "kind": "OPERATOR_SUPPLIED_PATCH",
+      "reason": "Patch candidate 763c8997-6220-4e6b-b71b-1eb91a8da935 was supplied by an operator, not generated by the model.",
+      "artifact_ref": null,
+      "recorded_at": "2026-08-20T02:49:20.110836Z"
+    }
+  ],
+  "isolation_mode": "SUBPROCESS_JAIL",
+  "tool_versions": {
+    "adapter": "C_CMAKE_CTEST",
+    "fuzzer": "libFuzzer",
+    "compile": "cmake",
+    "regression_preserved": "ctest"
+  }
+}

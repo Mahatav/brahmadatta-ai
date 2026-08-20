@@ -1,0 +1,93 @@
+{
+  "run": "run5",
+  "date_utc": "2026-08-20",
+  "seat": "devops-engineer",
+  "repo_head_at_start": "c63c47d (main, up to date with origin/main; includes D-103/D-104's PATCH_GENERATE IndexError fix, evidence-export ArtifactRef fix, and D-099's compose-project-name isolation fix)",
+  "objective": "Fifth live attempt at the #50 D7 gate. Test D-103/D-104's two landed fixes live, drive a real mission end to end against pktcfg, obtain both verdicts, and for the first time in this project's history actually export AND read back an evidence bundle.",
+  "environment_setup": {
+    "compose_project": "brahmadatta (default; this session ran from the primary worktree, not a linked worktree, so dev-up.sh's auto-isolation correctly left the project name unmodified; confirmed no other worktree had a colliding brahmadatta compose project running, before and after)",
+    "postgres_port": 15432,
+    "pre_existing_gotcha_hit": "the pgdata named volume (from a prior session) had a different POSTGRES_PASSWORD baked in than the current .env's; worker/command-center crash-looped on `password authentication failed for user brahmadatta`. Fixed non-destructively with `ALTER ROLE brahmadatta WITH PASSWORD ...` inside the running db container, matching .env -- no data lost, migrations were already applied and mission history from prior sessions was intact.",
+    "model_host": "codellama:7b-instruct pre-staged on the ollama-models volume, confirmed via `docker exec brahmadatta-model-host ollama list` before use.",
+    "run_orchestrator": "not wired into docker-compose.yml (D-100's own finding, unchanged this run); started manually via `docker exec -d brahmadatta-control-api python manage.py run_orchestrator`.",
+    "fuzz_worker": "infrastructure/scripts/run-fuzz-worker.sh, bare-metal, --kinds FUZZ,MINIMIZE, backgrounded. No docker network connect bridge workaround was actually required this run (fuzz-worker's own DB connection is via 127.0.0.1:15432 published loopback, not the internal-only db network fuzz-worker itself never joins) -- ran `docker network connect bridge brahmadatta-db` anyway per the standing gotcha note as a precaution; did not observably change anything."
+  },
+  "sequence_of_missions": [
+    {
+      "id": "deb4d7eb-9181-4e4a-b4d5-fdb0668476aa",
+      "name": "d7-gate-run5",
+      "purpose": "First mission: default containerized worker (unrestricted --kinds), to test the live-model PATCH_GENERATE path first, per this task's own instruction.",
+      "outcome": "HUMAN_REVIEW (verdict HUMAN_REVIEW_REQUIRED), 0 patch candidates",
+      "jobs": "BASELINE SUCCEEDED (8/8 ctest) -> FUZZ SUCCEEDED (3729 execs, 1 crash, 0.3s) -> CORRELATE SUCCEEDED (1 finding) -> PATCH_GENERATE FAILED",
+      "patch_generate_failure": "HTTP Error 401: Unauthorized, from gateway.ollama.OllamaCodeLlamaBackend.generate() -> gateway.client.post_json() -> model-host-auth's nginx bearer-token gate (D-075/SEC-50). Root cause: orchestrator/patch_generate_executor.py::_build_live_backend() constructs OllamaCodeLlamaBackend(endpoint=...) without passing bearer_token=settings.model_host_bearer_token, even though GatewaySettings.model_host_bearer_token is populated correctly from the MODEL_HOST_BEARER_TOKEN env var (confirmed present and correct inside the worker container, and confirmed the identical token, sent manually via curl-equivalent urllib request from inside the same container, gets a real 200 from model-host). This is a NEW blocker, distinct from and downstream of D-098's blocker 1 (the IndexError), which D-103 fixed -- the IndexError no longer occurs; the gateway package now imports and executes inside the container, and reaches the model-host-auth sidecar, but with no Authorization header at all, so it is rejected before ever reaching Ollama."
+    },
+    {
+      "id": "505cfd15-4239-43fe-8e57-c5eab3b9d3bd",
+      "name": "d7-gate-run5-verified-path",
+      "purpose": "Second mission, policy.patch.allowed_paths=[\"src/decode.c\"], operator-candidate fallback per this task's pre-authorized instruction. Worker restarted with CONTROL_API_WORKER_CMD excluding PATCH_GENERATE (D-098's own devops-scoped topology-control precedent) so the mission parks cleanly at PATCH instead of auto-advancing to HUMAN_REVIEW on a PATCH_GENERATE failure.",
+      "candidate": "candidate-a-correct-bounds-fix.patch (demo/repositories/pktcfg/patches/), submitted via POST /missions/{id}/patches, provenance OPERATOR_SUPPLIED, policy_status ACCEPTED",
+      "verify_gates": "COMPILE PASS (cmake) / REGRESSION_PRESERVED PASS (ctest, 8/8) / REPRODUCER_ELIMINATED NOT_RUN (\"reproducer file is missing\") / STATIC_DELTA NOT_RUN (cut from 7-day build) / RENEWED_FUZZING NOT_RUN (cut from 7-day build)",
+      "verdict": "HUMAN_REVIEW_REQUIRED -- capped by the same pre-existing reproducer/minimized-crash artifact persistence gap D-098 recommendation 3 named (MINIMIZE is never enqueued by any current production code path for a FUZZING_CAMPAIGN-discovered finding). Confirmed still unfixed this run -- not a new defect, a reconfirmation of a known, reported, out-of-scope gap.",
+      "export": "auto-advanced through EXPORTING -> real evidence_bundle artifact produced (see evidence_export_and_readback below). Also independently triggered a second export manually via POST /missions/{id}/export."
+    },
+    {
+      "id": "26e54d4a-4265-4b0e-a5ba-58811c6a260d",
+      "name": "d7-gate-run5-rejected-path",
+      "purpose": "Third mission, same allowed_paths policy, operator-candidate fallback for the Rejected verdict.",
+      "candidate": "candidate-b-rejected-crash-only-fix.patch (demo/repositories/pktcfg/patches/), submitted via POST /missions/{id}/patches, provenance OPERATOR_SUPPLIED, policy_status ACCEPTED",
+      "verify_gates": "COMPILE PASS (cmake) / REGRESSION_PRESERVED FAIL (\"ctest: Regression suite failed: 1 of 8 tests failed. exit=8\") / REPRODUCER_ELIMINATED NOT_RUN / STATIC_DELTA NOT_RUN / RENEWED_FUZZING NOT_RUN",
+      "verdict": "REJECTED -- real, live, second time this has been achieved live (first was D-098/run4).",
+      "export": "auto-advanced through EXPORTING -> real evidence_bundle artifact produced automatically by the orchestrator, without a manual export call."
+    }
+  ],
+  "verdicts_achieved": {
+    "rejected": "YES -- real, live, VerificationRecord-backed (mission 26e54d4a).",
+    "verified": "NOT ACHIEVED (as literal VERIFIED) -- capped at HUMAN_REVIEW_REQUIRED by the pre-existing, previously-reported reproducer-persistence gap (mission 505cfd15). Structurally the same finding as D-098 run4: a correct candidate against a live-fuzzing-discovered finding cannot reach VERIFIED in this pipeline as it stands today, independent of anything this rehearsal did.",
+    "human_review_required": "YES, real, live -- the closest this pipeline can currently get to a positive verdict for a fuzzing-discovered finding, and is itself a real, evidenced, gate-matrix-backed outcome, not a placeholder."
+  },
+  "blockers_found_this_run": [
+    {
+      "id": "blocker-A-new-this-run",
+      "summary": "PATCH_GENERATE live-model path: model-host-auth bearer token never threaded through orchestrator/patch_generate_executor.py::_build_live_backend()",
+      "detail": "See sequence_of_missions[0].patch_generate_failure above for the full root-cause trace. Confirmed the token itself is correct and reachable (manual curl-equivalent from inside the worker container succeeds with 200), so this is purely a call-site bug: GatewaySettings.model_host_bearer_token is computed correctly by gateway.settings.from_environment() but _build_live_backend() drops it when constructing OllamaCodeLlamaBackend, whose own bearer_token field and docstring exist specifically for this D-075/SEC-50 scenario.",
+      "owner": "backend-developer (orchestrator/patch_generate_executor.py, the same module D-103 fixed the IndexError in)",
+      "fix_authority": "explicitly out of this seat's authority per this project's standing rule against altering another role's application code to make it deploy; not fixed here, reported only.",
+      "status": "NOT FIXED -- reported"
+    },
+    {
+      "id": "reconfirmed-not-new",
+      "summary": "Reproducer/minimized-crash artifact persistence gap (D-098 recommendation 3) still open -- VERIFIED is structurally unreachable for a FUZZING_CAMPAIGN-discovered finding regardless of candidate correctness.",
+      "status": "RECONFIRMED, unfixed, previously reported -- not this run's own finding, a real product/backend decision still pending per D-098/D-103's own text."
+    },
+    {
+      "id": "reconfirmed-pgdata-password",
+      "summary": "A stale named pgdata volume from a prior session carried a POSTGRES_PASSWORD that no longer matched the current .env, crash-looping worker/command-center on password auth failure until fixed with a live ALTER ROLE.",
+      "status": "Worked around live, non-destructively, this run. Not previously documented as a named gotcha in D-084/D-085/D-098's own gotcha list -- flagged here as a new environment note for the next rehearsal: a named Docker volume across sessions can silently disagree with a regenerated .env's POSTGRES_PASSWORD; either keep .env's Postgres credentials stable across a project's lifetime, or reset the volume, or ALTER ROLE as done here."
+    }
+  ],
+  "evidence_export_and_readback": {
+    "export_triggered": "POST /missions/{id}/export on mission 505cfd15 (manual) and automatically by the orchestrator's own EXPORT job on both 505cfd15 and 26e54d4a (auto-triggered on entering EXPORTING, no manual call).",
+    "http_status": 200,
+    "artifact_produced": "artifact://505cfd15-4239-43fe-8e57-c5eab3b9d3bd/evidence_bundle/7c3eb0fa9c3edef43087e50770bf62cac80c5e65a2e02b22b54fca4a0c0682fc (4084 bytes)",
+    "readback_method": "docker cp'd the real artifact tarball out of brahmadatta-control-api's content-addressed ARTIFACT_ROOT store (not just the HTTP 200 -- the actual bytes), extracted it, and independently recomputed every file's sha256 against manifest.json's own checksums -- all 5 files matched (report.md, report.json, gate-matrix.json, tool-versions.json, artifacts/NOTE.txt).",
+    "readback_result": "PASS -- the bundle is genuinely coherent and readable by a fresh, non-building consumer. report.md is a complete, self-contained account: mission verdict, baseline result, fuzzing campaign stats, the one finding, the one patch candidate with its full gate table, an honest 'gates that did not run and why' section, an honest 'substitutions (fallback paths used)' section naming the subprocess-jail isolation posture and the operator-supplied-patch substitution, and a resource-usage section that explicitly discloses its own zero values are 'not measured' rather than silently presenting them as real zero usage. include_artifacts=true was requested; the bundle honestly discloses in artifacts/NOTE.txt that raw stage artifacts are not actually copied in this build (no generic ArtifactRef-to-bytes resolver exists yet) rather than silently ignoring the flag.",
+    "saved_copy": ".project/evidence/d7-gate-50-live-run-2026-08-20-run5-evidence-bundle/ (extracted, checked into this evidence directory for the record)",
+    "significance": "This is the FIRST rehearsal in this project's history (runs 1-4 never reached this point, or crashed on it) to actually exercise and confirm the gate's own 'evidence bundle exported and readable by someone who did not build it' acceptance criterion, not merely call the endpoint and get 200."
+  },
+  "nine_step_demo_outcome": {
+    "1_target": "PASS -- pktcfg",
+    "2_authorize_and_snapshot": "PASS x3 missions, including two consecutive live reconfirmations of #207's mission-scoped-claim fix (same digest reused across missions 505cfd15/26e54d4a with no 409)",
+    "3_baseline": "PASS x3 missions, live, real ctest 8/8 each time, log_ref correctly resolving as a real ArtifactRef dict (D-103's fix confirmed live, not just via the earlier direct GET /evidence check)",
+    "4_finding": "PASS x3 missions, real ASan heap-buffer-overflow from a real live FUZZ campaign each time",
+    "5_patch_candidates": "PARTIAL -- live-model path attempted first per this task's instruction, hit a new, distinct, precisely-diagnosed blocker (bearer-token not threaded through); fell back to the operator-candidate endpoint for both verdict shapes, as pre-authorized",
+    "6_verdict_A_verified": "NOT ACHIEVED -- HUMAN_REVIEW_REQUIRED instead, capped by the pre-existing reproducer-persistence gap, not a new defect",
+    "6_verdict_B_rejected": "PASS -- real, live, second confirmation",
+    "7_evidence_export": "PASS -- first time ever, both via manual POST and automatic orchestrator-driven EXPORT",
+    "8_evidence_readback": "PASS -- first time ever tested at all; genuinely coherent, checksums verified, honest about its own limitations",
+    "9_teardown": "PASS -- docker ps -a after teardown identical to the pre-run baseline (infra-postgres-1 plus 4 stopped, unrelated good_marketer_web-*/ollama containers); zero brahmadatta-* containers; docker compose ls -a shows zero brahmadatta compose projects at all (stronger than D-098/D-099's own teardown, which left the project registered but stopped); reconfirmed durable after a 60-second wait per D-099's own lesson about not trusting an instantaneous check; zero stray run_worker/run_orchestrator/run-fuzz-worker host processes."
+  },
+  "timing": {
+    "total_wall_clock_minutes_approx": 55,
+    "note": "From reading D-098/D-099/D-103/D-104 through final teardown confirmation. Within the ~75 minute budget."
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-08-20T02:49:20.110836+00:00",
+  "files": [
+    {
+      "path": "report.md",
+      "sha256": "4abfa5c79df5d1aecd1bd058483bcf85fe99578d5d8e52d4f802bfa8e6b7ab0c",
+      "size_bytes": 3004,
+      "kind": "report"
+    },
+    {
+      "path": "report.json",
+      "sha256": "595f0c1bffbecd0b7645495517796d9cb5c9029cbf38264ef3b43363a7c3a707",
+      "size_bytes": 7274,
+      "kind": "report"
+    },
+    {
+      "path": "gate-matrix.json",
+      "sha256": "32d618e4ef6eab9c9238fb60fb8b4b14f8c49229a4a04a280e713b1691eb7010",
+      "size_bytes": 1039,
+      "kind": "gate_matrix"
+    },
+    {
+      "path": "tool-versions.json",
+      "sha256": "db637405b0df37f142e46df3f9919672da9ce0711419f850424dbc81dd08c565",
+      "size_bytes": 114,
+      "kind": "tool_versions"
+    },
+    {
+      "path": "artifacts/NOTE.txt",
+      "sha256": "bea8bf9e8c28afca0c9d71760b125f4ffa9e81a0ce6e5bd52bea1a6cb4e59871",
+      "size_bytes": 396,
+      "kind": "note"
+    }
+  ]
+}

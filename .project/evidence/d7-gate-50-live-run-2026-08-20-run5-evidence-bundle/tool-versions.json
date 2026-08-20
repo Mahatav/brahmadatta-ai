@@ -1,0 +1,6 @@
+{
+  "adapter": "C_CMAKE_CTEST",
+  "compile": "cmake",
+  "fuzzer": "libFuzzer",
+  "regression_preserved": "ctest"
+}

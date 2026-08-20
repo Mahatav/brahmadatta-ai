@@ -1,0 +1,34 @@
+[
+  {
+    "patch_id": "763c8997-6220-4e6b-b71b-1eb91a8da935",
+    "verification_id": "9f39b8bc-3118-4e9b-84a0-868be404c4ad",
+    "verdict": "HUMAN_REVIEW_REQUIRED",
+    "gates": {
+      "COMPILE": {
+        "status": "PASS",
+        "tool": "cmake",
+        "detail": ""
+      },
+      "REPRODUCER_ELIMINATED": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: reproducer file is missing: /app/var/workspaces/505cfd15-4239-43fe-8e57-c5eab3b9d3bd/no-reproducer-recorded"
+      },
+      "REGRESSION_PRESERVED": {
+        "status": "PASS",
+        "tool": "ctest",
+        "detail": "Regression suite passed: 8 tests ran."
+      },
+      "STATIC_DELTA": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      },
+      "RENEWED_FUZZING": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      }
+    }
+  }
+]
