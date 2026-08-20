@@ -136,6 +136,9 @@ services:
         workers-source: ../../workers
         packages-source: ../../packages
         adapters-source: ../../adapters
+        # D-100: services/model-gateway/, so `gateway.*` is importable inside this
+        # image at all. See control-api.Dockerfile's matching COPY comment.
+        model-gateway-source: ../../services/model-gateway
     container_name: brahmadatta-finale-control-api
     <<: [*env-file, *hardening]
     read_only: true
@@ -177,6 +180,13 @@ services:
       # materialize the tar it just built. Repointed at a named volume, same pattern as
       # `evidence:` below. Found running the #50 live rehearsal, 2026-08-17.
       ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
+      # D-100: config.settings.base.MODEL_GATEWAY_ROOT's default only resolves
+      # correctly bare-metal (REPO_ROOT/services/model-gateway) — inside this image
+      # REPO_ROOT collapses to the container filesystem root, which does not hold
+      # services/model-gateway. Pointed explicitly at where the `runtime` image target
+      # actually bakes it in — see control-api.Dockerfile's `COPY --from=
+      # model-gateway-source` and this service's own `additional_contexts` above.
+      MODEL_GATEWAY_ROOT: /app/services/model-gateway
     volumes:
       - django-static:/app/staticfiles
       # Evidence artifacts survive a container replacement.
@@ -278,6 +288,9 @@ services:
         workers-source: ../../workers
         packages-source: ../../packages
         adapters-source: ../../adapters
+        # D-100: services/model-gateway/, so `gateway.*` is importable inside this
+        # image at all. See control-api.Dockerfile's matching COPY comment.
+        model-gateway-source: ../../services/model-gateway
     container_name: brahmadatta-finale-worker
     <<: [*env-file, *hardening]
     read_only: true
@@ -293,6 +306,11 @@ services:
       # evidence bundle: `CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`)
       # has no `django_rq` in requirements.txt and was never reached by this rehearsal.
       ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
+      # D-100: same fix and reasoning as control-api's own MODEL_GATEWAY_ROOT above —
+      # this is the process that actually runs JobKind.PATCH_GENERATE, so it needs
+      # `gateway.*` importable at least as much as control-api does, in principle,
+      # once this profile is activated (see the NOT independently verified note above).
+      MODEL_GATEWAY_ROOT: /app/services/model-gateway
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
     command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
     volumes:

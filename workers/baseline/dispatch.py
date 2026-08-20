@@ -74,12 +74,16 @@ support that is not real.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from authorization import store
 from contracts.enums import ErrorCode, MissionState
-from missions.models import BaselineReport, Job, JobKind, JobState, Mission
+from contracts.schemas.common import ArtifactRef
+from missions.models import Artifact, BaselineReport, Job, JobKind, JobState, Mission
 from orchestrator.executors import (
     ExecutorContext,
     ExecutorResult,
@@ -90,6 +94,11 @@ from orchestrator.executors import (
 from workers.baseline.run import BaselineOutcome, run_baseline_stage
 
 __all__: list[str] = []
+
+#: `Artifact.kind` for the one artifact this module ingests: the durable ctest JUnit
+#: XML copy `run_baseline_stage` writes before its jail tears down. See
+#: `_log_ref_artifact`'s own docstring for the bug this closes (D-100).
+BASELINE_LOG_ARTIFACT_KIND = "baseline_ctest_junit"
 
 
 def _classify(
@@ -169,6 +178,65 @@ def _executor_result(fields: dict[str, Any], *, already_recorded: bool) -> Execu
     )
 
 
+def _log_ref_artifact(mission: Mission, log_path: str | None) -> dict[str, Any] | None:
+    """Turn `BaselineOutcome.log_ref` — a bare filesystem path to the durable ctest
+    JUnit copy `run_baseline_stage` writes before its jail tears down, see that
+    function's own docstring — into the `ArtifactRef`-shaped dict `BaselineReport.
+    log_ref` is actually typed to hold and every reader downstream actually expects.
+
+    **D-100** (`.project/decisions.md`). Before this, `_persist_report` wrote
+    `outcome.log_ref` straight into the `log_ref` `JSONField` — a bare path string
+    like `/var/.../<mission_id>-baseline-ctest-junit.xml`. That string round-trips
+    through the field fine (a `JSONField` happily stores a bare string), so nothing
+    caught this at write time. Every reader, though — `orchestrator.
+    evidence_repository.get_baseline_report`'s `_artifact_ref(row.log_ref)`, and from
+    there `orchestrator.evidence_bundle`/`orchestrator.evidence_export` for every
+    mission's evidence bundle — unconditionally does `ArtifactRef(**value)`, which
+    requires a mapping. A bare string blew up with `TypeError: contracts.schemas.
+    common.ArtifactRef() argument after ** must be a mapping, not str` the moment any
+    code tried to render the baseline section — which is every mission that reaches
+    `EXPORTING`, since essentially every mission passes `BASELINE` on its way there.
+    Reproduced live twice, #50 D7 gate rehearsal run 4 (D-098).
+
+    Fixed at the write site, not by relaxing the read side: the whole point of
+    `ArtifactRef` is that nothing downstream ever sees a raw filesystem path
+    (architecture spec §5.2; `evidence_repository.py`'s own module docstring, "callers
+    receive hash-addressed pointers, never artifact content"). Ingests the file into
+    the same content-addressed `ARTIFACT_ROOT` store `orchestrator.evidence_export`
+    already uses for the bundle tarball itself — same `store.ingest_from_path` /
+    `Artifact.objects.get_or_create` / `ArtifactRef(...).model_dump(mode="json")`
+    shape as that module's `export_mission`, rather than inventing a second mechanism
+    for one more kind of artifact. Idempotent by construction (`ingest_from_path`'s
+    own docstring): re-ingesting the same bytes under a retried job never duplicates
+    the artifact.
+
+    Returns `None` for `log_path is None` (build/configure failures never produce a
+    durable log — see `run_baseline_stage`'s own `log_ref=None` comment), matching
+    `BaselineReport.log_ref`'s `null=True`.
+    """
+    if not log_path:
+        return None
+    ingest = store.ingest_from_path(
+        Path(settings.ARTIFACT_ROOT),
+        Path(log_path),
+        max_bytes=settings.BASELINE_LOG_ARTIFACT_MAX_BYTES,
+    )
+    artifact, _ = Artifact.objects.get_or_create(
+        sha256=ingest.sha256,
+        defaults={
+            "kind": BASELINE_LOG_ARTIFACT_KIND,
+            "size_bytes": ingest.bytes_written,
+            "mission": mission,
+        },
+    )
+    return ArtifactRef(
+        uri=f"artifact://{mission.id}/{BASELINE_LOG_ARTIFACT_KIND}/{artifact.sha256}",
+        kind=BASELINE_LOG_ARTIFACT_KIND,
+        sha256=artifact.sha256,
+        size_bytes=artifact.size_bytes,
+    ).model_dump(mode="json")
+
+
 def _persist_report(mission: Mission, outcome: BaselineOutcome) -> BaselineReport:
     """Write the terminal artifact. Wrapped against `IntegrityError` as a second line
     of defence behind the pre-flight existence check in `_baseline_executor` — see
@@ -184,6 +252,7 @@ def _persist_report(mission: Mission, outcome: BaselineOutcome) -> BaselineRepor
     `orchestrator.tests.test_baseline_executor.
     test_persist_report_survives_a_genuine_race`, not by inspection.
     """
+    log_ref = _log_ref_artifact(mission, outcome.log_ref)
     try:
         with transaction.atomic():
             return BaselineReport.objects.create(
@@ -196,7 +265,7 @@ def _persist_report(mission: Mission, outcome: BaselineOutcome) -> BaselineRepor
                 duration_seconds=outcome.duration_seconds,
                 adapter=outcome.adapter,
                 recorded_at=outcome.recorded_at,
-                log_ref=outcome.log_ref,
+                log_ref=log_ref,
             )
     except IntegrityError:
         # Someone else's write won the race. Report *their* row's outcome, not ours —
