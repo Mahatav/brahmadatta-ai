@@ -343,6 +343,21 @@ EVIDENCE_BUNDLE_MAX_BYTES = env.get_int("EVIDENCE_BUNDLE_MAX_BYTES", 67_108_864)
 #: realistic expectation.
 BASELINE_LOG_ARTIFACT_MAX_BYTES = env.get_int("BASELINE_LOG_ARTIFACT_MAX_BYTES", 16_777_216)
 
+#: Byte ceiling for one crash-artifact reproducer `workers.fuzzing.dispatch.
+#: _fuzz_executor` ingests into ARTIFACT_ROOT (D-106) — the real crash-artifact bytes
+#: `workers.fuzzing.run.run_fuzzing_stage` copied out of the `ContainerJail` before it
+#: tore down (`adapters.cpp.fuzzing.run_libfuzzer_campaign`'s own
+#: `MAX_DURABLE_ARTIFACT_BYTES`, 64 MiB, is a first, Django-independent ceiling
+#: applied at that copy-out point; this is a second, independently configurable
+#: ceiling applied here at ingest, matching the belt-and-suspenders pattern
+#: `orchestrator/evidence_export.py` already uses for the evidence bundle tarball).
+#: libFuzzer crash inputs for this project's demo-sized targets are single-digit
+#: kilobytes; 16 MiB matches BASELINE_LOG_ARTIFACT_MAX_BYTES's own "generous headroom,
+#: not a realistic expectation" reasoning.
+FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES = env.get_int(
+    "FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES", 16_777_216
+)
+
 # --- Security headers ----------------------------------------------------------
 
 SECURE_CONTENT_TYPE_NOSNIFF = True

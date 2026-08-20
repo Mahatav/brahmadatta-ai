@@ -8,13 +8,16 @@ this module owns the `FUZZ` *executor* only, plus everything `MINIMIZE` gets.
 ## What lives here
 
 * `_fuzz_executor` — `@register_executor(JobKind.FUZZ)`. Builds the
-  `packages.sandbox.container.ContainerJailPolicy` a campaign runs under, calls the
-  already-built `run_fuzzing_stage` (not rewritten — see D-061 §4, this task's own
-  brief: "already-built, already-tested"), persists a `FuzzingReport` plus one
-  `Finding` per sanitizer-confirmed crash (`orchestrator.findings.record_finding`,
-  new in this task — D-061 §5's `Finding`-recording gap), and reports
-  `crashes_found`/`infra_failure` in `ExecutorResult.result` — the two keys
-  `_fuzz_transition_policy` reads, per its own docstring.
+  `packages.sandbox.container.ContainerJailPolicy` a campaign runs under, calls
+  `run_fuzzing_stage` with `ctx.workspace_root` so real crash-artifact bytes survive
+  the `ContainerJail`'s own teardown (D-106; `run_fuzzing_stage`'s own `workspace_root`
+  parameter), persists a `FuzzingReport` plus one `Finding` per sanitizer-confirmed
+  crash (`orchestrator.findings.record_finding`, #168) and — when a durable artifact
+  survived to pair with it — one real, unminimized `Reproducer` row
+  (`orchestrator.findings.record_reproducer`, D-106; see `_record_reproducers`'s own
+  docstring for the pairing rule), and reports `crashes_found`/`infra_failure` in
+  `ExecutorResult.result` — the two keys `_fuzz_transition_policy` reads, per its own
+  docstring.
 * `_minimize_executor` — `@register_executor(JobKind.MINIMIZE)`. Real, registered,
   and honest about a structural blocker in the module it wires (see "MINIMIZE: what
   this executor can and cannot do" below) rather than faking a pass.
@@ -33,7 +36,8 @@ the type signatures."
 ## Sandboxing: `ContainerJail`, not `packages.sandbox.jail.Jail` — and why the
 sanitizer-memory trap T5/D-067 hit for `VERIFY` does not apply here
 
-`run_libfuzzer_campaign` (`adapters/cpp/fuzzing.py`, not modified by this task)
+`run_libfuzzer_campaign` (`adapters/cpp/fuzzing.py`; D-106 added its own
+`workspace_root`-driven crash-artifact copy-out, but not a second sandbox)
 already opens its own `packages.sandbox.container.ContainerJail` internally — this
 executor's job is to hand it a correctly-sized `ContainerJailPolicy`, not to open a
 second sandbox around it. `run_fuzzing_stage`'s own signature
@@ -105,48 +109,48 @@ mirroring how `BASELINE`'s job deadline and `Jail` wall clock already come from 
 same `sandbox.max_seconds` value today. Flagged as a real, load-bearing choice, not
 a default — see `.project/decisions.md`.
 
-## MINIMIZE: what this executor can and cannot do
+## MINIMIZE: what this executor can and cannot do (updated by D-106)
 
-`FuzzingOutcome.artifact_refs` (`workers/fuzzing/run.py`) are paths *inside*
-`ContainerJail`'s ephemeral worktree — `run_libfuzzer_campaign` opens that jail with
-`with ContainerJail.create(...) as sandbox:` and the jail's `close()` (run on every
-`with`-block exit, `packages/sandbox/container.py`) does
-`shutil.rmtree(self._root, ...)`. Nothing between there and `run_fuzzing_stage`'s
-return copies a crash artifact's *bytes* out to `ExecutorContext.workspace_root` the
-way `workers/baseline/run.py::run_baseline_stage` explicitly copies its JUnit
-report out before its own jail tears down. `run_fuzzing_stage`'s signature also has
-no `workspace_root` parameter to receive one even if it did. Checked directly, not
-assumed: by the time this executor's own `run_fuzzing_stage` call returns, the
-crash bytes a `MINIMIZE` job would need to re-open and run libFuzzer's
-`-minimize_crash=1` against no longer exist on any filesystem this process can
-reach — the `FuzzingOutcome.artifact_refs` strings that remain are pointers into a
-directory tree that is already gone.
+Before D-106, `FuzzingOutcome.artifact_refs` (`workers/fuzzing/run.py`) were paths
+*inside* `ContainerJail`'s ephemeral worktree — `run_libfuzzer_campaign` opens that
+jail with `with ContainerJail.create(...) as sandbox:` and the jail's `close()` (run
+on every `with`-block exit, `packages/sandbox/container.py`) does
+`shutil.rmtree(self._root, ...)`, and nothing copied a crash artifact's bytes out
+before that ran. D-106 closed that half of the gap: `run_fuzzing_stage` now takes a
+`workspace_root` parameter (this executor passes `ctx.workspace_root`), and when the
+campaign finds a crash, `adapters.cpp.fuzzing._copy_crash_artifacts_durably` copies
+the real bytes out before the jail tears down — `FuzzingOutcome.durable_artifacts`
+carries the result, and `_record_reproducers` (this module) turns it into a real
+`Reproducer` row.
 
-This is a real, structural gap in `workers/fuzzing/run.py`/`adapters/cpp/fuzzing.py`
-(#148/#28) — not something this task rewrites, mirroring exactly the discipline
-D-067 §3 (T5, `VERIFY`'s unsandboxed-execution finding) already set for this
-codebase: flag a gap in another owner's already-tested module rather than patch
-around it under this task's own deadline. `_minimize_executor` is real, registered
-code — not a `NotImplementedError` stub — that reports this precisely: `FAILED`,
-`infra_failure=True` (a missing durable input is the same "the sandbox/toolchain
-side of this couldn't run" bucket architecture spec §6.1 already names, not a
-patch-quality judgment), `retry=False` (retrying cannot produce bytes that were
-never persisted), and a `detail` naming the exact gap and the two files that would
-need to change to close it. `Finding.reproducible` therefore stays `False` for
-every `FUZZ`-discovered finding until this closes — which is the honest reading of
-that field's own docstring ("True only when a *minimized* input replayed... from a
-clean build," `missions/models.py`), not a shortcut this task is taking.
+**What D-106 explicitly did NOT authorize, and this executor still does not do:**
+wiring `JobKind.MINIMIZE` into `orchestrator/queue.py`'s stage-to-job map, or
+building libFuzzer's own `-minimize_crash=1` logic. `_minimize_executor` below is
+still real, registered code — not a `NotImplementedError` stub — but its blocker is
+no longer "the bytes do not survive" (D-106 fixed that); it is that no `MINIMIZE`
+algorithm exists in this codebase and no production code path ever enqueues this
+`JobKind` (`orchestrator/queue.py`'s own comment: "`SANITIZER_BUILD` and `MINIMIZE`
+are deliberately absent... composing them is T2's call" — unchanged by D-106).
+`Finding.reproducible` therefore still stays `False` for every `FUZZ`-discovered
+finding — the honest reading of that field's own docstring ("True only when a
+*minimized* input replayed... from a clean build," `missions/models.py`): D-106
+records a real, unminimized reproducer, not a minimized one, and does not touch that
+field's semantics.
 """
 
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any
 
 from django.conf import settings
 
 from adapters.cpp.errors import BuildStep
+from adapters.cpp.fuzzing import DurableArtifact
 from adapters.cpp.sanitizer import SanitizerFinding, parse_sanitizer_output
+from authorization.errors import UnreadableArchiveError
+from authorization.store import ingest_from_path
 from contracts.enums import (
     AnalyzerTool,
     DiscoveryMethod,
@@ -156,7 +160,7 @@ from contracts.enums import (
     Severity,
 )
 from contracts.schemas.missions import MissionPolicy
-from missions.models import FuzzingReport, Job, JobKind, Mission
+from missions.models import Finding, FuzzingReport, Job, JobKind, Mission
 from orchestrator.executors import (
     ExecutorContext,
     ExecutorResult,
@@ -164,7 +168,7 @@ from orchestrator.executors import (
     register_executor,
     register_transition_policy,
 )
-from orchestrator.findings import record_finding
+from orchestrator.findings import record_finding, record_reproducer
 from packages.sandbox.container import ContainerJailPolicy
 from packages.sandbox.errors import JailError
 from workers.fuzzing.run import FuzzingOutcome, run_fuzzing_stage
@@ -277,7 +281,11 @@ def _fuzz_executor(ctx: ExecutorContext) -> ExecutorResult:
 
     try:
         outcome = run_fuzzing_stage(
-            ctx.mission.id, ctx.source_dir, policy=policy, budget_seconds=budget_seconds
+            ctx.mission.id,
+            ctx.source_dir,
+            policy=policy,
+            budget_seconds=budget_seconds,
+            workspace_root=ctx.workspace_root,
         )
     except JailError as exc:
         return ExecutorResult(
@@ -354,19 +362,30 @@ def _result_from_outcome(ctx: ExecutorContext, outcome: FuzzingOutcome) -> Execu
 
 
 def _persist_outcome(mission: Mission, outcome: FuzzingOutcome, trace_id: str) -> None:
-    """Write the `FuzzingReport` plus one `Finding` per structurally-parsed crash.
+    """Write the `FuzzingReport` plus one `Finding` (and, where possible, one real
+    `Reproducer`, D-106) per structurally-parsed crash.
 
-    Findings first, report last — see this module's docstring, "Idempotency": a
-    crash between the two leaves `Finding` rows that `record_finding`'s own
-    `(mission, fingerprint)` dedup makes safe to rediscover, and no `FuzzingReport`
-    row yet, so the pre-execution check above still re-runs the campaign rather than
-    reporting a phantom success.
+    Findings and reproducers first, report last — see this module's docstring,
+    "Idempotency": a crash between them leaves `Finding` rows that `record_finding`'s
+    own `(mission, fingerprint)` dedup makes safe to rediscover, `Reproducer` rows
+    that `record_reproducer`'s own `(finding, sha256)` dedup makes equally safe to
+    rediscover, and no `FuzzingReport` row yet, so the pre-execution check above
+    still re-runs the campaign rather than reporting a phantom success. Recording
+    reproducers *before* the report (not after) matters here specifically: once
+    `FuzzingReport.objects.create()` below succeeds, `_fuzz_executor`'s pre-execution
+    check (`_existing_report`) short-circuits any retry straight to
+    `_result_from_existing` — a reproducer write placed after the report would never
+    get a second chance to run if it failed on the first attempt.
     """
+    finding_rows: list[Finding] = []
     if outcome.unique_crashes > 0:
         for finding_kwargs in _findings_from_outcome(outcome):
-            record_finding(
-                mission.id, trace_id=trace_id, now=outcome.recorded_at, **finding_kwargs
+            finding_rows.append(
+                record_finding(
+                    mission.id, trace_id=trace_id, now=outcome.recorded_at, **finding_kwargs
+                )
             )
+        _record_reproducers(mission, finding_rows, outcome, trace_id)
 
     FuzzingReport.objects.create(
         mission=mission,
@@ -381,6 +400,72 @@ def _persist_outcome(mission: Mission, outcome: FuzzingOutcome, trace_id: str) -
         sanitizers=list(outcome.sanitizers),
         replay_source=outcome.replay_source,
         recorded_at=outcome.recorded_at,
+    )
+
+
+def _record_reproducers(
+    mission: Mission,
+    findings: list[Finding],
+    outcome: FuzzingOutcome,
+    trace_id: str,
+) -> None:
+    """Ingest each durably-copied crash artifact (D-106; `outcome.durable_artifacts`,
+    populated by `run_fuzzing_stage` when it was given `ctx.workspace_root`) into the
+    content-addressed store, and write one real `Reproducer` row per `Finding`.
+
+    Paired by discovery order, one `Finding` per durable artifact, and only when the
+    two lists are the same length — the one case this project's own live rehearsals
+    (D-098, D-105) have ever actually produced: a campaign that finds exactly one
+    unique crash, backed by exactly one crash-artifact file. `adapters.cpp.sanitizer.
+    parse_sanitizer_output` does not associate a parsed sanitizer report with the
+    specific artifact file that produced it, so a campaign that somehow reports more
+    than one distinct crash in a single run has no reliable way to say which artifact
+    belongs to which `Finding` here. A length mismatch (including "some artifacts
+    were rejected by `_copy_crash_artifacts_durably`'s symlink/size safeguards, so
+    fewer durable artifacts came back than crashes were found") means no `Reproducer`
+    row is written for *any* finding in this batch, rather than guessing a pairing —
+    `VERIFY`'s `REPRODUCER_ELIMINATED` staying an honest `NOT_RUN` is the correct
+    outcome for an ambiguous mapping, not a `Reproducer` that might not actually
+    reproduce the finding it would be attached to.
+    """
+    if not findings or len(findings) != len(outcome.durable_artifacts):
+        return
+
+    artifact_root = Path(settings.ARTIFACT_ROOT)
+    max_bytes = settings.FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES
+
+    for finding, artifact in zip(findings, outcome.durable_artifacts, strict=True):
+        _record_one_reproducer(mission, finding, artifact, artifact_root, max_bytes, trace_id, outcome)
+
+
+def _record_one_reproducer(
+    mission: Mission,
+    finding: Finding,
+    artifact: DurableArtifact,
+    artifact_root: Path,
+    max_bytes: int,
+    trace_id: str,
+    outcome: FuzzingOutcome,
+) -> None:
+    try:
+        ingest = ingest_from_path(artifact_root, Path(artifact.host_path), max_bytes=max_bytes)
+    except UnreadableArchiveError:
+        # The durable copy vanished or exceeds FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES
+        # (a second, independently-configurable ceiling from `adapters.cpp.fuzzing.
+        # MAX_DURABLE_ARTIFACT_BYTES`'s own copy-out check — see this module's
+        # docstring). No Reproducer for this finding; VERIFY's gate stays NOT_RUN
+        # rather than pointing at bytes that were never actually ingested.
+        return
+
+    name = Path(artifact.relative_path).name
+    record_reproducer(
+        finding.id,
+        sha256=ingest.sha256,
+        size_bytes=ingest.bytes_written,
+        uri=f"artifact://{mission.id}/reproducer/{ingest.sha256}",
+        test_command=f"./pktcfg_replay {name} x1",
+        trace_id=trace_id,
+        now=outcome.recorded_at,
     )
 
 
@@ -502,13 +587,17 @@ def _minimize_executor(ctx: ExecutorContext) -> ExecutorResult:
     return ExecutorResult(
         outcome=JobOutcome.FAILED,
         detail=(
-            "MINIMIZE cannot run: crash artifact bytes do not survive "
-            "run_fuzzing_stage's return (workers/fuzzing/run.py has no "
-            "workspace_root parameter to copy them out to before its ContainerJail "
-            "tears down). See workers/fuzzing/dispatch.py's module docstring and "
+            "MINIMIZE cannot run: no libFuzzer -minimize_crash=1 algorithm is "
+            "implemented anywhere in this codebase, and JobKind.MINIMIZE is "
+            "deliberately absent from orchestrator/queue.py's stage-to-job map (D-106 "
+            "explicitly did not authorize wiring it). D-106 (workers/fuzzing/run.py, "
+            "adapters/cpp/fuzzing.py, workers/fuzzing/dispatch.py) already durably "
+            "persists the real, unminimized crash-artifact bytes FUZZ discovers as a "
+            "Reproducer row, which is what VERIFY's REPRODUCER_ELIMINATED gate needs. "
+            "See workers/fuzzing/dispatch.py's module docstring and "
             ".project/decisions.md."
         ),
-        result={"infra_failure": True, "blocked_reason": "no_durable_crash_artifact"},
+        result={"infra_failure": True, "blocked_reason": "minimize_not_implemented"},
         error_code=ErrorCode.SANDBOX_UNAVAILABLE,
         retry=False,
     )

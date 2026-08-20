@@ -42,6 +42,33 @@ D-083 §4 flagged as missing, for the same reason `BaselineReport`'s `IntegrityE
 fallback exists for `workers.baseline.dispatch._persist_report` — "not supposed to be
 possible" (two callers both passing the pre-flight check) is not the same guarantee as
 "structurally prevented here." The `create()` call below is wrapped accordingly.
+
+## `record_reproducer` (D-106)
+
+Closes the gap D-098/D-105 both hit live, twice: no code path anywhere in this
+pipeline ever wrote a `Reproducer` row for a `FUZZING_CAMPAIGN`-discovered `Finding`,
+so `VERIFY`'s `REPRODUCER_ELIMINATED` gate (`orchestrator/verify_dispatch.py::
+_resolve_reproducer_path` -> `orchestrator/verification.py::_run_reproducer`) always
+resolved to a sentinel path that does not exist on disk and came back `NOT_RUN`,
+capping every verdict at `HUMAN_REVIEW_REQUIRED` regardless of patch correctness.
+
+Mirrors `record_finding` exactly: mission row lock (required by `events.emit`, same
+reason `record_finding` takes it even though it writes no `Mission` lifecycle field),
+validate against the frozen `contracts.schemas.evidence.ReproducerRecord` schema
+before writing, `EventType.REPRODUCER_RECORDED` in the same transaction. Deduplicates
+by `(finding, artifact.sha256)` — read in Python off the JSON field, the same way
+`_resolve_reproducer_path` itself reads `reproducer.artifact.get("sha256")`, rather
+than a JSONField key lookup (portable across the Postgres this project deploys to and
+the `sqlite:///:memory:` this project's own test suite runs against) — so a retried
+`FUZZ` job that re-enters `workers.fuzzing.dispatch._persist_outcome` (a crash
+between recording the `Finding` and recording the `FuzzingReport` re-runs the whole
+campaign; see that module's own "Idempotency" docstring) never creates a second
+`Reproducer` row for bytes it has already durably recorded once.
+
+`minimized=False` always — this function does not minimize anything, and D-106's own
+ruling is explicit that an unminimized-but-real reproducer is honest and sufficient
+for `VERIFY`'s gate, which only checks whether the bytes still fault, never whether
+they are the smallest input that does.
 """
 
 from __future__ import annotations
@@ -60,11 +87,12 @@ from contracts.enums import (
     FindingCategory,
     Severity,
 )
-from contracts.schemas.evidence import FindingSummary, SourceLocation
-from missions.models import Finding, Mission
+from contracts.schemas.common import ArtifactRef
+from contracts.schemas.evidence import FindingSummary, ReproducerRecord, SourceLocation
+from missions.models import Finding, Mission, Reproducer
 from orchestrator import events
 
-__all__ = ["record_finding"]
+__all__ = ["record_finding", "record_reproducer"]
 
 
 def record_finding(
@@ -160,6 +188,84 @@ def record_finding(
             {"kind": "finding", "finding": schema.model_dump(mode="json")},
             trace_id=trace_id,
             severity=severity,
+            timestamp=now,
+        )
+
+    return row
+
+
+def record_reproducer(
+    finding_id: UUID,
+    *,
+    sha256: str,
+    size_bytes: int,
+    uri: str,
+    test_command: str,
+    trace_id: str,
+    kind: str = "reproducer_input",
+    replay_attempts: int = 0,
+    replay_successes: int = 0,
+    minimized: bool = False,
+    now: Any = None,
+) -> Reproducer:
+    """Persist one real reproducer for an existing `Finding`, or return the existing
+    row for the same `(finding, sha256)` pair. See this module's docstring, "D-106".
+
+    `replay_attempts`/`replay_successes` default to `0` — honest, since this function
+    does not itself run a confirming replay (D-106's own ruling names that as
+    optional, not required: `VERIFY`'s `_run_reproducer` gate does its own live
+    replay against these bytes and does not read either field). A caller that *did*
+    run a confirming replay before calling this may pass real counts.
+    """
+    now = now or timezone.now()
+
+    with transaction.atomic():
+        finding = Finding.objects.select_related("mission").get(pk=finding_id)
+        mission = Mission.objects.select_for_update().get(pk=finding.mission_id)
+
+        for existing in finding.reproducers.all():
+            if (existing.artifact or {}).get("sha256") == sha256:
+                return existing
+
+        schema = ReproducerRecord(
+            id=uuid.uuid4(),
+            finding_id=finding.id,
+            minimized=minimized,
+            replay_attempts=replay_attempts,
+            replay_successes=replay_successes,
+            test_command=test_command,
+            artifact=ArtifactRef(uri=uri, kind=kind, sha256=sha256, size_bytes=size_bytes),
+            created_at=now,
+        )
+
+        try:
+            with transaction.atomic():
+                row = Reproducer.objects.create(
+                    id=schema.id,
+                    finding=finding,
+                    minimized=schema.minimized,
+                    replay_attempts=schema.replay_attempts,
+                    replay_successes=schema.replay_successes,
+                    test_command=schema.test_command,
+                    artifact=schema.artifact.model_dump(mode="json"),
+                    created_at=schema.created_at,
+                )
+        except IntegrityError:
+            # Same discipline as `record_finding`'s own fallback: not supposed to be
+            # reachable under the mission row lock above, but report the winning
+            # write rather than propagate a race neither caller could have avoided.
+            for existing in finding.reproducers.all():
+                if (existing.artifact or {}).get("sha256") == sha256:
+                    return existing
+            raise
+
+        events.emit(
+            mission,
+            EventType.REPRODUCER_RECORDED,
+            f"Reproducer recorded for finding {finding.id}.",
+            {"kind": "reproducer", "reproducer": schema.model_dump(mode="json")},
+            trace_id=trace_id,
+            severity=Severity.INFO,
             timestamp=now,
         )
 

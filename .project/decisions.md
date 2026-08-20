@@ -10858,3 +10858,611 @@ there is no critical finding to accept.
 (CLEARED, recorded here); CTO retains authority to merge.
 
 ---
+
+---
+
+## D-109 — D-106 implemented: `FUZZ` now durably copies real crash-artifact bytes out
+of `ContainerJail` and persists a real `Reproducer` row; live-verified end to end,
+`VERIFIED` reached for a self-discovered finding for the first time · 2026-08-19/20 ·
+`backend-developer` seat (branch `fix/d106-reproducer-persistence`)
+
+**Context.** D-106 ruled a scoped fix, two coupled parts, for the exact gap D-098 (run
+4) and D-105 (run 5) both hit live: no code path anywhere in the live pipeline ever
+wrote a `Reproducer` row for a `FUZZING_CAMPAIGN`-discovered `Finding`, so `VERIFY`'s
+`REPRODUCER_ELIMINATED` gate always resolved to `NOT_RUN`, capping every verdict at
+`HUMAN_REVIEW_REQUIRED` regardless of patch correctness. This entry records what was
+actually built, tested, and live-verified against that ruling — both halves, in one
+coherent branch, per this task's own explicit instruction not to split a tightly
+coupled fix across two uncoordinated agents.
+
+**What was built, file by file.**
+
+1. `adapters/cpp/fuzzing.py` — `run_libfuzzer_campaign` takes a new `workspace_root:
+   Path | str | None = None` parameter. When given, and the campaign found at least
+   one crash artifact, a new `_copy_crash_artifacts_durably` helper copies each
+   artifact's real bytes out of `sandbox.root` into `workspace_root` — while still
+   inside the `with ContainerJail.create(...) as sandbox:` block, before
+   `ContainerJail.close()`'s `shutil.rmtree` runs — and returns them as a new
+   `DurableArtifact` tuple on `LibFuzzerRunResult.durable_artifacts`. `None` (the
+   default) preserves every pre-D-106 caller's behaviour exactly (`workers/fuzzing/
+   cli.py`, this module's own pre-existing tests).
+
+   Two safeguards, both named explicitly by D-106's own security-implications
+   section, built in from the start and exercised by dedicated tests (`adapters/cpp/
+   tests/test_fuzzing.py`), not left for a reviewer to discover:
+
+   - **No symlink is ever followed.** Each candidate is opened with `os.O_RDONLY |
+     os.O_NOFOLLOW` (raises `OSError`/`ELOOP` on a symlink, caught and skipped — never
+     dereferenced), and independently, `Path.resolve()` is checked against
+     `sandbox.root.resolve()` first and any target that would resolve outside the
+     sandbox root is refused, covering both an absolute-path symlink and a
+     relative-path one that walks out via `..`. Both paths tested directly against a
+     hostile fixture (`test_copy_crash_artifacts_durably_refuses_a_symlink`,
+     `..._refuses_a_symlinked_escape_via_relative_target`), not just asserted in a
+     docstring.
+   - **A hard per-file byte ceiling enforced during the read, not after it** —
+     mirrors `authorization.store.ingest_from_path`'s own "the read stops the instant
+     the ceiling is crossed" discipline; a partially-written oversized copy is
+     deleted, never left behind
+     (`test_copy_crash_artifacts_durably_enforces_a_size_ceiling`). This is
+     `adapters/cpp/fuzzing.py`'s own `MAX_DURABLE_ARTIFACT_BYTES` (64 MiB) — a plain
+     constant, since this module has no Django dependency (D-026 boundary).
+
+   `workers/fuzzing/run.py::run_fuzzing_stage` gained the same `workspace_root`
+   parameter, threads it through, and surfaces `FuzzingOutcome.durable_artifacts` —
+   deliberately excluded from `FuzzingOutcome.as_dict()` (the mission-event payload
+   shape), matching this codebase's existing rule that a raw filesystem path never
+   leaves the worker process boundary; only content-addressed `sha256` references are
+   ever persisted or emitted.
+
+2. `orchestrator/findings.py` — a new `record_reproducer` function, sibling to the
+   existing `record_finding`, with the identical discipline: mission row lock
+   (required by `events.emit`), validates against the frozen `contracts.schemas.
+   evidence.ReproducerRecord` schema before writing, emits the already-frozen-but-
+   never-before-emitted `EventType.REPRODUCER_RECORDED` inside the same transaction,
+   and dedupes by `(finding, artifact.sha256)` — read in Python off the JSON field
+   (matching how `verify_dispatch._resolve_reproducer_path` itself reads it), not a
+   JSONField key lookup, so it is portable across the Postgres this project deploys to
+   and the `sqlite:///:memory:` this project's own test suite runs against.
+   `minimized=False` always (honest — this closes the durability gap, not a
+   minimization gap; D-106's own explicit instruction). `replay_attempts`/
+   `replay_successes` default to `0` (no confirming replay runs here — `VERIFY`'s own
+   `_run_reproducer` gate does its own live replay and never reads either field;
+   checked directly against `orchestrator/verification.py`, not assumed).
+
+3. `workers/fuzzing/dispatch.py::_fuzz_executor` — passes `ctx.workspace_root` into
+   `run_fuzzing_stage`. `_persist_outcome` now records reproducers *before* the
+   `FuzzingReport` write (not after) — load-bearing, not cosmetic: once
+   `FuzzingReport.objects.create()` succeeds, `_existing_report`'s pre-execution check
+   short-circuits any retry straight to `_result_from_existing`, so a reproducer write
+   placed after the report would never get a second chance on a retry. A new
+   `_record_reproducers` helper ingests each durable artifact via
+   `authorization.store.ingest_from_path` (the same already-tested primitive
+   `orchestrator/snapshot.py`/`evidence_export.py` already use — no second storage
+   mechanism invented) against a new, independently-configurable
+   `settings.FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES` (16 MiB default, `.env.example`
+   documented) — a second, belt-and-suspenders ceiling on top of `adapters/cpp/
+   fuzzing.py`'s own 64 MiB copy-out ceiling, mirroring the exact two-ceiling pattern
+   `orchestrator/evidence_export.py` already uses for the evidence bundle tarball —
+   then calls `record_reproducer`.
+
+   **Findings-to-reproducers pairing rule, named explicitly because it is a real,
+   disclosed limitation, not an oversight.** `adapters.cpp.sanitizer.
+   parse_sanitizer_output` does not associate a parsed sanitizer report with the
+   specific crash-artifact file that produced it, so `_record_reproducers` pairs
+   `Finding` rows to `DurableArtifact`s by discovery order, and only when the two
+   lists are exactly the same length — the one case this project's own live
+   rehearsals (D-098, D-105) and this session's own live campaign have ever actually
+   produced: one unique crash, one artifact. A length mismatch (multiple distinct
+   crashes in one campaign with an ambiguous mapping, or some artifacts rejected by
+   the symlink/size safeguards above) means no `Reproducer` row is written for *any*
+   finding in that batch — `REPRODUCER_ELIMINATED` stays an honest `NOT_RUN` rather
+   than risk attaching bytes that might not actually reproduce the finding they are
+   attached to. This is the direct application of this project's own standing rule
+   ("a patch is never accepted on model confidence alone... any code path that lets
+   confidence substitute for verification is a bug") to one more place a plausible-but-
+   unverified pairing could have been guessed instead.
+
+   `_minimize_executor`'s own docstring and detail message were updated to stop
+   claiming the now-fixed blocker ("crash bytes do not survive") and state the real,
+   still-true one: no `-minimize_crash=1` algorithm exists and `JobKind.MINIMIZE`
+   remains deliberately unwired, exactly as D-106's "what this does NOT authorize"
+   section states — `Finding.reproducible` is untouched by this fix and stays `False`
+   for every `FUZZ`-discovered finding, correctly, per that field's own docstring.
+
+4. `config/settings/base.py` / `.env.example` — `FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES`
+   (default 16 MiB), documented alongside `BASELINE_LOG_ARTIFACT_MAX_BYTES` with the
+   identical "generous headroom, not a realistic expectation" reasoning.
+
+**Testing — real, run, and read, not narrated.**
+
+- `adapters/cpp/tests/test_fuzzing.py`: 7 new tests directly against
+  `_copy_crash_artifacts_durably` (real bytes copied and surviving `sandbox.close()`,
+  symlink refused two ways, oversized artifact refused with no partial file left,
+  a vanished artifact skipped, multiple artifacts copied in discovery order) — no
+  docker needed, since `ContainerJail` can be constructed directly against a real
+  temp directory without `.create()`/a daemon.
+- `orchestrator/tests/test_findings.py`: 6 new tests for `record_reproducer` (persists
+  a real row, emits `REPRODUCER_RECORDED` inside the mission lock, dedupes by
+  `(finding, sha256)`, allows a second distinct artifact for the same finding, and —
+  the actual acceptance criterion — is readable back through `verify_dispatch.
+  _resolve_reproducer_path` after a real `ingest_from_path` round-trip).
+- `orchestrator/tests/test_fuzz_executor.py`: 3 new tests (a durable artifact becomes
+  a real `Reproducer` row resolvable through `_resolve_reproducer_path`; no durable
+  artifact means no `Reproducer`, honestly; a finding/artifact count mismatch means no
+  `Reproducer` for either finding) plus one existing `MINIMIZE` assertion updated for
+  the corrected `blocked_reason`.
+- `workers/fuzzing/tests/test_real_campaign.py`: one new **real, live, opt-in** test
+  (`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1`, real docker daemon) —
+  `test_real_campaign_crash_bytes_survive_the_jails_own_teardown` — runs a genuine
+  libFuzzer campaign against the real `pktcfg` target through the real, pinned
+  `fuzz-toolchain` image and asserts the durable copy is on disk, non-empty, and
+  correctly sized *after* `run_fuzzing_stage` returns (i.e. after `ContainerJail`'s
+  own teardown has already run). **Run in this session: PASSED**
+  (`2 passed, 1 xfailed in 8.91s`, alongside the pre-existing real-campaign test).
+- `orchestrator/tests/test_fuzz_to_verify_real_e2e.py` (new file) — the actual
+  end-to-end proof this ruling exists to produce, real and opt-in the same way:
+  drives a real `FUZZ` job (real docker, real libFuzzer campaign against real
+  `pktcfg`) through the real executor, confirms a real `Reproducer` row was written
+  and is resolvable through `_resolve_reproducer_path`, drives the mission forward
+  through the real transition policy into `PATCH`/`VERIFY`, submits the demo's own
+  `candidate-a-correct-bounds-fix.patch`, and runs the real `VERIFY` executor (real
+  `git apply`/`cmake`/`ctest`/`pktcfg_replay`, no scripted gate matrix). **Run in this
+  session: PASSED** (`1 passed in 12.21s`) — `VerificationRecord.gates
+  ["reproducer_eliminated"]["status"] == "PASS"` and `verdict == "VERIFIED"`,
+  confirmed directly off the persisted row, not inferred. This is the first time in
+  this project's history `REPRODUCER_ELIMINATED` has run to a `PASS` (rather than
+  `NOT_RUN`) for a self-discovered finding, and the first time a `VERIFIED` verdict
+  has been reached without a pre-staged fixture reproducer.
+- Full suites, actually executed this session, output captured (not narrated):
+  - `apps/control-api` (`DJANGO_SECRET_KEY=devsecret-not-literally-test
+    POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m pytest`):
+    **697 passed, 20 skipped, 2 warnings** (the 20th skip is the new opt-in real
+    e2e test, skipped by default with no docker opt-in — everything else unchanged
+    from before this branch).
+  - `workers/fuzzing/tests workers/baseline/tests adapters/cpp/tests
+    packages/sandbox/tests` (`PYTHONPATH=. python3 -m pytest`, repo root):
+    **151 passed, 5 skipped, 1 xfailed**.
+  - `tests/architecture`: **73 passed**.
+  - No orphaned containers after any real-docker run (`docker ps -a --filter
+    "label=brahmadatta.sandbox"` empty afterward — `ContainerJail.close()`'s own
+    teardown, condition 7, confirmed live, not just read).
+
+**Security implications — addressed, not deferred.** D-106 named the review targets
+explicitly (symlink handling, size caps, the sandbox-to-persistent-storage boundary);
+both are built in and directly tested, as detailed above. **What this entry does NOT
+claim**: an independent `cybersecurity` review, and an independent `qa-engineer`
+re-verification, per D-106's own explicit requirement and this project's standing
+`CLAUDE.md` rule ("isolation, sandboxing, ... verification-gate changes need a
+`cybersecurity` agent review recorded on the PR before merge"). This session's tool
+access was Read/Write/Edit/Bash only — no Agent/Task-dispatch capability was available
+to actually invoke the `cybersecurity` or `qa-engineer` roles as independent reviewers,
+so none was performed under this entry. This is disclosed here deliberately rather
+than silently treated as satisfied: **the orchestrating session must dispatch both
+before this branch is merged.**
+
+**Scalability implications.** None beyond D-106's own assessment — one crash artifact
+per finding, same order of magnitude as `BaselineReport.log_ref`.
+
+**Cost implications.** As D-106 estimated: small-to-moderate. No new `JobKind`, no new
+idempotency/retry/transition-policy machinery, no minimization algorithm.
+
+**Recommendation.** Merge-ready pending the two reviews named above. Owners: backend-
+developer (this entry, both files per D-106's staffing note — implemented together as
+one coherent change per this task's own explicit instruction); cybersecurity for the
+pre-merge review; qa-engineer for the re-verification gate; engineering-manager for
+merge sequencing against D-105's headline-3 fix (bearer-token) if it is landing
+concurrently under its own decision number.
+
+**Final approval authority** — CTO (technical); cybersecurity for the pre-merge
+security review (not yet performed, see above); qa-engineer for the re-verification
+gate (not yet performed, see above).
+
+---
+
+## D-110 — Independent `cybersecurity` review of D-106/D-109 (`FUZZ` durable
+reproducer persistence, branch `fix/d106-reproducer-persistence`, commit `2650e01`):
+verdict **CLEARED** · 2026-08-19/20 · `cybersecurity` seat
+
+**Context.** D-106 ruled a scoped fix for the reproducer-persistence gap and named this
+change a sandbox-to-persistent-storage trust boundary crossing requiring mandatory
+independent review before merge. D-109 recorded what was built and disclosed, explicitly,
+that no independent review had happened yet (the implementing session had no
+Agent/Task-dispatch capability). This entry is that review, dispatched with full
+Read/Write/Edit/Bash access, against D-106's five named targets plus the general
+authN/secrets/dependency checks standard to this seat.
+
+**Scope reviewed.** `git show 2650e01` in full — `adapters/cpp/fuzzing.py`
+(`_copy_crash_artifacts_durably`, `DurableArtifact`, `MAX_DURABLE_ARTIFACT_BYTES`),
+`workers/fuzzing/run.py` (`workspace_root` threading), `workers/fuzzing/dispatch.py`
+(`_fuzz_executor`, `_persist_outcome`, `_record_reproducers`, `_record_one_reproducer`),
+`orchestrator/findings.py` (`record_reproducer`), `authorization/store.py`
+(`ingest_from_path`, read to confirm the second ceiling's enforcement shape),
+`orchestrator/verification.py`/`verify_dispatch.py` (`_run_reproducer`,
+`_resolve_reproducer_path`, `_jail_command_runner`, to trace how a persisted reproducer
+is actually consumed), `orchestrator/evidence_repository.py`/`evidence_bundle.py` (read
+path, to confirm no raw filesystem path or extra field reaches an event or the evidence
+bundle), `contracts/schemas/common.py::ArtifactRef`/`StrictSchema`, and
+`packages/sandbox/container.py::ContainerJail.run`/`_teardown_container` (to establish
+the actual timing relationship between container teardown and the new copy-out call).
+
+**Findings, against D-106's five named review targets:**
+
+1. **Symlink handling — real, correctly applied, independently exploit-tested.**
+   `_copy_crash_artifacts_durably` (`adapters/cpp/fuzzing.py:381-487`) applies two
+   independent controls per candidate artifact: (a) `Path.resolve(strict=True)` checked
+   against `sandbox.root.resolve(strict=True)` via `relative_to` before any read is
+   attempted, refusing both an absolute-path symlink target and a `..`-walking relative
+   one; (b) `os.open(source, os.O_RDONLY | os.O_NOFOLLOW)`, which raises `OSError`
+   (`ELOOP`) rather than dereferencing a symlink at the moment of actual read, regardless
+   of what the earlier `resolve()` check saw. Read the code, then did not stop there —
+   wrote and ran an independent proof-of-concept (not the implementer's own checked-in
+   tests) directly against `_copy_crash_artifacts_durably`, covering three attack shapes:
+   a direct symlinked crash-artifact file pointing at a host secret (the implementer's
+   own test already covers this shape, reproduced independently here), a relative
+   symlink escape, and — not covered by the implementer's own test file —
+   **the entire `fuzz-artifacts` directory replaced with a symlink escaping
+   `sandbox.root`**, with a plausible-looking regular file inside the escape target. All
+   three: **blocked, zero bytes copied, nothing leaked.** Also traced the actual timing:
+   `ContainerJail.run()` (`packages/sandbox/container.py:374-446`) always calls
+   `_teardown_container` (stop/kill) synchronously before returning its result, and
+   `_copy_crash_artifacts_durably` is only ever called after `sandbox.run(run_argv)`
+   returns — so by the time the copy-out runs, the fuzzed process (and anything it might
+   have forked) is confirmed dead, not merely assumed so. This matters because it removes
+   the live adversary that a check-then-open TOCTOU race would need: the `resolve()`
+   check and the `O_NOFOLLOW` open are not racing a process that can still act between
+   them. Recorded as a documented invariant this control's TOCTOU-freedom depends on (see
+   "Non-blocking hardening notes" below) rather than a finding, since it holds today and
+   is exercised by real, run tests.
+
+2. **Size caps — both real, both enforced during the read, not via `stat()` first.**
+   `adapters/cpp/fuzzing.py::MAX_DURABLE_ARTIFACT_BYTES` (64 MiB) is enforced inside
+   `_copy_crash_artifacts_durably`'s own chunked copy loop (`_COPY_CHUNK_SIZE` = 1 MiB):
+   `written` accumulates per chunk, the loop breaks the instant `written > max_bytes`,
+   and the partial file is `unlink`ed — confirmed by reading the code (no
+   `os.path.getsize()`/`os.stat()` call anywhere in this function) and independently
+   verified with a PoC that wrote a 4096-byte artifact against a 1024-byte cap:
+   zero durable artifacts returned, **zero leftover files** in the destination directory.
+   `authorization/store.py::ingest_from_path`'s second, independently-configurable
+   ceiling (`settings.FUZZ_REPRODUCER_ARTIFACT_MAX_BYTES`, 16 MiB default — confirmed
+   present in both `config/settings/base.py:357-358` and `.env.example:175`) uses the
+   identical chunked-read-then-raise discipline, also confirmed by reading the code, not
+   assumed from the docstring.
+
+3. **Reproducer bytes are always treated as opaque data, never interpreted or executed
+   by control-api code.** Traced the full consumption path: `_resolve_reproducer_path`
+   (`orchestrator/verify_dispatch.py:264-280`) does a pure content-addressed
+   `path_for(ARTIFACT_ROOT, sha256)` lookup — no archive extraction, no parsing.
+   `_run_reproducer` (`orchestrator/verification.py:347-378`) passes that path as one
+   `argv` element to `pktcfg_replay` (the target's own compiled binary, built from the
+   candidate-patched source under test) via `runner(...)`. `run_verification`'s default
+   runner (`_jail_command_runner`, confirmed at `orchestrator/verification.py:143-183`)
+   routes every command — including the reproducer replay — through a real
+   `packages.sandbox.Jail` (SEC-47; CPU/address-space/process-count/wall-clock limits,
+   scrubbed environment), not a bare host `subprocess.run`. So the byte content a fuzzer
+   found is never eval'd, deserialized, or shell-interpreted by this codebase; it is fed
+   as a file argument to a sandboxed replay of the target binary, the same threat model
+   fuzzing itself already assumes. `Reproducer.test_command` (a human-readable string
+   stored for evidence display) is never used to construct or execute a shell command
+   anywhere in this codebase — confirmed by grep across the whole tree, so even though
+   the filename embedded in it derives from libFuzzer's own artifact-naming convention
+   (itself regex-constrained by `_CRASH_RE` to `[0-9A-Za-z._-]+`), there is no path by
+   which it reaches a shell. `Reproducer.artifact`/`ReproducerRecord.artifact` is typed
+   as `ArtifactRef` (`contracts/schemas/common.py:60-72`), a `StrictSchema`
+   (`extra="forbid"`, confirmed at `contracts/schemas/common.py:22-25`) — the persisted
+   JSON field is structurally incapable of carrying a raw filesystem path or anything
+   beyond `uri`/`kind`/`sha256`/`size_bytes`, confirmed by reading the schema, not
+   assumed from D-106's own stated intent.
+
+4. **Findings-to-reproducers pairing fails closed, confirmed by code and by test.**
+   `_record_reproducers` (`workers/fuzzing/dispatch.py:406-432`): `if not findings or
+   len(findings) != len(outcome.durable_artifacts): return` — a length mismatch (fewer
+   durable artifacts than findings, e.g. because the symlink/size safeguards rejected
+   one) writes zero `Reproducer` rows for the whole batch, not a guessed subset.
+   `orchestrator/tests/test_fuzz_executor.py::
+   test_no_reproducer_when_durable_artifact_count_does_not_match_findings` exercises
+   exactly this path and was run independently (see Testing below) — passed.
+
+5. **No premature leak, no dangling reference.** `_record_one_reproducer`
+   (`workers/fuzzing/dispatch.py:441-469`) calls `ingest_from_path` — which writes to a
+   temp file and `os.replace()`s it into its final content-addressed location, so the
+   artifact bytes are durably and atomically on disk under `ARTIFACT_ROOT` before this
+   function returns — and only then calls `record_reproducer`. `record_reproducer`
+   (`orchestrator/findings.py:197-272`) creates the `Reproducer` row and calls
+   `events.emit` for `REPRODUCER_RECORDED` inside the same `transaction.atomic()` block,
+   under the mission row's `select_for_update()` lock; `events.emit` itself
+   (`orchestrator/events.py:56-60`) raises `RuntimeError` if called outside an atomic
+   block, so this ordering is structurally enforced, not incidental. `MissionEvent` rows
+   (what the SSE stream reads) therefore cannot become visible until the whole
+   transaction — DB row plus event — commits, by which point the artifact bytes have
+   already been durably and atomically stored. Also confirmed: `_persist_outcome` records
+   reproducers *before* the `FuzzingReport` row is created, so a crash between the two
+   leaves retry-safe partial state (re-dispatch re-runs the campaign; `record_finding`'s
+   `(mission, fingerprint)` and `record_reproducer`'s `(finding, sha256)` dedup make
+   rediscovery idempotent) rather than a `FuzzingReport` marking the stage complete while
+   silently missing its reproducer.
+
+**Additional checks, standard to this seat, beyond the five named targets.**
+
+- *Secrets.* `git show 2650e01` contains no real credentials — only placeholder test
+  fixture strings (`"outside-the-sandbox-secret.txt"`, `"another-secret.txt"`) used by
+  the implementer's own symlink tests. `.env`/`.env.* ` remain gitignored
+  (`.gitignore:22-23`, unchanged by this diff). No dependency manifest
+  (`requirements*.txt`/`pyproject.toml`/`package.json`) was touched, so this diff
+  introduces no new third-party dependency surface — a dependency audit was not run
+  because there is nothing new to audit.
+- *`MINIMIZE` stays unwired, `Finding.reproducible` semantics untouched* — confirmed
+  directly: `orchestrator/queue.py` still names `JobKind.MINIMIZE` as deliberately
+  absent from its stage-to-job map, `_minimize_executor`'s docstring was updated only to
+  describe the surviving blocker (no `-minimize_crash=1` algorithm), and
+  `Finding.reproducible` stays `False` on every `FUZZ`-discovered finding — matching
+  D-106's explicit "what this does NOT authorize" clause.
+
+**Testing — run independently this session, not trusted from D-109's report.**
+
+- `adapters/cpp/tests/test_fuzzing.py` (repo root, `PYTHONPATH=.`): **11 passed**,
+  including all 7 D-106 tests (symlink refusal x2, size ceiling, vanished artifact,
+  multi-artifact ordering, real-bytes-survive).
+- `orchestrator/tests/test_fuzz_executor.py` + `orchestrator/tests/test_findings.py`
+  (venv `/tmp/t5-verify-venv`, `DJANGO_SECRET_KEY=devsecret-not-literally-test
+  POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory:`): **27 passed**.
+- Full `apps/control-api` suite: **701 passed, 20 skipped** — matches D-109's reported
+  number exactly.
+- Repo-root targeted suites (`workers/fuzzing/tests workers/baseline/tests
+  adapters/cpp/tests packages/sandbox/tests`): **151 passed, 6 skipped, 1 xfailed** (one
+  more skip than D-109's reported 5 — all 6 skips are pre-existing, environment-dependent
+  ones: two real-campaign opt-in tests and four Linux-only `/proc`-based/`RLIMIT_AS`
+  tests that cannot run on this reviewer's Darwin host; none relates to this diff).
+- `tests/architecture`: **73 passed**.
+- **Live, real, opt-in end-to-end reproduction of D-109's headline claim, run myself, not
+  trusted from the paste**: `docker ps -a` first — no pre-existing `brahmadatta-*` stack
+  (confirmed clean, per the worktree-collision warning). Ran
+  `BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 python3 -m pytest
+  orchestrator/tests/test_fuzz_to_verify_real_e2e.py`: **1 passed in 12.01s** — a real
+  `FUZZ` job against real `pktcfg` wrote a real `Reproducer` row, and a real `VERIFY`
+  executor reached `REPRODUCER_ELIMINATED: PASS` / verdict `VERIFIED`. Also ran
+  `workers/fuzzing/tests/test_real_campaign.py`: **2 passed, 1 xfailed in 8.62s**,
+  including `test_real_campaign_crash_bytes_survive_the_jails_own_teardown`. `docker ps
+  -a --filter "label=brahmadatta.sandbox"` empty after both real runs — no orphaned
+  containers, environment restored to its pre-review state.
+
+**Non-blocking hardening notes, recorded for a future refactor, not gating this merge.**
+
+- The symlink control's TOCTOU-freedom depends on an invariant this review confirmed
+  holds today but did not see asserted anywhere in code or comments: the fuzzed
+  container is fully torn down (`ContainerJail.run()`'s synchronous
+  `_teardown_container`) before `_copy_crash_artifacts_durably` ever runs, so there is no
+  live process left to race the `resolve()`-check-then-`O_NOFOLLOW`-open window. If a
+  future change makes crash-artifact copy-out happen while a container might still be
+  alive (e.g. streaming/incremental capture during a long campaign), this invariant would
+  need re-establishing explicitly, not assumed to still hold. Recommend a comment on
+  `_copy_crash_artifacts_durably` naming this dependency directly. Owner:
+  compiler-toolchain-engineer, non-blocking.
+- `authorization.store.ingest_from_path`'s `source.is_file()` check follows symlinks in
+  general (it is a generic content-addressing primitive, not itself symlink-hardened).
+  Not exploitable via this diff — the only caller in this path (`_record_one_reproducer`)
+  always passes `artifact.host_path`, a file this codebase's own copy-out step already
+  wrote itself, never an attacker-influenced path. Recommend noting in
+  `ingest_from_path`'s own docstring that callers passing an untrusted path must apply
+  their own `O_NOFOLLOW` discipline first, the way `_copy_crash_artifacts_durably` does,
+  since a future caller could otherwise assume the primitive is symlink-safe when it is
+  not. Owner: backend-developer, non-blocking.
+
+**Verdict: CLEARED.** No critical, high, or medium finding. Both notes above are low-
+severity, forward-looking hardening items against future refactors, not defects in the
+code as it stands on this commit — neither is exploitable today given the actual call
+sites and timing this review traced and tested.
+
+**Security implications.** This closes D-106's named review requirement. The sandbox-to-
+persistent-storage boundary crossing this branch introduces is real but correctly
+controlled: untrusted bytes cross it only as opaque, content-addressed, size-capped data,
+never as an executable path, a shell command, or an unconstrained schema field, and the
+one filesystem-escape vector D-106 explicitly named (a hostile target planting a symlink)
+is blocked by two independent, tested controls plus a timing property that removes the
+live adversary a TOCTOU race would need.
+
+**Scalability implications.** None — matches D-106/D-109's own assessment.
+
+**Cost implications.** None beyond the review time itself; no code changes were made by
+this review (findings go back to the owning developer, not authored here) — none were
+required, since no finding rose above low/non-blocking.
+
+**Recommendation.** Merge is unblocked on security grounds. `qa-engineer`
+re-verification is the next gate per this project's standing pattern (D-097, D-102,
+D-104, D-108) and per D-106's own staffing note — not performed here, and should not run
+in parallel with a review that might still have blocked, per this task's own sequencing
+instruction.
+
+**Final approval authority** — cybersecurity (this seat), for the security verdict itself
+(CLEARED, recorded here); CTO retains authority to merge; qa-engineer for the
+re-verification gate that follows.
+
+---
+
+## D-111 — Independent `qa-engineer` re-verification of D-106/D-109/D-110 (`FUZZ`
+durable reproducer persistence, branch `fix/d106-reproducer-persistence`, commit
+`d523fed`): verdict **APPROVED** · 2026-08-19/20 · `qa-engineer` seat
+
+**Context.** D-106 ruled a scoped fix for the reproducer-persistence gap that had
+capped every live verdict at `HUMAN_REVIEW_REQUIRED` across two prior rehearsals
+(D-098, D-105). D-109 implemented it; D-110 cleared it on security grounds and named
+`qa-engineer` re-verification as the next and final gate, matching this project's
+standing pattern (D-097, D-102, D-104, D-108). This entry is that gate, run with
+independent test/tool access, not a re-read of the two prior reports.
+
+**Scope reviewed.** `.project/decisions.md`'s D-106, D-109, D-110 in full; `git show
+2650e01` (the implementation) in full — `adapters/cpp/fuzzing.py`
+(`_copy_crash_artifacts_durably`, `DurableArtifact`, `MAX_DURABLE_ARTIFACT_BYTES`),
+`workers/fuzzing/run.py` (`workspace_root` threading), `workers/fuzzing/dispatch.py`
+(`_fuzz_executor`, `_persist_outcome`, `_record_reproducers`,
+`_record_one_reproducer`, the updated `_minimize_executor` detail message), and the
+diffs of all 6 named test files (`adapters/cpp/tests/test_fuzzing.py`,
+`apps/control-api/orchestrator/tests/test_findings.py`,
+`apps/control-api/orchestrator/tests/test_fuzz_executor.py`,
+`apps/control-api/orchestrator/tests/test_fuzz_to_verify_real_e2e.py`,
+`workers/fuzzing/tests/test_real_campaign.py`), read to confirm each genuinely
+exercises the claimed behavior rather than passing trivially.
+
+**Pre-flight.** `docker ps -a` before starting: no pre-existing `brahmadatta-*`
+stack — only an unrelated `infra-postgres-1` and stopped `good_marketer_web-*`
+containers from other projects on this host. Confirmed clean per the
+worktree-collision warning (PR #219).
+
+**Automated suites — run myself, not trusted from the paste.**
+
+- `apps/control-api` (venv `/tmp/t5-verify-venv`, `DJANGO_SECRET_KEY=qa-verify-secret-
+  not-literally-test POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m
+  pytest --tb=short`): **701 passed, 20 skipped, 2 warnings in 55.93s** — matches
+  D-109's and D-110's reported number exactly.
+- Repo-root targeted suites (`PYTHONPATH=. python3 -m pytest workers/fuzzing/tests
+  workers/baseline/tests adapters/cpp/tests packages/sandbox/tests`): **151 passed,
+  6 skipped, 1 xfailed in 73.27s** — matches D-110's re-run count exactly (one more
+  skip than D-109's own reported 5, both pre-existing environment-dependent skips,
+  unrelated to this diff, as D-110 already established).
+- `tests/architecture`: **73 passed in 4.04s**.
+
+**Headline claim — independently, live-reproduced, not re-read from two prior
+reports.** Confirmed `docker info` reachable and
+`brahmadatta-fuzz-toolchain:local` image present. Ran the checked-in opt-in real
+tests myself:
+
+- `BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 python3 -m pytest
+  orchestrator/tests/test_fuzz_to_verify_real_e2e.py -v -s` (apps/control-api,
+  cmake/ctest confirmed on PATH first): **1 passed in 11.99s.**
+- `PYTHONPATH=. BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 python3 -m pytest
+  workers/fuzzing/tests/test_real_campaign.py -v -s` (repo root): **2 passed, 1
+  xfailed in 8.59s.**
+
+Then went further than re-running the checked-in tests, per this task's own
+instruction not to trust a test's own assertion: wrote and ran a standalone,
+independent script
+(`/private/tmp/.../scratchpad/qa_run/qa_live_verify.py`, not part of this repo)
+against a **file-based sqlite DB** (not the in-memory DB pytest itself tears down),
+reusing only the repo's own real fixtures/transitions/executors — no monkeypatching,
+no scripted gate matrix — to drive **two full, separate, real FUZZ campaigns**
+against `pktcfg` end to end:
+
+- **Positive case** (mission A, `candidate-a-correct-bounds-fix.patch`): real `FUZZ`
+  job found 1 unique crash in 1136 executions, real `VERIFY` job reached
+  `Verification complete for candidate ...: VERIFIED.`
+- **Negative case** (mission B, `candidate-b-rejected-crash-only-fix.patch`): real
+  `FUZZ` job found 1 unique crash in 1175 executions, real `VERIFY` job reached
+  `Verification complete for candidate ...: REJECTED.` (`REGRESSION_PRESERVED: FAIL`
+  — "ctest: Regression suite failed: 1 of 8 tests failed" — while
+  `REPRODUCER_ELIMINATED: PASS`, confirming this fix does not make everything come
+  back `VERIFIED` regardless of correctness; the gate this fix touches passed
+  correctly in both directions, and a different, still-enforced gate is what
+  correctly rejects the crash-only fix).
+
+Then, in a **separate process**, queried the resulting sqlite file directly with
+raw `sqlite3` (no Django ORM, no reliance on any script's own print statements or
+assertions):
+
+- `reproducer` table: 2 rows, one per mission, each with a real `sha256`, a real
+  `artifact://.../reproducer/<sha256>` URI, `size_bytes` 34 and 54 respectively, and
+  `test_command` values (`./pktcfg_replay crash-<hash> x1`) matching the pattern
+  `_record_one_reproducer` builds.
+- `verification_record` table: mission A's row shows `verdict='VERIFIED'` with
+  `reproducer_eliminated.status='PASS'`; mission B's row shows `verdict='REJECTED'`
+  with `reproducer_eliminated.status='PASS'` and `regression_preserved.status='FAIL'`
+  — read directly off the raw JSON `gates` column, not through any ORM accessor.
+- Independently located the two artifact files on disk under the script's
+  `ARTIFACT_ROOT` (`<root>/<sha256[:2]>/<sha256>`), recomputed their sha256 with
+  `shasum -a 256` from the shell (a completely independent hash implementation from
+  anything in this codebase), and confirmed both match the DB-recorded sha256
+  exactly. Inspected the raw bytes with `xxd`: both are real `PKTC`-format binary
+  crash inputs (pktcfg's own container format), 34 and 54 bytes, matching the
+  DB-recorded `size_bytes` exactly — not placeholder or empty files.
+
+This is independent proof, by a completely different code path (a standalone script
++ raw SQL + raw filesystem hashing, none of it the checked-in test suite) of the
+same claim D-109 and D-110 each already proved: a real `FUZZ` campaign against
+`pktcfg` finds the seeded heap-buffer-overflow, writes a real `Reproducer` row with
+real, durable, content-addressed bytes, and a real `VERIFY` run against a correct
+candidate reaches `REPRODUCER_ELIMINATED: PASS` / `VERIFIED` — and, newly confirmed
+by this entry specifically (D-109/D-110 exercised the negative path only via the
+existing `_result_from_outcome`/unit-test coverage, not a full live `FUZZ`-to-
+`VERIFY` run against `candidate-b`), that a genuinely broken candidate still reaches
+`REJECTED` through the same real, live pipeline.
+
+**Docker hygiene.** `docker ps -a` and `docker ps -a --filter
+"label=brahmadatta.sandbox"` after all real-docker runs (the two checked-in opt-in
+tests plus the standalone script's two full campaigns): output identical to the
+pre-run baseline — the same 5 pre-existing, unrelated containers, zero
+`brahmadatta.sandbox`-labeled containers. No orphaned containers or resources from
+this session's real-docker runs.
+
+**Test-file diff review (step 4 of this dispatch).** All 6 files read in full via
+`git show 2650e01`. None pass trivially:
+
+- `adapters/cpp/tests/test_fuzzing.py`'s 6 new tests exercise real file I/O against
+  a `ContainerJail` built directly on a temp directory (no daemon needed) — real
+  bytes surviving `sandbox.close()`, two independent symlink-escape shapes (absolute
+  and relative-`..`) both refused with zero bytes copied, a size ceiling enforced
+  mid-copy with an explicit "no leftover file" assertion, a vanished artifact
+  skipped without raising, and multi-artifact discovery-order preservation.
+- `orchestrator/tests/test_findings.py`'s 5 new tests exercise `record_reproducer`'s
+  real persistence, the `REPRODUCER_RECORDED` event inside the mission lock,
+  `(finding, sha256)` dedup (including that a retry does not double-emit the event),
+  a second distinct artifact for the same finding, and — the one this review singled
+  out as the actual acceptance criterion — a real `ingest_from_path` round-trip read
+  back through `verify_dispatch._resolve_reproducer_path`, the exact function
+  `VERIFY`'s gate calls.
+- `orchestrator/tests/test_fuzz_executor.py`'s 3 new tests cover the happy path (a
+  durable artifact becomes a real, resolvable `Reproducer`), the honest failure path
+  (no durable artifact survived → no `Reproducer`, `Finding` still recorded), and the
+  fail-closed pairing rule (artifact/finding count mismatch → zero `Reproducer` rows
+  for the whole batch, not a guessed subset) — this last one independently confirmed
+  live-adjacent by this review's own standalone script never hitting this path
+  (both live campaigns produced exactly one crash and one artifact, the only case
+  this pairing rule claims to handle).
+- `orchestrator/tests/test_fuzz_to_verify_real_e2e.py` and
+  `workers/fuzzing/tests/test_real_campaign.py`: read in full above this entry (see
+  the "Automated suites"/"Headline claim" sections) — genuine, real-docker,
+  opt-in, skip-loud, no mocking of the mechanism under test.
+
+**Implementation review, beyond what D-110 already covered on security grounds.**
+Read `workers/fuzzing/dispatch.py`'s diff in full: confirmed `_persist_outcome`
+records reproducers before the `FuzzingReport` row is created (matching D-109's own
+stated retry-safety rationale — checked directly in the diff, not assumed), and
+confirmed `_minimize_executor`'s updated `detail`/`blocked_reason`
+(`minimize_not_implemented`, was `no_durable_crash_artifact`) accurately reflects
+that D-106 closed the durability gap without authorizing `MINIMIZE` itself — matches
+D-106's own "what this does NOT authorize" clause exactly.
+
+**Bugs found.** None. No blocker, major, minor, or trivial defect found in this
+diff during this review.
+
+**Verdict: APPROVED.** All automated suite counts independently reproduced exactly.
+The headline claim — a real, self-discovered `FUZZ` finding reaching a real
+`VERIFIED` verdict — is now independently confirmed by three separate code paths
+(D-109's own report, D-110's independent re-run, and this entry's own standalone
+script + raw-SQL + raw-filesystem-hash verification), not narrated once and trusted
+twice. The negative case (a genuinely broken candidate still reaching `REJECTED`
+through the same live pipeline) is now confirmed live for the first time by this
+entry specifically, closing the one gap D-109/D-110 left to unit-test coverage
+rather than a full live run. Zero orphaned docker resources from any of this
+session's real-docker runs. This closes D-106's own final-approval chain
+(CTO ruling → backend-developer implementation → cybersecurity clearance →
+qa-engineer re-verification) with no remaining named gate.
+
+**Security implications.** None beyond D-110's own assessment, which this entry
+does not re-litigate (out of this seat's authority per this project's own division
+of labor) — re-confirmed only that the diff this review tested is the exact commit
+D-110 reviewed (`2650e01`, unchanged since, now sitting under `d523fed`'s D-110
+docs-only commit).
+
+**Scalability implications.** None beyond D-106/D-109/D-110's own assessment.
+
+**Cost implications.** None — this is a verification pass, not a code change.
+
+**Recommendation.** Merge is unblocked. This branch
+(`fix/d106-reproducer-persistence`, commit `d523fed`) has now cleared every gate
+this project's standing pattern (D-097, D-102, D-104, D-108) requires: CTO ruling,
+implementation, independent cybersecurity review, independent qa-engineer
+re-verification. No blocker outstanding. The orchestrating session may merge.
+
+**Final approval authority** — qa-engineer (this seat), for the re-verification
+verdict itself (APPROVED, recorded here); CTO retains final authority to merge.
+
+---
