@@ -55,6 +55,8 @@ pytestmark = pytest.mark.django_db(transaction=True)
 pge._ensure_gateway_importable()
 
 from gateway.errors import LiveGenerationError  # noqa: E402
+from gateway.ollama import OllamaCodeLlamaBackend  # noqa: E402
+from gateway.schemas import GenerationRequest  # noqa: E402
 from gateway.schemas import PatchCandidate as GatewayPatchCandidate  # noqa: E402
 from gateway.service import build_gateway  # noqa: E402
 from gateway.settings import GatewayMode, GatewaySettings  # noqa: E402
@@ -188,6 +190,166 @@ def test_model_gateway_root_default_resolves_to_the_real_importable_package():
     call (module scope, above) already relies on."""
     root = pge._model_gateway_root()
     assert (root / "gateway" / "__init__.py").is_file()
+
+
+# --------------------------------------------------------------------------------
+# 0.5. `_build_live_backend` threads the D-075/SEC-50 bearer token (D-105/D-106)
+#
+# #50 D7 gate rehearsal run 5 (D-105, `.project/decisions.md`): `_build_live_backend`
+# constructed `OllamaCodeLlamaBackend(endpoint=...)` without `bearer_token=settings.
+# model_host_bearer_token`, even though `GatewaySettings.model_host_bearer_token` was
+# already computed correctly from `MODEL_HOST_BEARER_TOKEN` and `OllamaCodeLlamaBackend.
+# bearer_token` was already a real field — the two were simply never connected. Every
+# live-model `PATCH_GENERATE` call against the compose `model` profile's `model-host-
+# auth` sidecar got a real `HTTP 401` instead of ever reaching Ollama.
+# --------------------------------------------------------------------------------
+
+
+def test_build_live_backend_threads_the_bearer_token_from_settings():
+    """Narrow regression: the field must actually be passed through, not merely
+    exist on both sides."""
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://model-host:11434",
+        resolve_endpoint=False,
+        model_host_bearer_token="s3cr3t-sidecar-token",
+    )
+
+    backend = pge._build_live_backend(settings)
+
+    assert backend.bearer_token == "s3cr3t-sidecar-token"
+
+
+def test_build_live_backend_defaults_to_no_bearer_token(monkeypatch):
+    """The other half of the same regression: an unconfigured token must not become
+    a non-empty one by accident (e.g. `None` -> the literal string `"None"`), the
+    same "blank is legal, send nothing" contract `OllamaCodeLlamaBackend`'s own
+    docstring describes for a bare loopback `ollama serve`."""
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://127.0.0.1:11434",
+        resolve_endpoint=False,
+    )
+
+    backend = pge._build_live_backend(settings)
+
+    assert backend.bearer_token == ""
+
+
+def _fake_sidecar_urlopen(seen: dict, *, required_token: str):
+    """Stand-in for the real `model-host-auth` nginx sidecar (D-075/SEC-50): reject
+    any request whose `Authorization` header isn't exactly `Bearer <required_token>`
+    with the same `HTTPError(401)` `urllib` itself raises for a real `401` response,
+    accept everything else. Mirrors `services/model-gateway/gateway/tests/
+    test_ollama_backend.py::_make_fake_urlopen`'s shape; faking the sidecar's one
+    decision here is the same pattern that module already uses to fake Ollama
+    itself, and standing up a real nginx sidecar in a unit test is neither practical
+    nor how the rest of this suite tests the gateway boundary.
+    """
+    import io
+    import json
+    import urllib.error
+
+    def fake_urlopen(request, timeout):
+        seen["authorization"] = request.get_header("Authorization")
+        if seen["authorization"] != f"Bearer {required_token}":
+            raise urllib.error.HTTPError(
+                request.full_url, 401, "Unauthorized", hdrs=None, fp=io.BytesIO(b"")
+            )
+        body = json.dumps(
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "diff": CANDIDATE_A_DIFF,
+                            "rationale": "sidecar-authenticated",
+                            "touched_files": ["src/parse.c"],
+                            "confidence": 0.6,
+                        }
+                    )
+                },
+                "eval_count": 7,
+            }
+        ).encode("utf-8")
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return body
+
+        return _FakeResponse()
+
+    return fake_urlopen
+
+
+def test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix(
+    monkeypatch,
+):
+    """Reproduces the original bug directly: a backend built with no bearer token
+    (the pre-fix call shape) against a fake sidecar that requires one fails with the
+    exact `HTTPError(401)` #50 D7 gate rehearsal run 5 hit live."""
+    import urllib.error
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        "gateway.client.urlopen",
+        _fake_sidecar_urlopen(seen, required_token="s3cr3t-sidecar-token"),
+    )
+
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://model-host:11434/api",
+        resolve_endpoint=False,
+        # No model_host_bearer_token — irrelevant here: the point of this test is
+        # the pre-fix *call site*, which never read the field at all.
+    )
+    # The exact pre-fix call shape (`_build_live_backend` before D-106): no
+    # `bearer_token=` kwarg reaches `OllamaCodeLlamaBackend` at all.
+    backend = OllamaCodeLlamaBackend(endpoint=settings.endpoint)
+
+    request = GenerationRequest(
+        mission_id="m-0001",
+        prompt="Fix the off-by-one.",
+        prompt_version="patch-prompt/3",
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        backend.generate(request)
+    assert excinfo.value.code == 401
+
+
+def test_live_backend_built_by_this_module_authenticates_through_the_sidecar(monkeypatch):
+    """The fix, end to end: `_build_live_backend` (this module's real call site, not
+    a hand-rolled stand-in) against the same fake sidecar now succeeds, because the
+    backend it constructs actually carries and sends the configured token."""
+    seen: dict = {}
+    monkeypatch.setattr(
+        "gateway.client.urlopen",
+        _fake_sidecar_urlopen(seen, required_token="s3cr3t-sidecar-token"),
+    )
+
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://model-host:11434/api",
+        resolve_endpoint=False,
+        model_host_bearer_token="s3cr3t-sidecar-token",
+    )
+    backend = pge._build_live_backend(settings)
+
+    request = GenerationRequest(
+        mission_id="m-0001",
+        prompt="Fix the off-by-one.",
+        prompt_version="patch-prompt/3",
+    )
+    candidate, _wall_time_ms, _output_tokens = backend.generate(request)
+
+    assert seen["authorization"] == "Bearer s3cr3t-sidecar-token"
+    assert candidate.rationale == "sidecar-authenticated"
 
 
 # --------------------------------------------------------------------------------

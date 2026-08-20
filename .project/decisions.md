@@ -10626,3 +10626,115 @@ staffing/sequencing; cybersecurity for the pre-merge review named above; qa-engi
 the re-verification gate.
 
 ---
+
+---
+
+## D-107 — PATCH_GENERATE live-model bearer-token threading fixed (D-105's headline 3):
+`_build_live_backend` now passes `bearer_token=settings.model_host_bearer_token`,
+regression tests added, confirmed live against the real D-075/SEC-50 sidecar · 2026-08-20
+· `backend-developer` seat
+
+**Context.** D-105 (this file, five entries above) found and root-caused, but explicitly
+did not fix (out of that seat's authority — devops rather than application code), a new
+`PATCH_GENERATE` live-model blocker: `apps/control-api/orchestrator/
+patch_generate_executor.py::_build_live_backend()` constructed `gateway.ollama.
+OllamaCodeLlamaBackend(endpoint=...)` without `bearer_token=settings.
+model_host_bearer_token`, even though `GatewaySettings.model_host_bearer_token` (`services/
+model-gateway/gateway/settings.py`) was already computed correctly from
+`MODEL_HOST_BEARER_TOKEN`, and `OllamaCodeLlamaBackend.bearer_token` was already a real
+field whose own docstring names this exact D-075/SEC-50 scenario. The two were simply
+never connected — a one-line call-site omission, not a design gap. Every live-model
+`PATCH_GENERATE` call against the compose `model` profile's `model-host-auth` sidecar got
+a real `HTTP 401` instead of ever reaching Ollama, in both dev and finale profiles.
+
+**Decision.** Thread the token through at the one call site D-105 identified:
+`_build_live_backend(settings)` now passes `bearer_token=settings.model_host_bearer_token`
+to `OllamaCodeLlamaBackend(...)`, alongside `endpoint`. No other call site, no schema
+change, no new environment variable — `MODEL_HOST_BEARER_TOKEN` already flowed correctly
+into `_build_gateway_settings()`'s `GatewaySettings` (confirmed live both by D-105 and
+again this session); only the backend construction was missing the field.
+
+**Options considered.**
+1. *(chosen)* Thread `settings.model_host_bearer_token` into the existing
+   `OllamaCodeLlamaBackend(...)` call in `_build_live_backend`. One line, matches the field
+   both sides already declared for this purpose, no new surface.
+2. Read `MODEL_HOST_BEARER_TOKEN` directly from `os.environ` inside `_build_live_backend`,
+   bypassing `GatewaySettings` entirely. Rejected: duplicates parsing/trimming logic
+   `gateway.settings.from_environment` already owns correctly, and reintroduces the exact
+   "two names for the same fact, never reconciled" shape this module's own docstring
+   already calls out for `MODEL_ENDPOINT`/`SMALL_MODEL_BASE_URL` as a problem, not a
+   pattern to repeat.
+3. Change `OllamaCodeLlamaBackend`'s default `bearer_token` to read the environment itself
+   at construction time. Rejected: moves a control-api-process concern into gateway-package
+   code that `services/model-gateway`'s own tests construct directly and expect to behave
+   the same off any particular caller's environment; violates the package boundary D-028/C5
+   exists to hold.
+
+**Pros and cons.** Option 1: minimal diff, matches the pattern this exact class already
+uses successfully via `gateway/tools/model_prep.py`'s own `--bearer-token`/env-default
+convention (`test_model_prep_cli.py`); con: none identified — this is the shape the fields
+were built for. Options 2/3: both work functionally but relocate a decision (where the
+token is read from) to a place inconsistent with the rest of the codebase's convention,
+trading a one-line fix for a small but real architectural regression.
+
+**Cost implications.** None — no new dependency, no new environment variable, no
+infrastructure change. Unblocks the live-model `PATCH_GENERATE` path that was otherwise
+dead weight (built, deployed, never reachable).
+
+**Security implications.** This is the exact boundary D-075/SEC-50 established: the
+bearer-token-gated `model-host-auth` sidecar is the only thing standing between the
+`backend` network's other members and a loopback-bound Ollama that would otherwise be
+unreachable by policy. Reviewed as this task's own cybersecurity pass (no separate
+subagent dispatch was available in this seat's tool access this session — see Assumptions
+in the handoff below): confirmed (a) the token is sourced only from
+`MODEL_HOST_BEARER_TOKEN` via the existing `GatewaySettings`/`from_environment()` path,
+never hardcoded; (b) it reaches the wire only as the `Authorization: Bearer <token>` header
+`gateway.client._auth_headers` already builds — no other call site touches it; (c) grepped
+every error/log path this change's call graph can reach
+(`orchestrator/patch_generate_executor.py`, `gateway/errors.py`, `gateway/client.py`,
+`gateway/service.py`) and confirmed no exception message, `detail=` string, or
+`logger.info`/`logger.error` call ever interpolates the token or the `GatewaySettings`/
+`OllamaCodeLlamaBackend` object wholesale (both are `@dataclass(frozen=True)` without
+`repr=False`, so a stray `repr()`/`str()` of either *would* leak it in cleartext — none was
+found, but this is worth a future `repr=False` hardening pass rather than trusting
+discipline alone); (d) `apps/control-api/.env.example` was NOT touched — `test_model_host_
+bearer_token_is_declared_only_in_the_compose_env_example` (`tests/architecture/
+test_compose_topology.py`) still passes, preserving the D-075 isolation from
+`run-fuzz-worker.sh`'s wholesale `.env` sourcing; (e) `tests/architecture/
+test_import_direction.py`'s full suite still passes — the C5 invariant (`gateway.*` never
+imports inside the ASGI process) is untouched, since this fix stays inside the one module
+already exempted for exactly this reason.
+
+One new, separate finding surfaced while tracing this: `gateway.ollama.
+OllamaCodeLlamaBackend.generate()` never wraps the underlying `urllib.error.HTTPError`/
+`URLError`/timeout into a `gateway.errors.GatewayError`, so `_generate_with_ladder`'s
+`except GatewayError as exc: continue` never catches a raw HTTP-layer failure — the
+degradation ladder (architecture spec §6.4: transport retry, then context-reduction retry)
+is effectively bypassed for the most common live-model failure class, and the exception
+propagates uncaught out of `_patch_generate_executor` entirely. This is the same shape of
+crash D-105 hit live (an uncaught `HTTP Error 401: Unauthorized`) — but it was really a
+general exception-wrapping gap in `gateway/ollama.py`, only surfaced by the auth bug this
+entry fixes. This fix removes the 401 case specifically; it does not touch `gateway/
+ollama.py` or fix this gap for other HTTP failures (a real 404/500/timeout from Ollama
+itself would still crash the executor the same way today). Out of this task's scope
+(narrowly the missing `bearer_token=` kwarg) and outside this seat's authority to patch
+shared gateway-package code without its own review — flagged for backend-developer/
+whoever next touches `gateway/ollama.py`, not fixed here. Availability risk (an uncaught
+exception can crash a worker's job-claim loop mid-job rather than failing the job
+gracefully), not a confidentiality/integrity finding.
+
+**Scalability implications.** None beyond the pre-existing gateway HTTP path; unrelated to
+this fix's size.
+
+**Recommendation.** Merge as-is. File the `gateway/ollama.py` exception-wrapping gap as a
+tracked follow-up (not blocking this fix), and consider a `repr=False`/`__repr__`
+override on `GatewaySettings.model_host_bearer_token` and `OllamaCodeLlamaBackend.
+bearer_token` as a defense-in-depth hardening item, also not blocking.
+
+**Final approval authority** — CTO, for the technical fix and the follow-up-tracking call;
+cybersecurity, for security sign-off (self-performed this session per the Assumptions
+section of the accompanying handoff — an independent second pass by a separately
+dispatched `cybersecurity` seat is recommended before this merges, if that tool access
+becomes available to the orchestrating session).
+
+---
