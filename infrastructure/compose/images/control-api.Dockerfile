@@ -41,11 +41,22 @@ RUN groupadd --gid 10001 app \
 # has to install the equivalent explicitly since python:3.12-slim-bookworm ships none of
 # it. Missing entirely until found live: the #50 D7 gate rehearsal, 2026-08-17 (run 2) —
 # BASELINE failed in 0.034s, `cmake: not found`, before this fix.
+#
+# `git` added 2026-08-19 (#50 D7 gate rehearsal, run 4): VERIFY (`orchestrator/
+# verify_dispatch.py`, the same `packages.sandbox.Jail` subprocess jail BASELINE
+# uses, per that module's own SUBPROCESS_JAIL substitution note, D-049) applies an
+# operator-supplied or model-generated unified diff onto the snapshot before
+# rebuilding/retesting, and does so by shelling out to `git`. Never found until this
+# run because no prior rehearsal reached VERIFY. The job failed with error_code
+# SANDBOX_UNAVAILABLE, detail "'git' was not found on PATH inside the jail" —
+# confirmed live via `docker exec brahmadatta-worker which git` returning nothing
+# before this fix.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
       cmake \
       patch \
+      git \
       libasan8 \
       libubsan1 \
  && rm -rf /var/lib/apt/lists/*
