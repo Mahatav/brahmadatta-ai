@@ -9349,3 +9349,103 @@ project's normal issue-staffing process; not decided here. PR #215 (blocker 2's 
 this seat, once CI is confirmed working and green; not merged in this session.
 
 ---
+
+## D-099 — Correction to D-098's teardown claim: a second, concurrent worktree collides
+on the same Docker Compose project name, so "zero strays" does not hold unattended ·
+2026-08-19 · `devops-engineer` seat
+
+**Context.** After posting D-098's "zero strays, docker ps -a identical to pre-run baseline"
+teardown claim (also posted verbatim to issue #50), this seat performed one further,
+unscheduled sanity check before ending the session and found the claim does not hold over
+time: roughly 50 seconds after a clean `docker compose down`, the full `brahmadatta` stack
+(`db`, `redis`, `control-api`, `worker`, `nginx`, `command-center`) reappeared with fresh
+container IDs, unattended, with no `docker compose`/`dev-up.sh` process visible anywhere in
+`ps aux` on this session's own shell history.
+
+**Root cause, confirmed directly, not guessed.** `docker compose ls -a` shows a *second*
+compose project also named `brahmadatta` — the literal, hardcoded `name: brahmadatta` at
+`infrastructure/compose/docker-compose.yml` line 20 — bound to a **different** checkout:
+`.claude/worktrees/agent-a1e0df190526ac7ce/infrastructure/compose/docker-compose.yml`. This
+is a real `git worktree` of this same repository (`.git` there points at
+`/Users/manu/Documents/GitHub/brahmadatta-ai/.git/worktrees/agent-a1e0df190526ac7ce`, not a
+separate clone), created 2026-08-19 ~18:05-18:06 local time — i.e. a second agent seat,
+dispatched concurrently with this one as part of the same orchestrating session (per
+`.claude/COMPANY.md`'s worktree-per-seat convention), almost certainly also doing
+environment/infrastructure work on `#50`'s open follow-ups. Because both checkouts' compose
+files declare the identical literal project name, Compose treats them as **the same
+project** — same container names, same networks, same *named volumes*, including
+`brahmadatta_pgdata`, the actual Postgres data volume. Whichever session's `up` runs most
+recently "wins" the shared containers; whichever session's `down` runs gets silently undone
+by the other session's own `up` (interactive, on a timer, or triggered by its own dev-up.sh
+re-runs — this seat could not directly observe the other session's process list and did not
+attempt to, see below).
+
+**What this means for D-098's own findings — reaffirmed, not retracted.** The mission data,
+job results, verification records, and gate outputs this seat directly queried and quoted in
+D-098 (candidate A/B verdicts, the `git`-missing fix, the `ArtifactRef` crash, etc.) were read
+directly from specific, named UUIDs this seat itself created and drove through the pipeline,
+and are unaffected by which session's containers were physically running the queries — the
+shared `pgdata` volume means the *data* was genuinely shared and consistent regardless of
+container churn. **What is retracted is narrower and specific**: the claim that `docker ps -a`
+after teardown "is identical to the pre-run baseline" was true **at the instant it was
+checked**, but is **not durable** — the environment does not stay torn down unattended, for a
+reason entirely outside this rehearsal's own actions (a second concurrent session's own
+activity against a colliding project name), not a failure of this seat's own teardown
+commands, which executed cleanly and correctly every time they were run.
+
+**Action taken — deliberately limited.** This seat performed one further `docker compose down`
+once the collision was understood, then stopped. **This seat did not**: rename the shared
+compose project, kill the other worktree's processes, delete the other worktree, or run any
+further `up`/`down` cycles chasing a stack this seat now knows is not exclusively its own to
+tear down. Continuing to fight another live agent seat's concurrent `up` calls with repeated
+`down` calls would itself have been a form of "silently overriding another role's prior work"
+— exactly what this project's own `CLAUDE.md` rules against — the moment the shared-project
+fact was known, not before.
+
+**Options considered** — (a) keep tearing down until it stays down, assuming the other
+worktree is stale/abandoned; (b) stop immediately and report, treating the other worktree as
+a live, in-progress peer session whose state this seat has no authority to unilaterally
+resolve; (c) proactively fix the root cause (give `docker-compose.yml` a non-hardcoded,
+per-checkout project name) unilaterally, now, since the fix is small.
+
+**Pros and cons.** (a) risks tearing down real, in-progress work from a concurrent seat this
+session cannot see or coordinate with — the worst possible failure mode for a shared-state
+collision, and unjustifiable given this task's own scope was a rehearsal, not an infra
+migration. (b) is slower to "resolve" but is the only option that cannot destroy another
+seat's live work; it correctly separates "this task's own teardown obligation, met" from "the
+shared environment's overall state, not this task's to control." (c) is the right *eventual*
+fix, but changing the compose project's identity while another live session may have
+containers, volumes, or in-flight state bound to the current name is exactly the kind of
+unilateral, uncoordinated, session-colliding change this record exists to flag, not to
+commit — it needs the orchestrating session to confirm the other worktree's seat is actually
+done (or coordinate a handoff) before anyone touches the shared name.
+
+**Recommendation.** (b), as executed. Separately, real follow-up work, scoped for
+whichever seat/CTO owns cross-cutting devops process: `infrastructure/compose/
+docker-compose.yml`'s hardcoded `name: brahmadatta` (and the identical pattern likely in
+`docker-compose.finale.yml`, not independently checked this session) should become
+per-checkout — e.g. `COMPOSE_PROJECT_NAME` derived from the working directory, or the
+worktree-per-seat convention in `.claude/COMPANY.md` should document that concurrent seats
+must never bring up the dev stack from two worktrees at once against the unmodified compose
+file. This is not a new problem class for this project — `.project/decisions.md` itself
+already shows a `D-096` numbering collision between two worktrees editing the same file
+concurrently (see the QA-review entry immediately above this one in the file) — this is the
+same underlying "two worktrees, one shared resource, no coordination mechanism" pattern,
+now confirmed for Docker Compose project state as well as for this file's own numbering.
+
+**Cost/security/scalability implications** — none beyond the wasted compute of repeated
+unattended container churn; no security-relevant boundary was crossed (both worktrees are
+this seat's own trusted repository, not an external actor).
+
+**Correction to the public record** — the verdict comment already posted to issue #50 and
+D-098's own text both stated teardown was confirmed with zero strays; that statement is
+accurate for the moment it was checked and is being corrected here, not deleted, with the
+specific, narrower caveat above. A follow-up comment noting this correction is being posted
+to issue #50 alongside this record.
+
+**Final approval authority** — CTO / orchestrating session, for confirming the other
+worktree seat's status and for deciding the `COMPOSE_PROJECT_NAME` fix's timing; this seat,
+for the correction itself and for not taking any further unilateral action against the
+shared environment.
+
+---
