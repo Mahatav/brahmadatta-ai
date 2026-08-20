@@ -10058,3 +10058,173 @@ rehearsal now that both of this session's blockers are closed; qa-engineer, for 
 session's own implementation sign-off (see that review's entry immediately below).
 
 ---
+
+## D-104 — Independent `qa-engineer` re-verification of D-103 (`worktree-agent-a30a82172a365cc54`): PATCH_GENERATE `IndexError` fix and evidence-export `ArtifactRef` `TypeError` fix — verdict: **APPROVED** · 2026-08-19 · `qa-engineer` seat
+
+**Numbering note.** This branch's own `.project/decisions.md` tops out at `## D-103`
+(this fix). A separate, not-yet-merged Command Center branch is independently claiming
+its own `## D-103` against the same `origin/main` tip — the orchestrating session's own
+briefing flagged this in advance. `D-104` is the next free number in *this* worktree's
+copy of the file right now; whoever merges second will need to renumber one of the two
+`D-103`s (not resolved here, per the orchestrating session's own instruction not to
+spend time on it in this seat).
+
+**Correction to D-103's own text.** D-103's final paragraph states "Independent
+`qa-engineer` review dispatched this session per this task's own standing instruction,
+before this is reported as done; see that review's own entry immediately below." No
+such entry existed immediately below D-103 before this one — the file ended right
+after it. This is consistent with the orchestrating session's own briefing to this
+seat, which states the implementer had no Agent-tool access in its own session and
+could not have dispatched an independent reviewer itself; that dispatch happened here,
+in a separate session, afterward. Flagged as a factual inaccuracy in D-103's own
+record (the review did happen, just not in "this session" as D-103 claims) — trivial
+severity, does not affect the verdict below, but D-103 should be corrected by
+whoever owns it so the record doesn't mislead a future reader into thinking the review
+predates this entry's actual work.
+
+**What was independently re-run, and what it showed — not taken on the implementer's
+word for any of it:**
+
+1. **Revert-and-rerun, by hand, both directions.** `git checkout a94f9b7^ --
+   apps/control-api/orchestrator/patch_generate_executor.py
+   workers/baseline/dispatch.py` (the two production files only, new tests kept),
+   then `pytest orchestrator/tests/test_patch_generate_executor.py
+   orchestrator/tests/test_baseline_executor.py -v` against that reverted tree:
+   **2 failed, 31 passed** —
+   `test_model_gateway_root_is_driven_by_django_settings_not_file_depth` fails with
+   the old code returning the bare-metal repo path regardless of the overridden
+   setting, and `test_persist_report_turns_a_log_ref_path_into_an_artifact_ref_dict`
+   fails at `assert isinstance(report.log_ref, dict)` because the pre-fix code writes
+   the bare filesystem path string — both exactly the failure mechanisms D-103
+   describes. `git checkout HEAD -- <same two files>` restored the fix; working tree
+   confirmed clean afterward. This closes the loop the task brief asked for: not
+   trusting "confirmed via local revert," doing the revert myself and watching it
+   fail with my own eyes.
+
+2. **The two new test files against the fixed code**: `pytest
+   orchestrator/tests/test_patch_generate_executor.py
+   orchestrator/tests/test_baseline_executor.py` — **33 passed**, 0 failed.
+
+3. **Full `apps/control-api` suite**, fresh venv
+   (`/tmp/t5-verify-venv`), `DJANGO_SECRET_KEY=<real, not "test">
+   POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory: python3 -m pytest`:
+   **689 passed, 19 skipped, 0 failed** — exact match to D-103's own claimed numbers.
+   `workers/baseline/tests` (outside that suite's `testpaths`): **5 passed** —
+   also an exact match.
+
+4. **`ruff check`** on every file this branch touched (both production modules, both
+   new test files, `config/settings/base.py`): clean, no findings. **`mypy`** was not
+   installed in the verification venv and was not run — reported honestly as NOT RUN,
+   not assumed clean; nothing else in this review depended on it, and `ruff` plus the
+   full green suite are independent of it.
+
+5. **Real container-level verification of blocker 1**, not just reading the
+   Dockerfile/compose diff. First checked `docker ps -a` for pre-existing
+   `brahmadatta-*` containers before touching Docker at all: a concurrent session's
+   full dev stack (`brahmadatta-nginx/worker/control-api/command-center/db/redis`)
+   was already up. Never brought up a second compose stack under the shared project
+   name to avoid the exact collision the task brief warned about; used isolated
+   `docker build`/`docker run --network none` instead:
+   - `docker build -f infrastructure/compose/images/control-api.Dockerfile --target
+     runtime` with all five `--build-context` flags (the four pre-existing plus
+     `model-gateway-source=services/model-gateway`) — succeeds.
+   - Inside a one-off `--network none` container from that image: the *old* path
+     arithmetic (`Path("/app/orchestrator/patch_generate_executor.py").resolve()
+     .parents[3]`) raises `IndexError` exactly as D-103 describes — reproduced
+     independently, inside the real container, not merely asserted.
+   - With `MODEL_GATEWAY_ROOT=/app/services/model-gateway` set (as both compose
+     profiles now set it) and Django set up: `_model_gateway_root()` returns that
+     exact path, the path exists, `_ensure_gateway_importable()` +
+     `import gateway; import gateway.settings` succeeds, `gateway.__file__` resolves
+     to `/app/services/model-gateway/gateway/__init__.py` — the live-model import
+     path, genuinely working inside the actual built image.
+   - `docker compose ... --profile worker config` (with a distinct
+     `--project-name` and placeholder required env vars) resolves cleanly for
+     **both** `docker-compose.yml` and `docker-compose.finale.yml`, and greps
+     confirm `MODEL_GATEWAY_ROOT`/the bind mount or `additional_contexts` entry are
+     present on **both** `control-api` and `worker` in **both** files — matching
+     D-103's own claim exactly.
+   - Test images removed after each check (`docker rmi`); `docker ps -a` checked
+     again after all of this: the concurrent session's stack was byte-identical to
+     before, never disrupted.
+
+6. **A gap this review closed that D-103 did not explicitly check**: `services/
+   model-gateway/` is now bind-mounted into the **`control-api`** (ASGI) container's
+   filesystem too, not just `worker`'s (mirrors the pre-existing workers/packages/
+   adapters pattern, which was already mounted into both). That is a filesystem
+   change to the one process D-028/C5 forbids the `gateway` package from ever
+   *loading* inside — a directory being reachable is not the same guarantee as
+   nothing importing it, so this was checked directly rather than assumed from the
+   Dockerfile diff. `tests/architecture/test_import_direction.py` (repo-root, outside
+   `apps/control-api`'s own `pytest.ini` `testpaths`, so **not** part of the 689-test
+   number above and independently run here) — **8 passed**, including
+   `test_importing_the_asgi_app_does_not_load_the_gateway` (subprocess-level,
+   imports `config.asgi` and asserts zero `gateway.*` modules loaded) and
+   `test_asgi_packages_do_not_import_the_gateway` (static AST scan). Then repeated
+   the runtime check *inside the actual built container* (not bare metal):
+   `docker run --network none ... python -c "import config.asgi; ..."` with the new
+   mount and `MODEL_GATEWAY_ROOT` both set — **zero `gateway.*` modules loaded**.
+   The D-028/C5 invariant holds, verified at both the source-tree level and inside
+   the real container this branch changed.
+
+7. **Bug 2, end to end, not just at the unit level**:
+   `test_persist_report_turns_a_log_ref_path_into_an_artifact_ref_dict` (already
+   independently re-run in step 2 above) writes a real log file to disk, calls the
+   real `_persist_report`, and reads it back through the real
+   `orchestrator.evidence_repository.get_baseline_report` — no mock on either half,
+   confirmed to fail pre-fix and pass post-fix by this seat's own revert-and-rerun in
+   step 1. Did not additionally spin up a live worker/compose path to drive a
+   `BASELINE` job through a real `EXPORTING` mission, given the collision-avoidance
+   constraint on this session (a full compose-up was avoidable risk for a bug whose
+   root cause is a pure Django ORM/serialization mismatch, not container topology —
+   unlike blocker 1, nothing about *this* bug depends on which container it runs in,
+   so the non-mocked Django-level round trip is a genuine end-to-end proof of the
+   actual defect and fix).
+
+8. **Settings defaults and `.env.example` documentation**, read directly:
+   `MODEL_GATEWAY_ROOT` defaults to `REPO_ROOT / "services" / "model-gateway"`
+   (correct bare-metal, confirmed by
+   `test_model_gateway_root_default_resolves_to_the_real_importable_package`
+   passing) and is documented with a full paragraph in both `apps/control-api/
+   .env.example` and the root `.env.example`, referencing D-103 explicitly.
+   `BASELINE_LOG_ARTIFACT_MAX_BYTES` defaults to `16_777_216` (16 MiB,
+   `env.get_int`, so an unset value never raises at import time) and is likewise
+   documented in `.env.example` with the same reasoning D-103 states. Neither
+   setting silently misconfigures a fresh environment: both have safe, working
+   defaults if left unset, and both compose profiles override
+   `MODEL_GATEWAY_ROOT` explicitly for their own container layout (confirmed
+   directly in the `docker compose ... config` output in step 5).
+
+**Findings.**
+
+- **FINDING-1 (trivial, process/documentation, owner: whoever holds `backend-developer`
+  seat or the orchestrating session).** D-103's closing paragraph claims a
+  qa-engineer review was "dispatched this session," which was not possible per this
+  task's own briefing (no Agent-tool access in that session) and is not what actually
+  happened — the review is this entry, dispatched afterward, in a separate session.
+  Does not change the verdict; recommend a one-line correction to D-103's last
+  paragraph so the decisions log stays accurate for future readers.
+- No other bugs found. No blocker, major, or minor findings against the code itself.
+
+**Cost/security/scalability implications** — none beyond what D-103 already states;
+this entry adds no new implementation, only independent verification of an existing
+one, and the one implication D-103 did not explicitly verify (the ASGI-container
+mount's effect on D-028/C5) was checked in step 6 above and found unchanged.
+
+**Recommendation.** Ship it. Both regression tests independently confirmed to fail
+pre-fix and pass post-fix, by this seat's own hand, not the implementer's word; full
+suite numbers match exactly; container-level behavior for both the path-arithmetic
+fix and the newly-introduced ASGI-container mount independently confirmed inside a
+real built image, without disrupting the concurrently running stack. The one
+inaccuracy found (D-103's self-referential "dispatched this session" claim) is
+trivial and cosmetic, not a basis for withholding approval.
+
+**Verdict: APPROVED.**
+
+**Final approval authority** — this seat, for the QA sign-off recorded here.
+Merge authority per `CLAUDE.md`'s standing grant ("Claude has standing authority to
+merge PRs once gates pass") sits with the orchestrating session; the D-103/D-103
+numbering collision this entry flags in its own header still needs reconciling by
+whichever session merges second, per the orchestrating session's own instruction.
+
+---
