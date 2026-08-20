@@ -9606,3 +9606,54 @@ question (whether to add one); devops-engineer for the `run_orchestrator` compos
 wiring and the `.env.example` worker-command fix; CTO if the probe/retry pattern is
 judged to need backend involvement before the finale rather than staying a frontend
 workaround.
+
+---
+
+## D-101 — Fragment Mono woff2 measured advance is 0.618em, not the assumed 0.6em (design-system §2.2/§13 Q6, DS-06) · 2026-08-19/20 · `frontend-developer` seat
+
+**Decision/finding** — Per DS-06's own instruction ("first build task on any panel
+that does width arithmetic… measure the shipped Fragment Mono woff2 against a
+60-character ruler string"), rendered the actual shipped
+`@fontsource/fragment-mono` `fragment-mono-latin-400-normal.woff2` (the exact file
+`BaseLayout.astro` imports) in a real headless Chromium (Playwright), a 60-char
+bracket-label-style ruler (`[ HEAP-BUFFER-OVERFLOW parser.c:118 READ 4 AT +2 ASAN
+]`), measured via `getBoundingClientRect().width`, cross-checked with a pure
+`'A'.repeat(60)` ruler at four type-scale sizes (`mono-2xs` 11px, `mono-xs` 12px,
+`mono-sm` 13px, `mono-md` 15px). All four sizes agree to 4 decimal places:
+
+**Measured advance: 0.618em** (9.2701px per character at `mono-md`'s 15px), against
+the document's assumed **0.6em**. **Drift: +3.00–3.01%** — at or just past DS-06's
+own ">3% drift" re-derivation threshold.
+
+This is **not** the visual-panel work itself (out of this task's scope, per the
+dispatching session's explicit instruction — a separate pass builds the Core/
+Stage-Timeline/Findings-rail/Candidate-Compare/Verdict-panel). It is the
+measurement DS-06 asked whoever builds those panels next to have in hand before
+starting, so it is recorded here rather than silently left for that seat to
+re-discover.
+
+**Consequence, stated so the next seat does not have to re-derive it**: every
+column-count figure in §3, §6.4 and §6.5 that assumes 0.6em is ~3% optimistic. At
+`mono-md`, §6.4.1's "652px column holds 72 characters" becomes closer to 70; the
+"77 characters per row" in §6.5 becomes closer to 75. Whether this actually breaks
+any specific line (e.g. the longest `NOT_RUN` reason string fitting inline) needs a
+character-count check against the real longest strings, not just the percentage —
+flagged as the next concrete step, not resolved here.
+
+**Cost implications** — none; this is a factual finding.
+
+**Security implications** — none.
+
+**Scalability implications** — none.
+
+**Recommendation** — Whoever next touches §3/§6.4/§6.5's column arithmetic
+re-derives the affected budgets from 0.618em before building, per DS-06's own
+rule. This entry and `docs/09-company/04-design-system.md` §13 Q6/§2.2/DS-06 should
+be reconciled by the `ui-ux-designer` seat (this seat's authority is measurement
+only, not editing that document, which is frozen/approved — D-017/D-018/product
+review).
+
+**Final approval authority** — `frontend-developer` (this seat) for the
+measurement itself, per DS-06's own final-approval line ("frontend-developer, on
+measurement"); `ui-ux-designer` for updating the design-system document's own
+figures in response.
