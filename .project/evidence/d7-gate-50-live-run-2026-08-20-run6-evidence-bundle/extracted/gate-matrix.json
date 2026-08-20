@@ -1,0 +1,66 @@
+[
+  {
+    "patch_id": "280d8894-d3a8-4136-b373-30d8ebfe6bc9",
+    "verification_id": "a6b3aaca-a31d-43b3-ae99-ab31020ffedb",
+    "verdict": "VERIFIED",
+    "gates": {
+      "COMPILE": {
+        "status": "PASS",
+        "tool": "cmake",
+        "detail": ""
+      },
+      "REPRODUCER_ELIMINATED": {
+        "status": "PASS",
+        "tool": "pktcfg_replay",
+        "detail": "Crash reproducer replay completed without a sanitizer fault."
+      },
+      "REGRESSION_PRESERVED": {
+        "status": "PASS",
+        "tool": "ctest",
+        "detail": "Regression suite passed: 8 tests ran."
+      },
+      "STATIC_DELTA": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      },
+      "RENEWED_FUZZING": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      }
+    }
+  },
+  {
+    "patch_id": "75383f61-057f-4c7e-80df-98b802e3c170",
+    "verification_id": "a7297fd4-820e-4fbf-8309-09bcd90838e3",
+    "verdict": "REJECTED",
+    "gates": {
+      "COMPILE": {
+        "status": "PASS",
+        "tool": "cmake",
+        "detail": ""
+      },
+      "REPRODUCER_ELIMINATED": {
+        "status": "PASS",
+        "tool": "pktcfg_replay",
+        "detail": "Crash reproducer replay completed without a sanitizer fault."
+      },
+      "REGRESSION_PRESERVED": {
+        "status": "FAIL",
+        "tool": "ctest",
+        "detail": "ctest: Regression suite failed: 1 of 8 tests failed. exit=8"
+      },
+      "STATIC_DELTA": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      },
+      "RENEWED_FUZZING": {
+        "status": "NOT_RUN",
+        "tool": "",
+        "detail": "Not run: cut from the seven-day build (see docs/09-company/03-seven-day-plan.md)."
+      }
+    }
+  }
+]

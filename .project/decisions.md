@@ -11466,3 +11466,232 @@ re-verification. No blocker outstanding. The orchestrating session may merge.
 verdict itself (APPROVED, recorded here); CTO retains final authority to merge.
 
 ---
+
+## D-112 — #50 D7 gate, live rehearsal run 6 (2026-08-20): every blocker named by runs
+4/5 confirmed closed live; one mission produces BOTH verdicts for the first time ever
+(the literal, more rigorous reading of the acceptance criterion); evidence bundle
+exported and independently read back; zero-stray teardown confirmed; two new small
+infra/config blockers found and fixed live; explicit verdict: **PASS on every
+criterion this seat can execute, one standing named human caveat (fallback
+recording)** · 2026-08-20 · `devops-engineer` seat
+
+**Context.** Sixth live attempt at the #50 D7 gate. Dispatched specifically because
+every blocker the last two rehearsals found (D-098 run 4, D-105 run 5) was reported as
+fixed and merged: `#207`, the BASELINE toolchain, VERIFY's missing `git`, the
+evidence-export `ArtifactRef` crash, PATCH_GENERATE's missing bearer token (D-107,
+independently cleared by cybersecurity in D-108), and the reproducer-persistence gap
+that had capped every prior verdict at `HUMAN_REVIEW_REQUIRED` regardless of patch
+correctness (D-106 ruling, D-109 implementation, D-110 independent cybersecurity
+clearance, D-111 independent qa-engineer approval). Full detail:
+`.project/evidence/d7-gate-50-live-run-2026-08-20-run6.{json,md}`, the extracted and
+checksum-verified evidence bundle at `.project/evidence/
+d7-gate-50-live-run-2026-08-20-run6-evidence-bundle/`, the post-teardown `docker ps -a`
+capture, and the raw API request/response artifacts, all alongside this entry.
+
+**Headline 1 — this run's own interpretation call, made deliberately per this task's
+own instruction to re-read the acceptance criterion and pick the more rigorous
+reading.** "Both verdicts produced in that single run — one Verified, one Rejected"
+was read, this run, as **one mission producing both verdicts**, not two sibling
+missions within one rehearsal session (D-098/D-105's own shape, which never actually
+reached both verdicts anyway so the question was moot until now). Re-reading
+`docs/09-company/01-vision-and-p0-cut.md` §3 — the CEO doc's own nine-step demo
+description issue #50 cites directly — settles this: it describes **one** sequence run
+back to back on **one** target; step 7 says the second candidate "goes through the
+*identical* pipeline" (the same mission's pipeline); step 8 says the evidence bundle
+contains "both diffs, both gate matrices, both verdicts" — one bundle, not two. D-090
+(the operator-candidate endpoint, T-3) was explicitly designed and built for exactly
+this shape — "A mission this endpoint already advanced to VERIFY can still accept a
+second operator-supplied candidate as long as no verification has run yet ... exactly
+the shape the D7 gate's acceptance criteria need" — and already had Django-test-client
+coverage proving it (`test_operator_candidate_submission.py`), but no prior *live*
+rehearsal had ever actually driven this shape through the real HTTP API against a
+real, live-discovered finding. This run does, for the first time.
+
+**Headline 2 — VERIFIED reached, live, for the first time in this project's rehearsal
+history, and REJECTED reached in the SAME mission.** Mission
+`d6897640-8212-45d8-9914-b3e0d1ae0c52`: a real, live `FUZZ` campaign (4400 executions,
+0.3s) found the seeded ASan heap-buffer-overflow and — D-106/D-109's fix, confirmed
+live for the first time by this run — automatically persisted a real, durable
+`Reproducer` row alongside the `Finding` (sha256 `31156fbf79ba6caf...`, 54 bytes, a
+real `PKTC`-format crash input). Two operator-supplied candidates were submitted
+against that one mission before verification started (`candidate-a-correct-bounds-
+fix.patch` then `candidate-b-rejected-crash-only-fix.patch`, both policy-`ACCEPTED`):
+candidate A's real `VERIFY` job reached `COMPILE: PASS`, `REPRODUCER_ELIMINATED: PASS`
+("Crash reproducer replay completed without a sanitizer fault" — against the real,
+self-discovered reproducer, not a fixture), `REGRESSION_PRESERVED: PASS` (8/8) →
+**`VERIFIED`**. Candidate B's real `VERIFY` job reached the identical first two gates
+`PASS` and then `REGRESSION_PRESERVED: FAIL` ("ctest: Regression suite failed: 1 of 8
+tests failed. exit=8") → **`REJECTED`**. Mission's own terminal state: `VERIFIED`
+(any-`VERIFIED`-wins reduction, D-090). This is the first time this project's D7 gate
+has reached `VERIFIED` at all, in any rehearsal, live or otherwise — D-098 and D-105
+each independently hit the identical `REPRODUCER_ELIMINATED: NOT_RUN` wall twice
+before this fix landed — and the first time both verdicts have been produced by one
+mission's real pipeline against a real, self-discovered finding, driven through the
+real HTTP API. Mission wall-clock time, orchestrator-driven pipeline only (authorize →
+baseline → fuzz → correlate → patch → verify ×2 → export → teardown): **47.75
+seconds**, unattended.
+
+**Headline 3 — evidence bundle exported and independently read back, to the same
+rigor D-105/D-111 established.** `POST /missions/{id}/export` returned `202` with a
+real, content-addressed `evidence_bundle` artifact. This seat `docker cp`'d the actual
+bytes out of `brahmadatta-control-api`'s `ARTIFACT_ROOT` store (not trusted from the
+`202`), independently recomputed its sha256 with `shasum -a 256` (a separate hash
+implementation from anything in this codebase): matched the API's own reported digest
+exactly. Extracted the tarball (5 files) and independently recomputed all 5 files'
+sha256 against the bundle's own `manifest.json`: 5/5 matched. Read `report.md` in full
+as a reviewer who did not build this system: complete, honest — both candidates
+correctly labelled `OPERATOR_SUPPLIED`, never claiming model-generated provenance
+(CEO doc §3's own honesty constraint on step 7, upheld); an honest "gates that did not
+run and why" section (`STATIC_DELTA`/`RENEWED_FUZZING`, named as cut from the
+seven-day build); an honest substitutions section naming the subprocess-jail isolation
+posture and both operator-supplied-patch substitutions by name; a resource-usage
+section that discloses its own zero values are "not measured," not real zero usage.
+
+**Two new, small blockers found and fixed live this run — both infra/config, not
+application code, both squarely within this seat's authority to fix directly.**
+
+1. **Stale `SANDBOX_FUZZ_IMAGE` digest** in both `.env` and `apps/control-api/.env` —
+   pointed at an image digest that no longer existed locally (config drift from an
+   earlier session's build; the real, locally-built `brahmadatta-fuzz-toolchain:local`
+   image's actual digest, confirmed via `docker image inspect`, no longer matched
+   either file). First mission's `FUZZ` job failed: `docker: Error response from
+   daemon: pull access denied ...`. Fixed by re-running `infrastructure/scripts/
+   build-fuzz-image.sh` to get the real current digest
+   (`sha256:9c6c226453415ccd5efc617dcfd606b94cd0caa9c2029ffca565195a1dd4f347`),
+   updating both `.env` files, restarting `fuzz-worker` (bare-metal, reads env at
+   start). Confirmed fixed live: the next mission's `FUZZ` job succeeded immediately
+   (4400 executions, 1 unique crash).
+
+2. **`MODEL_ENDPOINT` left unset**, so the live-model `PATCH_GENERATE` call silently
+   fell back to `SMALL_MODEL_BASE_URL` (`http://model-host:11434`, no `/api` suffix)
+   instead of the coded default (`gateway.ollama.DEFAULT_OLLAMA_ENDPOINT`,
+   `http://127.0.0.1:11434/api`) — `model-host-auth`'s nginx sidecar has no route at
+   the bare host root, only under `/api/*`, so every live-model call got a real `404`,
+   *after* correctly clearing D-107/D-108's bearer-token gate (confirmed independently,
+   a third time across this project's history, in this session). Root-caused by
+   reading `gateway/ollama.py::_endpoint_url` and `patch_generate_executor.py::
+   _build_live_backend`'s `endpoint=settings.endpoint or DEFAULT_OLLAMA_ENDPOINT` — the
+   `or` never triggers once `SMALL_MODEL_BASE_URL`'s fallback populates
+   `settings.endpoint` with a non-`/api` value. Fixed by setting `MODEL_ENDPOINT=
+   http://model-host:11434/api` explicitly in `.env` — the documented override
+   variable (`.env.example`: "Blank here falls back to `SMALL_MODEL_BASE_URL`"),
+   simply never set to a working value in this environment. Confirmed with a manual
+   call replicating the real gateway code's own endpoint-construction shape and the
+   real bearer token: the request now clears both the auth gate and the routing bug
+   and reaches Ollama itself, which returned a real, structured `500` —
+   `"model requires more system memory (8.4 GiB) than is available (7.0 GiB)"`. This
+   is the identical host-memory ceiling D-110's own independent `cybersecurity` review
+   hit in its own sandbox (`docker info`: `Total Memory: 7.653GiB` on this Docker
+   Desktop VM; the host has 16GiB physical, so headroom exists in principle, but
+   raising the VM's allocation requires editing Docker Desktop's own
+   `settings-store.json` and restarting the entire Docker Desktop application — a
+   machine-wide, CLI-unsupported change that would tear down every running container
+   on this host mid-rehearsal). **Judged not worth the risk to the rest of this run's
+   ~75-minute budget and explicitly not attempted** — the identical constraint was
+   already accepted by D-110's own independent security review as expected
+   environmental variance, not something to fix, and this run reached strictly further
+   than D-110 needed to (a real live mission's `PATCH_GENERATE` job reaching Ollama
+   itself, not just a manual verification call).
+
+Neither blocker touched application code — both are plain environment-variable/build-
+artifact drift, squarely devops/infra scope, and both are now fixed and confirmed live.
+
+**Live-model attempt — genuinely tried first, per this task's own instruction, reached
+further than any prior rehearsal.** Tried on a separate mission
+(`e588c47f-31e2-4f12-8776-e16099155b40`, default unrestricted worker). `BASELINE`/
+`FUZZ`/`CORRELATE` all succeeded live (8/8 `ctest`; 4979 executions, 1 unique crash).
+`PATCH_GENERATE` reached Ollama itself for the first time in this project's history
+(past D-107/D-108's bearer-token gate, cleanly, no `401`) before hitting blocker 2
+above as a `404`, exhausted its single attempt
+(`MAX_ATTEMPTS_BY_KIND[PATCH_GENERATE]==1`), and the mission auto-transitioned to
+`HUMAN_REVIEW` — a dead-end state (`TRANSITIONS[HUMAN_REVIEW]==frozenset()`, D-090's
+own documented design) the operator-candidate endpoint correctly refuses to accept a
+submission against. Left in `HUMAN_REVIEW` rather than resurrected (this data point is
+itself what let blocker 2 be diagnosed); fell back to the operator-candidate endpoint
+on a **third**, fresh mission for the one that actually produced the gate's two
+verdicts — the same devops-scoped topology control D-098/D-105 established
+(`CONTROL_API_WORKER_CMD` restarted excluding `PATCH_GENERATE` so the mission parks
+cleanly in `PATCH` instead of crashing forward into another dead end), reverted to the
+default, unrestricted command in `.env` after this run, matching D-098/D-105's own
+convention of not persisting a run-scoped workaround.
+
+**Nine-step demo, actual outcome.** 1. Target — pktcfg, PASS. 2. Authorize + snapshot
+— PASS, `#207`'s fix reconfirmed live for a fifth time across this project's
+rehearsal history (mission-scoped digest reuse, no `409`, across this run's three
+missions). 3. Baseline — PASS, 8/8 `ctest`, live. 4. Finding — PASS, real ASan
+heap-buffer-overflow from a real live `FUZZ` campaign, **plus a real, durable
+`Reproducer` row** (first time this pipeline has ever produced one, live). 5. Patch
+candidates — PASS via the operator-candidate endpoint, both submitted against the
+SAME mission before verification started. 6. Verdict A (Verified) + Verdict B
+(Rejected), same mission — **PASS, first time ever, either verdict, in this project's
+rehearsal history**. 7. Evidence export — PASS. 8. Evidence read-back — PASS,
+independently checksum-verified, 5/5 files, read in full. 9. Teardown — PASS: zero
+`brahmadatta-*` containers, zero registered `brahmadatta` compose projects, zero
+`brahmadatta` docker networks, zero stray host processes, after an explicit 60-second
+settle-wait (per D-099/D-105's own lesson that an instantaneous check can look clean
+and still have stragglers) — see `d7-gate-50-live-run-2026-08-20-run6-docker-ps-a-
+after-teardown.txt`, identical to the pre-run baseline (`infra-postgres-1` plus four
+stopped, unrelated `good_marketer_web-*`/`ollama` containers from a different project).
+
+**Explicit gate verdict, posted to issue #50** — **PASS on every acceptance criterion
+this seat can execute or verify**, with one standing, named, out-of-scope caveat:
+
+- [x] Unattended end-to-end run of the nine-step minimum viable demo, timed, output
+      attached
+- [x] Both verdicts produced in that single run — one `Verified`, one `Rejected` — **in
+      one mission**, the more rigorous reading (see Headline 1)
+- [x] Evidence bundle exported and readable by someone who did not build it
+- [x] Sandbox and model-host teardown confirmed, zero strays — `docker ps -a` output
+      attached
+- [ ] **Fallback recording exists as a complete playable file** — NOT attempted, same
+      as every prior rehearsal (D-084 through D-105). No agent in any of these six
+      sessions has screen-recording capability. This is a standing human task, not a
+      technical defect, and this task's own dispatch explicitly named it as out of
+      scope for this run ("Fallback recording remains excluded — no agent this session
+      has screen-recording capability. Note it's still outstanding, don't attempt it.")
+- [x] Explicit verdict recorded on this issue and here in `.project/decisions.md`
+
+**Recommendation, stated plainly per this task's own explicit instruction not to hedge
+this into vagueness.** Every acceptance criterion for #50 that a coding-agent session
+can execute now passes, live, independently verified, not narrated. The one remaining
+gap — the fallback recording — is a named, standing, human-only task that no session
+in this project's history has had the capability to close, and closing it does not
+require any further engineering work on the pipeline itself. **Recommend the
+orchestrating session close #50 with that one named, standing human caveat recorded
+plainly** — recording the fallback video is Mahatav's own next action, not a blocker
+to the pipeline's own readiness. This is a real milestone: five prior live rehearsals
+(D-084, D-085, D-098, D-099, D-105) each found and reported a genuine blocker that
+capped this gate short of a full pass; this run found two new small ones, fixed both
+live, and is the first to actually clear every criterion this seat has authority over.
+Not this seat's call to close the issue itself — that is the orchestrating session's,
+per this task's own standing instruction.
+
+**Options considered for how far to push this run** — same framing D-098/D-105 both
+used: (a) stop at the first blocker (the stale `SANDBOX_FUZZ_IMAGE` digest) and
+report; (b) fix what is genuinely within devops authority (plain env/build-artifact
+drift, no application code) and keep going. **Chosen: (b)**, for the same reason
+D-098/D-105 both gave, and because doing so is what let this run reach and confirm,
+for the first time, the two criteria (`VERIFIED` reachability and the one-mission
+both-verdicts shape) every prior rehearsal had left unconfirmed.
+
+**Cost implications** — none beyond the existing image-rebuild/compute costs this
+project already accounts for; no new infrastructure introduced. The Docker Desktop VM
+memory ceiling that blocked the live-model verdict, if a future session wants to close
+it, would cost a scheduled Docker Desktop restart (not chased here) and no other
+infrastructure spend — codellama:7b-instruct is already pre-staged locally.
+
+**Security implications** — none new. No isolation, auth, sandboxing, or
+secrets-handling code was touched by either of this run's two fixes (both are
+environment-variable values / a rebuilt local image digest). The live-model attempt
+that reached Ollama itself did so *because* D-107/D-108's bearer-token fix is correctly
+threaded and cleared the gate as designed — a confirmation of that fix's own security
+posture holding under a third, independent live exercise, not a new finding.
+
+**Scalability implications** — none; every finding this run is a correctness/
+completeness/config-drift issue, not scale-sensitive.
+
+**Final approval authority** — CTO/orchestrating session, for the close-#50 decision
+itself (recommended above, not executed here); this seat, for the live-run findings,
+evidence, verdict, and the two infra fixes recorded here.
+
+---
