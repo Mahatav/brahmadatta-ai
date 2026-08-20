@@ -23,6 +23,24 @@ COMPOSE_FILE="${REPO_ROOT}/infrastructure/compose/docker-compose.yml"
 fail() { printf '\033[31mblocked:\033[0m %s\n' "$1" >&2; exit 1; }
 note() { printf '  %s\n' "$1"; }
 
+# docker-compose.yml pins `name: brahmadatta`, so two concurrent checkouts
+# bringing this stack up independently silently share the same containers,
+# networks, and named volumes — one session's rebuild/teardown yanks resources
+# out from under the other. Found colliding for real between two concurrent
+# agent worktrees, D-098/D-099, 2026-08-19. A linked worktree's git-dir differs
+# from the repo's git-common-dir; the primary checkout's does not, so this only
+# renames the project for a worktree, leaving the primary checkout's existing
+# `brahmadatta-*` container/volume names (and everything that already assumes
+# them) unchanged.
+if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
+  git_dir="$(git -C "${REPO_ROOT}" rev-parse --git-dir)"
+  common_dir="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir)"
+  if [[ "${git_dir}" != "${common_dir}" ]]; then
+    export COMPOSE_PROJECT_NAME="brahmadatta-$(printf '%s' "${REPO_ROOT}" | shasum | cut -c1-8)"
+    note "linked worktree detected — isolated compose project: ${COMPOSE_PROJECT_NAME}"
+  fi
+fi
+
 echo "== preflight"
 
 command -v docker >/dev/null || fail "docker is not installed"
