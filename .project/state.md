@@ -4,9 +4,41 @@
 |---|---|
 | Repository | https://github.com/Mahatav/brahmadatta-ai (private) |
 | Board | https://github.com/users/Mahatav/projects/3 |
-| Deadline | **2026-08-20** · CEO target **2026-08-15** |
-| Current phase | 5 — implementation, in closeout (D5/D6 done, D7 gate not yet run live) |
-| Last updated | 2026-08-15 (reconciliation pass) |
+| Deadline | **≈2026-08-29** (D-086: runway corrected from the stale 2026-08-20 date, ~10 days from 2026-08-19) |
+| Current phase | 5/7 — backend/orchestration pipeline D7-gate-complete; Command Center has a real mission-control surface (D-100) but the full 5-panel visual rebuild (D-086 item 2) has not started |
+| Last updated | 2026-08-20 — **#50 (D7 gate) closed, PASS** |
+
+## #50 closed — the headline result
+
+Six live rehearsals (D-084, D-085, D-098, D-099, D-105, D-112), each finding and closing
+exactly one real blocker: mission-driver wiring (#168) → BASELINE toolchain → VERIFY's
+missing `git` → PATCH_GENERATE's path/mount gap → evidence-export crash → PATCH_GENERATE's
+bearer-token routing → the reproducer-persistence gap that had capped every verdict at
+`HUMAN_REVIEW_REQUIRED` regardless of patch correctness (D-106/D-109, independently
+cybersecurity- and QA-cleared, D-110/D-111).
+
+Run 6 (D-112) reached **PASS on every acceptance criterion an engineering session can
+execute**: one mission producing both a live `VERIFIED` and a live `REJECTED` verdict
+against a real, self-discovered fuzzing finding (first `VERIFIED` in this project's
+history), evidence bundle exported and independently re-verified (sha256, re-checked a
+second time by the orchestrating session itself before closing the issue), zero-stray
+teardown. Closed 2026-08-20, with one standing, named exception: **the fallback
+recording is not something any coding-agent session can produce** — this remains
+Mahatav's own next action, not an engineering gap.
+
+## What's next
+
+Per D-086's priority order (CEO ruling on the extended runway): the Command Center's
+full visual rebuild against the approved rev-2 design spec (`docs/09-company/
+04-design-system.md`) — the Core, Stage Timeline, Findings rail, Candidate Compare
+overlay, Verdict panel, resource ledger — is the next major body of work, now that the
+backend it needs to render against is fully proven live. Then the three `#57` timed
+rehearsals, the reopened CUT items in D-086's stated order, and `#60` code freeze with a
+real reserve held at the tail. `#59` (finale roster) is answered: Mahatav + team,
+combined demo-operator/incident-lead role. The two small non-blocking follow-ups filed
+during today's reviews (#222, #224) and the hardening backlog from the earlier 16-finding
+triage (`docs/09-company/14-runway-task-plan-2026-08-19.md` §3) remain open, lower
+priority than the visual rebuild per D-086's own ordering.
 
 ## What this update is
 
