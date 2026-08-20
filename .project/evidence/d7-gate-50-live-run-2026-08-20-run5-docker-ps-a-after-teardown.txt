@@ -1,0 +1,6 @@
+CONTAINER ID   IMAGE                        COMMAND                  CREATED       STATUS                     PORTS                            NAMES
+c41f0cb8c588   postgres:16                  "docker-entrypoint.s…"   3 weeks ago   Up 3 weeks                 127.0.0.1:5432->5432/tcp         infra-postgres-1
+6c11fb3477d0   good_marketer_web-frontend   "/docker-entrypoint.…"   4 weeks ago   Exited (255) 4 weeks ago   80/tcp, 0.0.0.0:4321->4321/tcp   good_marketer_web-frontend-1
+9840853ce366   good_marketer_web-backend    "sh -c 'python manag…"   4 weeks ago   Exited (255) 4 weeks ago   0.0.0.0:8000->8000/tcp           good_marketer_web-backend-1
+c6cef41a12b7   ollama/ollama:latest         "/bin/ollama pull ll…"   5 weeks ago   Exited (0) 4 weeks ago                                      good_marketer_web-ollama-pull-1
+8978144d0295   ollama/ollama:latest         "/bin/ollama serve"      5 weeks ago   Exited (255) 4 weeks ago   0.0.0.0:11434->11434/tcp         good_marketer_web-ollama-1
