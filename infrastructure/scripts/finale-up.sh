@@ -18,6 +18,19 @@ COMPOSE_FILE="${REPO_ROOT}/infrastructure/compose/docker-compose.finale.yml"
 fail() { printf '\033[31mblocked:\033[0m %s\n' "$1" >&2; exit 1; }
 note() { printf '  %s\n' "$1"; }
 
+# See dev-up.sh's matching comment: docker-compose.finale.yml pins
+# `name: brahmadatta-finale`, so a worktree checkout bringing this up
+# independently of the primary checkout would silently share containers,
+# networks, and named volumes with it. Same fix, same reasoning.
+if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
+  git_dir="$(git -C "${REPO_ROOT}" rev-parse --git-dir)"
+  common_dir="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir)"
+  if [[ "${git_dir}" != "${common_dir}" ]]; then
+    export COMPOSE_PROJECT_NAME="brahmadatta-finale-$(printf '%s' "${REPO_ROOT}" | shasum | cut -c1-8)"
+    note "linked worktree detected — isolated compose project: ${COMPOSE_PROJECT_NAME}"
+  fi
+fi
+
 echo "== finale preflight"
 
 docker info >/dev/null 2>&1 || fail "the docker daemon is not running"
