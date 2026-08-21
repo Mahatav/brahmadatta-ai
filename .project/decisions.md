@@ -12996,3 +12996,120 @@ merge, and this seat is also the one that just finished asserting its own fix wo
 **Final approval authority** — CTO, for the merge decision (or standing Claude-merge
 authority if no reviewer picks it up); this seat, for the fix and its verification
 record above.
+
+---
+
+## D-121 — Wired the already-designed D-075/SEC-50 model-host into the running dev stack
+so PATCH_GENERATE genuinely calls the live model, plus a real bug found and fixed in the
+gateway's HTTP chokepoint that the exercise surfaced · 2026-08-21 · ai-ml-engineer,
+verified live against `brahmadatta-bfe5a38c`
+
+**Context.** #57 needs three timed finale rehearsals to reach a real VERIFIED/REJECTED
+verdict. Every rehearsal was failing at PATCH with `MODEL_GATEWAY_MODE=live but
+MODEL_ENDPOINT is empty` because the dev compose stack never started the `model`
+profile (`model-host` + `model-host-auth`, D-075/SEC-50's bearer-token-gated Ollama)
+and `control-api`/`worker` were never pointed at it. This was environment/wiring work
+against an already-reviewed component (D-075), not new architecture.
+
+**Decision.** Two changes, both scoped to making the existing design run:
+
+1. **Wiring** (`.env`, not committed — gitignored): `MODEL_SERVICE_NAMES=model-host`
+   (declares the compose service name to `gateway.endpoint_policy`'s allowlist, which
+   refuses undeclared bare labels by design), `MODEL_ENDPOINT=http://model-host:11434/api`
+   (the `model-host-auth` sidecar's externally-visible address, per D-075's own comments —
+   Ollama itself is loopback-only inside that same namespace), and a freshly generated
+   `MODEL_HOST_BEARER_TOKEN` (`secrets.token_urlsafe(64)`, the file's own documented
+   convention). Brought up `docker compose -p brahmadatta-bfe5a38c -f
+   infrastructure/compose/docker-compose.yml --env-file .env --profile model up -d
+   model-host model-host-auth`, force-recreated `control-api`/`worker` so the new env
+   actually took effect (`restart` does not reread `env_file`), and staged
+   `codellama:7b-instruct` into the shared `ollama-models` named volume via a *separate*,
+   temporary, non-compose container on the default bridge network — `model-host` itself
+   is deliberately on an `internal: true` network with no egress (C4), so it cannot pull
+   from `registry.ollama.ai` directly, and was never supposed to; the compose file's own
+   comment says the pull "happens explicitly on a prepared volume before the judged run."
+2. **Bug fix** (`services/model-gateway/gateway/client.py`, new test
+   `gateway/tests/test_client_transport_errors.py`, 7 new tests, all passing): live
+   verification (below) hit a real `TimeoutError` from `urlopen` on the first genuine
+   model call. `LiveGenerationError`'s own docstring already promises "timeout, OOM,
+   unreachable backend, bad output" all surface as `GatewayError`s, but the
+   implementation never kept that promise for the transport-failure cases — a raw
+   `TimeoutError`/`URLError`/`OSError` passed straight through `post_json`/`get_json`/
+   `iter_response_lines`, was **not** caught by `_generate_with_ladder`'s `except
+   GatewayError` (`patch_generate_executor.py`), and crashed the entire `PATCH_GENERATE`
+   job instead of being retried per the documented three-rung degradation ladder. Fixed
+   by wrapping those three exception types into `LiveGenerationError` at the one HTTP
+   chokepoint this package has (`gateway/client.py`'s own stated purpose). Re-verified
+   live after the fix: a genuine 300s timeout was caught, retried across all three rungs
+   (each logged as a real 504 at the `model-host-auth` sidecar), and recorded as a clean
+   `"attempt 1/10: LiveGenerationError: ... did not respond: timed out after 300s"` event
+   instead of a worker-process traceback.
+
+**Options considered for the bug fix.**
+- **Wrap at the chokepoint (chosen).** One place, matches the module's own stated
+  purpose ("the model gateway's single HTTP egress chokepoint"), matches
+  `LiveGenerationError`'s existing docstring promise, needs no change to the executor,
+  the ladder, or the Ollama backend. Con: `get_json`/`iter_response_lines` were changed
+  too though only `post_json` was exercised live — mitigated by giving all three the
+  same 7-test suite rather than assuming symmetry.
+- **Catch at each backend call site instead** (`gateway/ollama.py`). Con: every future
+  live backend would have to remember to do this itself; the whole point of a chokepoint
+  module is that callers don't have to.
+- **Catch inside the executor's ladder** (`patch_generate_executor.py`). Con: control-api
+  reaching into transport-exception types that belong to the gateway package's own HTTP
+  layer, and D-062/T4-lite's own scope explicitly left that package's internals alone —
+  this fix keeps that boundary rather than reopening it.
+
+**Not done, flagged instead of worked around.** The model genuinely cannot complete a
+chat generation within `OllamaCodeLlamaBackend`'s 300s `timeout_sec` on this sandbox's
+CPU-only compute — confirmed by three consecutive real 300s timeouts (cold load ~143-187s
+alone, warm generation still exceeding 300s) against the same prompt. `patch_generation_
+attempts` defaults to 10; at 3 ladder rungs × 300s worst case per attempt, a single
+mission's PATCH stage could take hours here. This is *not* fixed in this pass — raising
+`timeout_sec` (a dataclass default, not currently env-configurable) or lowering
+`patch_generation_attempts` for rehearsal fixtures is a product/timing tradeoff, and
+CLAUDE.md's own stack table says the intended path is self-hosted models on **rented
+GPUs**, not CPU — so this may be a dev-sandbox-only constraint rather than a real finale
+blocker. Flagged for `cto`/`competition-strategist` to size against #57's actual timed
+rehearsal budget and the real finale hardware, not decided here.
+
+**Also flagged, not fixed.** No process anywhere in this dev stack runs `manage.py
+run_orchestrator` — the one process that reads terminal `Job` rows and writes
+`Mission.state` (`run_worker` deliberately never does, by design). Missions were stuck at
+`VALIDATING` forever until one was started manually (`docker compose exec -d control-api
+python manage.py run_orchestrator`) for this verification. That process is not supervised
+by compose, has no restart policy, and does not survive `control-api` being recreated —
+neither `docker-compose.yml` nor `docker-compose.finale.yml` defines an orchestrator
+service. #57's rehearsals need this running and durable; whether it becomes its own
+compose service, a supervisor inside `control-api`, or something else is a
+`devops-engineer`/`software-architect` call, not made here.
+
+**Cost implications.** None beyond disk (~3.8GB for the pulled model, already-provisioned
+compute) and the CPU time already being spent by this dev stack.
+
+**Security implications.** None widened. `MODEL_SERVICE_NAMES=model-host` declares
+exactly the one compose service name the D-075 topology already names in its own
+comments; the bearer token follows the existing generation convention and is
+compose-only-`.env`, gitignored, never placed in `apps/control-api/.env.example`
+(preserving the D-075 property that `fuzz-worker`'s wholesale `.env` source never picks
+it up). Verified live: an unauthenticated request to `model-host:11434` gets a real 401;
+the same request with the token gets a real 200 with the model list. The `client.py` fix
+narrows failure modes (a hung/unreachable model no longer crashes the worker process) and
+does not touch endpoint-policy, auth, or the sandbox — no `cybersecurity` re-review
+requested for the wiring; the `client.py` diff is small, additive, and test-covered, but
+per house rules on security-sensitive changes, still routed through the standard PR
+review chain rather than merged on this report alone.
+
+**Scalability implications.** None — this is dev-stack wiring, not a topology change.
+
+**Recommendation.** Merge the `client.py`/test diff through the normal PR review chain
+(`engineering-manager`, then `cybersecurity` given it touches the model-gateway's egress
+chokepoint even though behavior only narrows). Route the 300s-timeout/attempt-budget
+question and the `run_orchestrator` durability gap to `cto` before the first real #57
+rehearsal — both will otherwise reproduce the same failure shapes found here.
+
+**Final approval authority** — CTO (timeout/attempt-budget tradeoff, technical); CTO or
+devops-engineer (orchestrator process durability, technical infrastructure). The
+wiring and bug-fix diff themselves are ai-ml-engineer's own authority per scope (model
+gateway selection/config, output validation and retry behavior) and do not require
+escalation.
