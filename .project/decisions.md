@@ -12736,3 +12736,87 @@ re-verification; `backend-developer`/`engineering-manager`, for the fix itself;
 `CEO`/`PM` jointly, in writing, if this rejection is to be overridden and merged with
 BUG-2 still open.
 ---
+
+## D-119 — Two more real, live-found bugs closed in the Command Center rebuild: SSR
+hydration mismatch on the UTC clock, and a Stage Timeline badge-derivation bug hiding six
+of ten completed stages · 2026-08-21 · self-directed verification (no subagent dispatch
+available — account-wide usage limit; verified directly via a standalone Playwright
+project against the real running stack, `demo/repositories/pktcfg` fixture, and a
+real curl-driven mission)
+
+**Context.** D-118 closed BUG-2 (backend triage_stub schema gap) and left the rebuild
+otherwise independently verified but not yet re-checked end-to-end against a real,
+running mission after that fix landed. With subagent dispatch unavailable, verification
+continued directly: a standalone Playwright/Chromium project was set up in scratchpad
+(outside the sandboxed MCP browser tool, which cannot reach `localhost` here), and a
+real mission was driven start-to-finish through the actual REST API (operator bearer
+token read from the running `control-api` container's env, `pktcfg` fixture snapshot via
+the documented digest-mismatch-probe mechanism, full `authorize → snapshot → preflight →
+start` sequence) rather than against fixtures or mocks.
+
+**BUG-3 (found first).** A fresh page load intermittently produced a React hydration
+error: `TopStrip.tsx`'s `useState(() => new Date())` initializer ran once during Astro's
+SSR pass and once again during client hydration, at two different real wall-clock
+moments — whenever the two straddled a second boundary, React discarded the whole
+subtree. Not caught by any prior QA round because it only reproduces on that timing
+race. **Fix:** `now` starts `null` (deterministic on both SSR and first client render);
+the real `Date` is set inside the existing `useEffect`, which never runs during SSR.
+`formatUtcClock`/the `elapsed` calculation were already or are now null-safe. Verified
+fixed with 5 consecutive fresh headless page loads, 0 console/page errors on any of them
+(previously reproduced intermittently; SSR/hydration races don't guarantee reproduction
+every load, so absence over 5 tries plus a clear mechanistic fix is the standard of
+evidence here, not a single clean run).
+
+**BUG-4 (found second, more significant).** Driving a real mission through to a terminal
+state (`FAILED`, at `PATCH`/REMEDIATE — the live model gateway is unconfigured in this
+dev environment, `MODEL_ENDPOINT` empty under `MODEL_GATEWAY_MODE=live`, unrelated to
+this bug) showed the Stage Timeline stuck showing `AUTHORIZE`, `INGEST`, `BASELINE`,
+`STRESS_TEST` and `CORRELATE` all as `[ · QUEUED ]` despite the mission having genuinely
+completed all of them (confirmed against `GET /missions/{id}` and the raw
+`/events/replay` log — `stages_completed` and the ordered event log both show real
+completion). This was not a stream-staleness artifact: it reproduced identically on a
+fully fresh page load (SSR + hydration + REST snapshot, no live SSE involved).
+
+Root cause, found by reading the raw event log directly: the orchestrator's own
+`STATE_CHANGED` transition events are tagged with the stage being *entered*, not the one
+that just finished (e.g. the event reporting `"BASELINE job ... -> SUCCEEDED"` is tagged
+`stage: ANALYZE`, not `stage: BASELINE` — a consistent, apparently deliberate backend
+convention, not itself a bug). `StageTimeline.tsx`'s `deriveRowState` only marked a row
+`ok` via `snapshot.completedStages`, which `store.ts`'s `reduceMissionSnapshot` only ever
+populates from an `event.type === 'STAGE_COMPLETED'`-typed event tagged to that exact
+stage — and only the ANALYZE/TRIAGE stage's orchestrator path emits one of those today.
+Every other stage's completion was real but had no event `deriveRowState` recognized as
+proof of it.
+
+**Fix (frontend-only, `StageTimeline.tsx`):** any row strictly before the mission's
+current stage index in `STAGE_ROWS` order is now also treated as `ok` — the backend
+guarantees `snapshot.stage` only advances forward through that order, so a later stage
+having been reached is itself sufficient proof every earlier one completed. This is
+additive to the existing `completedStages` check (never removes a signal, only adds
+one), leaves the `FAILED`/`not_reached`/`running`/`VERIFY`-terminal branches untouched,
+and required no backend or event-schema change — deliberately, since `event.stage`'s
+existing "stage being entered" meaning is a system-wide convention other consumers
+(worker dispatch, evidence export grouping) may depend on, and re-defining it globally
+was both out of scope for this rebuild and a materially larger, riskier change than the
+UI fix actually needed.
+
+**Verification.** Both fixes confirmed against the same real mission
+(`7dd9849f-e45e-4db6-9a7b-bef66737bff2`) before and after: pre-fix, 5 of 10 timeline rows
+wrongly `QUEUED`; post-fix, all 10 rows match the real backend state exactly
+(`AUTHORIZE`/`INGEST`/`BASELINE`/`ANALYZE`/`STRESS_TEST`/`CORRELATE` → `OK`, `REMEDIATE`
+→ `FAIL` with the real model-gateway-misconfigured message, `VERIFY`/`EXPORT_EVIDENCE` →
+`NOT REACHED`, `TEARDOWN` → `OK`). Full Playwright suite re-run clean after both fixes:
+Core SVG present with exactly 18 paths (6 arc-defining + 12 Kavacha plates, §7 — the
+verification script's own prior 6-path assertion was a false-positive bug in the check,
+not the app, and was corrected in the same pass), zero glow/gradient elements, gate
+matrix rows non-overlapping, multiple distinct live mission states observed over time,
+zero console errors across the whole flow. `npm run check` clean, 0 errors/warnings/hints
+across all 42 files, both times.
+
+**Recommendation.** Both fixes are small, surgical, and independently verified against
+the real running stack rather than mocks — proceed to commit, then seek independent
+review (`cybersecurity`/`qa-engineer`) before merge per standing project rules, subagent
+availability permitting; continue direct verification in the meantime if it is not.
+
+**Final approval authority** — pending independent review per the branch's standing
+requirement; this entry records direct self-verification only, not a substitute for it.

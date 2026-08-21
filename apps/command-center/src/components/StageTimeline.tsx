@@ -129,6 +129,20 @@ function deriveRowState(stage: MissionStage, snapshot: MissionSnapshot, index: n
   if (snapshot.stage === stage) {
     return 'running';
   }
+  // A `STATE_CHANGED` transition event is tagged with the stage it is entering, not the one it
+  // just finished (the orchestrator's own convention — see the message text on e.g. the
+  // BASELINE->ANALYZE transition, which reports "BASELINE job ... -> SUCCEEDED" while tagged
+  // `stage: ANALYZE`). Only a handful of stages (ANALYZE/TRIAGE today) additionally emit a
+  // dedicated `STAGE_COMPLETED` event tagged to themselves, so `completedStages` above is
+  // incomplete for the rest. Since the backend only ever advances `snapshot.stage` forward
+  // through `STAGE_ROWS` order, any row strictly before the mission's current stage has
+  // necessarily already completed — found live 2026-08-21 via a real mission run showing
+  // AUTHORIZE/INGEST/BASELINE/STRESS_TEST/CORRELATE stuck at QUEUED despite the mission having
+  // reached PATCH.
+  const currentIndex = snapshot.stage ? STAGE_ROWS.findIndex((row) => row.stage === snapshot.stage) : -1;
+  if (currentIndex >= 0 && index < currentIndex) {
+    return 'ok';
+  }
   return 'queued';
 }
 

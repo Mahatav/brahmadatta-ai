@@ -21,15 +21,26 @@ export function TopStrip({
   activeMissionId: string | null;
   controlApiReachable: boolean;
 }) {
-  const [now, setNow] = useState(() => new Date());
+  // `now` starts `null`, not `new Date()`. This component is SSR-rendered (Astro), then
+  // hydrated client-side — two separate calls to `new Date()` at two different real
+  // moments. Whenever the wall-clock second ticks over between the server's render and
+  // the client's first render, React sees mismatched HTML on hydration and discards the
+  // whole subtree (a real, intermittent bug found live 2026-08-21: not caught by any
+  // prior QA pass because it only reproduces when the two renders straddle a second
+  // boundary). `null` is deterministic on both server and client, so the first client
+  // render always matches the SSR output; the real clock value is set a moment later
+  // inside `useEffect`, which never runs during SSR — that's a normal post-mount client
+  // update, not a hydration mismatch.
+  const [now, setNow] = useState<Date | null>(null);
 
   useEffect(() => {
+    setNow(new Date());
     const interval = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(interval);
   }, []);
 
   const stateChip = missionStateChip(snapshot, streamState, activeMissionId);
-  const elapsed = snapshot.firstTimestamp
+  const elapsed = now && snapshot.firstTimestamp
     ? formatDurationSeconds((now.getTime() - Date.parse(snapshot.firstTimestamp)) / 1000)
     : '—';
 
@@ -55,7 +66,7 @@ export function TopStrip({
       </div>
       <div className="bd-top-strip__clock">
         <span className="bd-chip">[ ELAPSED {elapsed} ]</span>
-        <span className="bd-chip">[ UTC {formatUtcClock(now.toISOString())} ]</span>
+        <span className="bd-chip">[ UTC {formatUtcClock(now ? now.toISOString() : null)} ]</span>
       </div>
     </header>
   );
