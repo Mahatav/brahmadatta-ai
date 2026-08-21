@@ -1,4 +1,10 @@
 import { atom } from 'nanostores';
+// Explicit `.ts` extension (`allowImportingTsExtensions` in tsconfig.json, via
+// `astro/tsconfigs/base`): a real runtime import, unlike the type-only `./schema` import below,
+// so it needs to resolve under plain `node --experimental-strip-types` too (this module is
+// exercised directly by scripts/check-mission-snapshot-hydration.mjs, Node ESM resolution has no
+// bundler-style extension inference) as well as under Astro/Vite's bundler resolution.
+import { replayMissionEvents } from '../api/client.ts';
 import { sanitizeDisplayList, sanitizeDisplayText } from '../security/renderSafety.mjs';
 import type { components } from '../api/schema';
 
@@ -33,6 +39,14 @@ export interface ReleasedResource {
   released: boolean;
 }
 
+export interface StageEventRow {
+  sequence: number;
+  timestamp: string;
+  message: string;
+}
+
+export const EVENT_WINDOW = 50;
+
 export interface LocalRepositoryContext {
   name: string;
   authorizedBy: string;
@@ -59,6 +73,24 @@ export interface MissionSnapshot {
   stage: MissionStage | null;
   completedStages: MissionStage[];
   stageProgress: Partial<Record<MissionStage, number | null>>;
+  /** Real per-stage boundary timestamps, from `STAGE_STARTED`/`STAGE_COMPLETED` events (§6.2 —
+   * the stage timeline's "00:02:11" elapsed figures are derived from these, never a client-side
+   * timer: §2.6 rule 2, "nothing advances on a timer"). Absent means genuinely unknown, rendered
+   * as the not-measured em dash rather than guessed. */
+  stageStartedAt: Partial<Record<MissionStage, string>>;
+  stageCompletedAt: Partial<Record<MissionStage, string>>;
+  /** The most recent LOG-carrying event's message observed while that stage was current. This is
+   * how the ANALYZE row ends up rendering the backend's own
+   * "no static analyzer configured in this build" string verbatim (§6.2, C8) without the
+   * frontend composing it. */
+  stageMessage: Partial<Record<MissionStage, string>>;
+  /** Bounded per-stage event log for the timeline's expandable event rows (§6.2). Capped to the
+   * most recent `EVENT_WINDOW` (50, matching `--bd-event-window` in tokens.css) entries per
+   * stage — "no windowing machinery... an expanded stage renders its most recent 50 event rows
+   * and states the count of what it is not showing." Never trimmed silently: the count of what
+   * was dropped travels alongside (see `stageEventOverflow`). */
+  stageEvents: Partial<Record<MissionStage, StageEventRow[]>>;
+  stageEventOverflow: Partial<Record<MissionStage, number>>;
   repositoryRef: string | null;
   snapshotSha256: string | null;
   commitSha: string | null;
@@ -89,6 +121,11 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   stage: null,
   completedStages: [],
   stageProgress: {},
+  stageStartedAt: {},
+  stageCompletedAt: {},
+  stageMessage: {},
+  stageEvents: {},
+  stageEventOverflow: {},
   repositoryRef: null,
   snapshotSha256: null,
   commitSha: null,
@@ -125,10 +162,158 @@ export function setActiveMissionId(missionId: string | null): void {
 export function resetMissionSnapshot(): void {
   $missionSnapshot.set(emptyMissionSnapshot);
   $latestMissionEvent.set(null);
+  $lastEventReceivedAt.set(null);
+}
+
+/** Wall-clock time (client-side `Date.now()`, not a server timestamp) the browser last actually
+ * received an event on the shared SSE connection. This is the ONLY input to the stale detector
+ * (§6.1 Degraded state, §8: "the stale detector is the one timer, and it only ever *degrades*
+ * the display"). It never advances anything — it is read by `startStaleWatcher` below to decide
+ * whether to flip `$streamState` to `'stale'`, and that is its only consumer. */
+export const $lastEventReceivedAt = atom<number | null>(null);
+
+/**
+ * The one place any event — live SSE or REST-replayed (`hydrateMissionSnapshot` below) — is
+ * actually folded into `$missionSnapshot`. Two guards make it safe for both sources to call
+ * this for overlapping data without coordinating with each other:
+ *
+ * 1. Cross-mission guard: if the store already belongs to a different mission than this event
+ *    (the operator switched missions and `resetMissionSnapshot`/a fresh `connectMissionEvents`
+ *    call moved the store on), the event is dropped. Without this, a slow REST replay response
+ *    for mission A that resolves after the operator has already switched to mission B would
+ *    fold A's event onto B's snapshot.
+ * 2. Sequence guard: `sequence` is gap-free and monotonic per mission (the replay endpoint's
+ *    own doc comment, `api/routers/missions.py`), so an event whose sequence is not newer than
+ *    what the store already reflects has already been applied — by the live stream, by a
+ *    previous replay page, or both — and re-applying it would double-append to the
+ *    non-idempotent accumulators (`stageEvents`), not just waste work.
+ */
+function applyMissionEvent(event: MissionEventEnvelope): void {
+  const current = $missionSnapshot.get();
+  if (current.missionId != null && current.missionId !== event.mission_id) {
+    return;
+  }
+  if (current.latestSequence != null && event.sequence <= current.latestSequence) {
+    return;
+  }
+  $missionSnapshot.set(reduceMissionSnapshot(current, event));
 }
 
 export function ingestMissionEvent(event: MissionEventEnvelope): void {
-  $missionSnapshot.set(reduceMissionSnapshot($missionSnapshot.get(), event));
+  $lastEventReceivedAt.set(Date.now());
+  if ($streamState.get() === 'stale') {
+    $streamState.set('open');
+  }
+  applyMissionEvent(event);
+}
+
+/** How many events `hydrateMissionSnapshot` asks for per page — matches
+ * `replay_events`'s own `le=500` ceiling (`api/routers/missions.py`) exactly, so a mission
+ * with more events than that is still fully recoverable, just over more than one round trip. */
+const REPLAY_PAGE_LIMIT = 500;
+
+/**
+ * REST-based hydration/recovery for `$missionSnapshot` (D-114 BUG-2, the rejection's BLOCKER
+ * finding). Before this function existed, the entire visual layer — Core, Stage Timeline,
+ * Findings rail, Verdict panel, Candidate Compare, Resource Ledger — had exactly one source of
+ * truth, the live SSE stream, and zero recovery path when it dropped: QA reproduced the stream
+ * failing after ~3 seconds on a real mission, live, twice, with no recovery even across a full
+ * page reload, while the mission kept progressing correctly server-side the whole time.
+ *
+ * `GET /missions/{id}/events/replay` is not a new endpoint built for this fix — it already
+ * existed as "gap recovery for the SSE stream" (`api/routers/missions.py::replay_events`),
+ * reading the same persisted `MissionEvent` log through the same schema conversion the live
+ * path uses. Folding its output through the exact same `applyMissionEvent`/
+ * `reduceMissionSnapshot` the live path uses means there is one definition of what this
+ * mission's state looks like, not a hand-reconstructed approximation stitched from several
+ * other REST resources that could drift from what live events would have produced.
+ *
+ * Resumable: starts from the current snapshot's own `latestSequence` (0 only for a mission this
+ * store has never seen), so calling it repeatedly — once on connect, then again on every tick
+ * of `startRestFallbackPoller` while the stream is unhealthy — only ever fetches the gap. Safe
+ * to race against a live SSE event landing mid-fetch: `applyMissionEvent`'s sequence guard means
+ * whichever source applies a given sequence number first wins and the other is a no-op for it.
+ *
+ * Deliberately does NOT touch `$streamState` or `$lastEventReceivedAt` — a successful REST
+ * catch-up means the DATA is fresh, not that the live connection is healthy, and the design's
+ * honest degraded-state labelling (§6.1/§8 of the design spec, explicitly praised in D-114) is
+ * preserved by keeping those two concerns orthogonal: the operator still sees `[ STREAM ERROR ]`
+ * when the stream really is down, just no longer paired with data that stopped updating three
+ * seconds into the mission.
+ */
+export async function hydrateMissionSnapshot(missionId: string, signal?: AbortSignal): Promise<void> {
+  const initial = $missionSnapshot.get();
+  let cursor = initial.missionId === missionId && initial.latestSequence != null ? initial.latestSequence : 0;
+
+  for (;;) {
+    const page = await replayMissionEvents(missionId, { sinceSequence: cursor, limit: REPLAY_PAGE_LIMIT }, signal);
+    if (page.items.length === 0) {
+      return;
+    }
+    for (const event of page.items) {
+      applyMissionEvent(event);
+      cursor = event.sequence;
+    }
+    if (page.items.length < REPLAY_PAGE_LIMIT) {
+      return;
+    }
+  }
+}
+
+/**
+ * Defense in depth for D-114 BUG-2's transport-layer half: a real, reproduced HTTP/2 framing
+ * error (`net::ERR_HTTP2_PROTOCOL_ERROR` client-side, `CURLE_HTTP2_STREAM` independently via
+ * `curl --http2`) that can leave the SSE connection cycling failed reconnects indefinitely — see
+ * the D-115 decision record for the transport-layer investigation and why this ships regardless
+ * of whether that root cause is separately fixed. While `$streamState` is anything other than a
+ * healthy live connection, this keeps `$missionSnapshot` catching up to real server state by
+ * polling the same replay endpoint `hydrateMissionSnapshot` uses on a fixed interval — turning
+ * "the stream is broken and nothing ever recovers it, reload included" into "the stream is
+ * honestly labelled degraded, and the data underneath that label keeps getting fresher." Stops
+ * being consulted the moment a real SSE event lands and flips `$streamState` off `'error'`/
+ * `'stale'` — this is a fallback path, not a replacement for the live stream, matching the same
+ * "only ever degrades/recovers the display, never fakes progress" rule `startStaleWatcher`
+ * already follows.
+ */
+export function startRestFallbackPoller(missionId: string, intervalMs = 5000): () => void {
+  const interval = window.setInterval(() => {
+    const state = $streamState.get();
+    if (state !== 'error' && state !== 'stale') {
+      return;
+    }
+    hydrateMissionSnapshot(missionId).catch(() => {
+      // A failed poll just means the next tick tries again; `$streamState` already carries the
+      // honest degraded label, so a failed catch-up attempt never claims data is fresher than
+      // it actually is.
+    });
+  }, intervalMs);
+  return () => window.clearInterval(interval);
+}
+
+/**
+ * The one timer in this product (§8, §12 build note 2). Every `--bd-stale-threshold` (10s,
+ * `tokens.css`) it checks whether an event has arrived recently; if the stream has been open for
+ * more than that with nothing on it, it flips `$streamState` to `'stale'`, which the Core, the
+ * Stage Timeline and the top strip all read to freeze their live indicators and say so (§6.1).
+ * It never sets anything to a value implying progress — only ever the stale/degraded direction,
+ * and `ingestMissionEvent` above is what clears it again on the next real event.
+ */
+export function startStaleWatcher(thresholdMs = 10000): () => void {
+  const interval = window.setInterval(() => {
+    const state = $streamState.get();
+    if (state !== 'open' && state !== 'stale') {
+      return;
+    }
+    const lastReceived = $lastEventReceivedAt.get();
+    if (lastReceived == null) {
+      return;
+    }
+    const idleFor = Date.now() - lastReceived;
+    if (idleFor > thresholdMs && state === 'open') {
+      $streamState.set('stale');
+    }
+  }, 2000);
+  return () => window.clearInterval(interval);
 }
 
 export function setMissionRepositoryContext(repositoryRef: string): void {
@@ -186,6 +371,28 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
 
   if (event.type === 'STAGE_COMPLETED' && event.stage && !snapshot.completedStages.includes(event.stage)) {
     next.completedStages = [...snapshot.completedStages, event.stage];
+  }
+
+  if (event.type === 'STAGE_STARTED' && event.stage) {
+    next.stageStartedAt = { ...snapshot.stageStartedAt, [event.stage]: event.timestamp };
+  }
+
+  if (event.type === 'STAGE_COMPLETED' && event.stage) {
+    next.stageCompletedAt = { ...snapshot.stageCompletedAt, [event.stage]: event.timestamp };
+  }
+
+  if (event.stage && event.message) {
+    next.stageMessage = { ...snapshot.stageMessage, [event.stage]: next.latestMessage };
+
+    const existing = snapshot.stageEvents[event.stage] ?? [];
+    const appended = [...existing, { sequence: event.sequence, timestamp: event.timestamp, message: next.latestMessage }];
+    const overflowBefore = snapshot.stageEventOverflow[event.stage] ?? 0;
+    if (appended.length > EVENT_WINDOW) {
+      next.stageEvents = { ...snapshot.stageEvents, [event.stage]: appended.slice(appended.length - EVENT_WINDOW) };
+      next.stageEventOverflow = { ...snapshot.stageEventOverflow, [event.stage]: overflowBefore + (appended.length - EVENT_WINDOW) };
+    } else {
+      next.stageEvents = { ...snapshot.stageEvents, [event.stage]: appended };
+    }
   }
 
   if (event.payload.kind === 'snapshot') {

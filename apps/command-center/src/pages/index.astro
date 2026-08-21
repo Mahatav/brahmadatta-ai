@@ -1,35 +1,7 @@
 ---
-import { SystemStatus } from '../components/SystemStatus';
-import { LiveEventStatus } from '../components/LiveEventStatus';
-import { LocalRepositoryIntake } from '../components/LocalRepositoryIntake';
 import { MissionCommandCenter } from '../components/MissionCommandCenter';
-import { MissionControlPanel } from '../components/MissionControlPanel';
-import { ModelGatewayStatus } from '../components/ModelGatewayStatus';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 <BaseLayout title="Brahmadatta Command Center">
-  <article class="command-center" aria-labelledby="page-title">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">[ ब्रह्मदत्त AI ]</p>
-        <h1 id="page-title">Brahmadatta</h1>
-      </div>
-      <p class="summary">
-        Mythic local intelligence for authorized code on this machine.
-      </p>
-    </header>
-
-    <section class="situation-room" aria-label="Situation room">
-      <MissionCommandCenter client:load />
-      <LocalRepositoryIntake client:load />
-      <MissionControlPanel client:load />
-    </section>
-
-    <section class="control-plane" aria-labelledby="control-plane">
-      <h2 id="control-plane">[ CONTROL PLANE ]</h2>
-      <SystemStatus client:load />
-      <ModelGatewayStatus client:load />
-      <LiveEventStatus client:load />
-    </section>
-  </article>
+  <MissionCommandCenter client:load />
 </BaseLayout>
