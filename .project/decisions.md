@@ -12071,3 +12071,668 @@ merge-to-`main` timing and the Command-Center-branch rebase sequencing that
 follows it, unchanged from D-113's own note.
 
 ---
+
+---
+
+## D-115 — Command Center visual rebuild to the approved rev-2 design spec: Core,
+Stage Timeline, Findings rail, Candidate Compare, Verdict panel, resource ledger,
+Export Evidence control · 2026-08-20 · `frontend-developer` seat
+**Context.** With `#50` closed and D-100's mission-control surface already live-wired,
+this task built the surrounding visual layer against `docs/09-company/
+04-design-system.md` (the frozen rev-2 spec) and `packages/ui-components/tokens.css`,
+replacing the legacy visual pack the UI had previously been built against (superseded
+by D-017/D-018, per the audit that found the mismatch — see `.project/state.md`'s prior
+reconciliation).
+**Process note, disclosed plainly.** This task's own agent session stalled mid-way
+(a 600-second no-progress watchdog timeout) while fixing a real CSS Grid bug in
+`.bd-centre-col` and never completed its own handoff report or wrote this decision
+record. The orchestrating session picked up the worktree afterward, confirmed the
+in-progress fix had actually landed correctly before the stall, and is writing this
+entry itself from the observable state — the implementation work below is the stalled
+agent's, verified independently by the orchestrating session, not narrated from a
+report that was never produced.
+**What was built** (`git diff --stat` against `main`@`545ae91`, the worktree's
+already-current base): removed `AIParticleCore.tsx` (566 lines, the glowing-particle
+sphere the spec explicitly forbids) and its own `check-ai-core-motion.mjs` test;
+removed `VerdictComparePanel.tsx` (191 lines, superseded by the new overlay); rewrote
+`global.css` (–1323 lines, most panel styling moved into the new
+`command-center-frame.css`) and `MissionCommandCenter.tsx` (626 lines changed) to host
+the new layout. Nine new components: `BrahmadattaCore.tsx` (the six-arc chakra SVG,
+replacing the particle sphere), `StageTimeline.tsx`, `FindingsRail.tsx`,
+`CandidateCompareOverlay.tsx`, `VerdictPanel.tsx`, `ResourceLedger.tsx`,
+`BottomStrip.tsx`, `TopStrip.tsx`, `AnalysisRail.tsx`, plus `src/lib/design/phases.ts`
+(the `PHASE_ORDER` the Core reads to drive its six arcs off real mission state). Five
+new behavioral test scripts (`check-brahmadatta-core.mjs`, `check-stage-timeline.mjs`,
+`check-findings-evidence.mjs`, `check-candidate-compare-overlay.mjs`,
+`check-bottom-strip-ledger.mjs`), wired into `npm run check`, mirroring this codebase's
+existing `check-issue-20-analysis-rail.mjs`/`check-mission-control-*.mjs` convention —
+each asserts specific, real behavior (their own pass messages: "no glow/particles,
+six-arc geometry from `PHASE_ORDER`, driven by real telemetry only"; "ten fixed rows,
+real per-stage timing"; "mandatory provenance, fixed gate order, policy-failure
+suppression, one overlay not two"; "four real controls, export evidence wired,
+receipt-not-intention, 44px hit targets" — not generic smoke tests).
+**Verification performed by the orchestrating session, after the stall** (not
+re-running the stalled agent's own claims, since it made none — this is fresh
+verification): `npm run check` (11 sub-checks including the 5 new ones) — 0 errors, 0
+warnings, 0 hints. `npm run check:security` — clean. Root `npm run lint` — clean.
+`curl -sk https://localhost:8443/` against the stalled agent's own still-running dev
+stack (compose project `brahmadatta-bfe5a38c`, correctly isolated per PR #219's
+worktree fix) — real server-rendered HTML, not an error page. Grepped for dangling
+references to the two removed components — none found outside explanatory
+comments/docs naming what was replaced. **Not yet done**: a real, driven visual/
+interaction check (Playwright, matching D-100's own verification rigor) — the
+orchestrating session's browser tooling could not reach `localhost` in this sandbox.
+Routed to an independent `qa-engineer` pass, which does have that capability, before
+merge.
+**Known gaps, not claimed as done**: `docs/06-operations` or similar ops docs may still
+reference the old panel names (not audited here); `src/lib/security/render-paths.md`
+still mentions `AIParticleCore` by name in one table row (cosmetic, not a functional
+gap) — worth a follow-up pass, not blocking.
+**Recommendation.** Route to `qa-engineer` for a real Playwright-driven pass (visual
+screenshot at each panel, a live mission driven through the UI with the Core actually
+reflecting phase transitions, Export Evidence triggering a real export) before merge —
+per this session's standing instruction that all implementation work gets independently
+verified, and specifically because this task's own stall means no agent has yet looked
+at this with real eyes, only automated checks.
+**Cost/security/scalability implications** — none beyond normal frontend build cost;
+`sanitizeDisplayText`/`sanitizeDisplayList` convention preserved throughout per the
+render-safety check's own pass.
+**Final approval authority** — `qa-engineer`, for the pending live verification;
+orchestrating session, for merge once that clears.
+---
+
+---
+
+## D-116 — Independent `qa-engineer` live/visual verification of the Command Center
+visual rebuild (D-115): verdict **REJECTED** — two real, reproduced blockers, one of
+which invalidates the rebuild's own headline claim · 2026-08-21 · `qa-engineer` seat
+**Decision.** REJECTED. Every claim below is traceable to a command or Playwright run
+executed in this session — screenshots, curl output, container logs, and DOM inspection
+are all real artifacts from this pass, not re-quoted from D-115's own text. This is the
+first time any agent has looked at the D-115 rendered UI with real eyes; D-115's own
+verification could only run the automated check suite (browser tooling could not reach
+`localhost` in that session's sandbox).
+**Stack used.** The stalled agent's own pre-existing dev stack (compose project
+`brahmadatta-bfe5a38c`, `docker ps -a` showed it already `Up` 9h) was bind-mounted
+directly to this worktree with `astro dev` hot-reload — confirmed serving this exact
+branch's live code, not stale, so it was reused rather than torn down. Filled three real
+gaps to get a full live mission through FUZZ→PATCH→VERIFY (all local-`.env`-only,
+gitignored, none committed): (1) `run_orchestrator` was not running — started manually,
+matching D-100/D-102's documented workaround for the same known compose gap; (2)
+`SANDBOX_FUZZ_IMAGE` was blank — set to the real locally-built digest
+(`brahmadatta-fuzz-toolchain@sha256:9c6c226…`), matching D-112's own already-documented
+fix; (3) the bare-metal `fuzz-worker` (D-073's FUZZ/MINIMIZE fleet member, deliberately
+never containerized per D-036) needed a `.venv` built and a host-reachable Postgres —
+the worktree's compose `db` port wasn't published to the host, so a throwaway
+`alpine/socat` tunnel container was used to reach it (a real, reproducible Docker-Desktop
+quirk hit along the way: `-p` port publishing silently didn't bind when the container
+was started already attached to the custom compose network in one step — attaching the
+network in a second step, after publish, worked; noted here in case another session hits
+it). None of this touched application code; all three are the same class of environment
+gap D-100/D-102/D-112 already found and worked around before me.
+**Verification performed, live, against a real mission (`b8c93b26…`, `252a2043…`,
+`21c58123…` — three real missions driven end to end during this pass).**
+1. **Full mission lifecycle via the real UI** (create → authorize → snapshot → preflight
+   → start), Playwright against `https://localhost:8443/`, 1440×900: works, matches
+   D-100/D-102's own documented shape exactly — real `POST`s, real digest probe/retry
+   `409`→`201`, real preflight 4/4, real confirm dialog copy.
+2. **A real live `FUZZ` campaign found a real finding** (heap-buffer-overflow, real
+   ASan trace, real libFuzzer corpus stats, real reproducer artifact) on the bundled
+   `pktcfg` fixture, confirmed via direct `GET /missions/{id}/findings/{id}` — full
+   sanitizer report and stack frames present, real, not a fixture.
+3. **Two real operator-supplied candidates, submitted via the real `POST
+   /missions/{id}/patches` endpoint** (the same demo patches D-112's #50 gate run used:
+   `candidate-a-correct-bounds-fix.patch`, `candidate-b-rejected-crash-only-fix.patch`),
+   drove a real mission to a real terminal **`VERIFIED`** verdict server-side (`GET
+   /missions/{id}` → `"state": "VERIFIED", "verdict": "VERIFIED"`, 2 real verifications)
+   — the same shape D-112 first achieved live for this project.
+4. **`EXPORT EVIDENCE` genuinely works and is receipt-not-intention, exactly as
+   claimed.** Clicked through the real confirm dialog; real `POST
+   /missions/{id}/export` → `202`; the UI rendered a real success line with a real
+   content-addressed sha256 (`[ + EXPORTED · 4adbd5a8… ]`) and a persistent receipt row
+   (`export a240b3d4 · artifact://…/evidence_bundle/4adbd5a8…`), both read from the
+   actual server response, not shown optimistically at click-time. Independently
+   confirmed the bundle is real via `GET /missions/{id}/evidence`. **This item is a
+   clean PASS** — credited explicitly because it is the one D-115 claim this pass could
+   fully confirm working as designed, and it matters that not everything below is bad
+   news.
+5. **The Brahmadatta Core is a real hairline SVG, six arcs, no glow/gradient/particle
+   effects** — confirmed by DOM inspection, not just the check script's own assertion:
+   `document.querySelector('.bd-core__svg').querySelectorAll('path')` returns exactly 6
+   `<path>` elements; `querySelectorAll('filter, feGaussianBlur, radialGradient,
+   linearGradient')` returns 0. Matches the spec claim precisely.
+6. `npm run check` (11 sub-checks incl. the 5 new ones), `npm run check:security`, root
+   `npm run lint` — all re-run fresh in this session, all exit 0, all output matches
+   what D-115 reported (`astro check`: 0 errors/0 warnings/0 hints across 41 files).
+7. A clean idle page load (no active mission) produces **zero** console errors or
+   warnings at 1440×900. A full-page idle screenshot shows no crushed panels, no
+   overlapping controls, no dangling references to the two removed legacy components —
+   layout is otherwise clean.
+**BUG-1 (found this session, MAJOR/borderline-BLOCKER, owner `frontend-developer`) — the
+Verdict panel's and Candidate Compare overlay's gate matrix renders illegible,
+overlapping text, in every state including the default idle "Pending" state every
+operator sees on first load.** `command-center-frame.css:361-362`:
+```css
+.bd-gate-matrix { display: grid; gap: 0; margin: 0; }
+.bd-gate-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; min-height: 20px; padding: var(--bd-space-1) 0; }
+```
+`.bd-gate-row` is itself `display: grid` and is a grid item of `.bd-gate-matrix`; each
+row's own two children (`<dt>` label, `<dd>` detail — each ~20px tall, no gap) need
+~40-44px, but `getComputedStyle` on the live DOM shows `.bd-gate-matrix`'s
+`grid-template-rows` resolving to `20px 20px 20px 20px 20px` — every row clamped to
+exactly `.bd-gate-row`'s own `min-height: 20px`, not its content's real height.
+`getBoundingClientRect()` on the live page proves the resulting collision precisely: row
+0's `<dd>` (`NOT RUN · REASON NOT SUPPLIED`) occupies `y:[2680.67, 2700.67]`; row 1's
+`<dt>` (`REPRODUCER ELIMINATED`) occupies the **identical** `y:[2680.67, 2700.67]` — the
+two render on top of each other. Screenshot:
+`screenshots/01b-verdict-panel-zoom.png` (in this session's scratchpad, referenced here
+for the description; not committed — same convention D-100/D-102 used for disposable
+dev-stack artifacts). Visible: `[ − COMPILE ]` renders cleanly alone (nothing collides
+with row 0's own label), then two lines of fused, unreadable text where
+`REPRODUCER ELIMINATED`/`REGRESSION PRESERVED` collide with the previous row's detail
+line. `.bd-gate-matrix` is used by exactly two components — `VerdictPanel.tsx:141` and
+`CandidateCompareOverlay.tsx:188` — both new in D-115, both share the identical broken
+CSS, so both panels are affected (only visually re-confirmed in `VerdictPanel`; the
+Compare overlay could not be opened live in this session because of BUG-2 below, but the
+CSS is byte-identical, so the same collision necessarily reproduces there too). This is
+a distinct, new bug from the `.bd-centre-col` row-gap issue D-115's own stalled agent
+found and fixed — the exact "sibling bug elsewhere in the new layout" this task's
+instructions asked to check for, and there is one.
+**BUG-2 (found this session, BLOCKER, owner `frontend-developer`, likely also touching
+`devops-engineer`/`backend-developer` for the underlying transport issue) — the entire
+new visual layer (`$missionSnapshot`, and everything the Core/Stage Timeline/Findings
+rail/Verdict panel/Candidate Compare/Resource Ledger read from it) is driven
+*exclusively* by the live SSE event stream with *zero* REST-based hydration, and this
+session reproduced the SSE connection itself failing, live, reliably, twice, on two
+independent missions.** This is the core claim item 3 of this task's instructions asked
+to be watched happen for the first time — it does not reliably hold.
+- **The failure, reproduced.** Driving a real mission start-to-finish in one continuous
+  Playwright session (no reload), the Core correctly updated `Standby → Baseline →
+  Analyze` live for the first ~3 seconds, then the browser console began repeating
+  `Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR` roughly every 3 seconds for
+  the rest of the run. Independently reproduced against the same endpoint with plain
+  `curl --http2`: `curl: (92)` (`CURLE_HTTP2_STREAM`, a real HTTP/2 framing-layer stream
+  error), after correctly streaming 5 real, well-formed events first — this is a
+  connection-level failure, not a data or buffering bug (`curl --http1.1` against the
+  same endpoint did not reproduce it in the same short window). The mission itself kept
+  running correctly server-side throughout (`GET /missions/{id}` independently confirmed
+  the mission actually reached `PATCH`, with a real finding and 8/8 passing tests,
+  while the UI's own state line stayed frozen on `TRIAGE` for the rest of the 75-second
+  watch).
+- **No recovery path, even on a full page reload.** Reloading the page against the same
+  mission (a fresh `EventSource`, fresh initial render) still showed the stale `TRIAGE`
+  state and the Core still frozen on `ANALYZE`/`PHASE 02 OF 06` — despite the page's own
+  `GET /missions/{id}` network call (captured directly) correctly returning
+  `"state": "PATCH"` at that same moment. Root-caused in `src/lib/events/store.ts`:
+  `$missionSnapshot` is populated *only* by `reduceMissionSnapshot`, called *only* from
+  `ingestMissionEvent`, called *only* by the SSE listeners in
+  `src/lib/events/connection.ts` — there is no code path anywhere that seeds or
+  refreshes `$missionSnapshot` from the authoritative REST `GET /missions/{id}` (or
+  `/findings`, `/patches`) response the page is already fetching successfully for
+  `MissionControlPanel`'s own separate, correctly-working state line. `store.ts` predates
+  D-115 (D-115 only added `$activeMissionId` to it, per D-100's own text), so this gap is
+  not new code — but D-115's new components are the first thing in this codebase to make
+  the visual layer's entire displayed truth depend on that gap with no other source of
+  truth, which is why no prior session (D-100/D-102, scoped to
+  `MissionControlPanel`, which reads REST directly) ever hit it.
+- **To the system's credit, it does not lie about this** — `$streamState` correctly
+  flips to `'error'`/`'stale'` and the UI honestly labels it (`[ × SHARED STREAM · ERROR
+  ]`, `[ DEGRADED ]`, `[ · STREAM ERROR ]` under the Core itself) rather than presenting
+  frozen data as live. That is a real, deliberate design strength (§6.1/§8 of the design
+  spec, "the stale detector only ever degrades the display") and measurably reduces how
+  misleading the failure is — but it does not fix it, and a judge glancing at a
+  confidently-centered "ANALYZE" dial with a small red label two lines below it is a real
+  risk in a competition setting.
+- **Confirmed the identical failure blocks Findings rail and Verdict panel from ever
+  showing real, achieved outcomes that exist server-side.** Mission `b8c93b26…` has a
+  real, fully-detailed finding (confirmed via `GET .../findings/{id}` — full ASan trace,
+  real stack frames, real corpus stats) and mission `21c58123…` reached a real
+  `VERIFIED` verdict server-side (§ above) — in both cases, on a fresh page load pointed
+  at that exact mission, the Findings rail still read `[ AWAITING FINDING ]` /
+  "Findings appear when a sanitizer report is captured" and the Verdict panel still read
+  `Pending` / `[ — GATES · NONE RAN ]`. `[ OPEN COMPARE ]` was confirmed `disabled` for
+  the same reason (`canCompare = snapshot.patchCandidates.length > 0`, and
+  `patchCandidates` only ever populates from the same broken store).
+**Why this is BLOCKER, not a known-issue footnote.** This task's own instructions named
+the thing to verify explicitly: "confirm the Core's arcs actually update as the mission
+progresses through phases... this is the core claim... that no one has watched happen
+yet." This pass watched it happen for three seconds, watched it stop, and could not get
+it to resume — twice, independently, with root-caused, reproducible evidence at both the
+network-protocol layer and the application-state layer. The same root cause also means
+two of the other four things this task named as must-verify (Findings rail, Verdict
+panel/Candidate Compare) could not be positively confirmed live in this session despite
+the underlying data being real and correct — not because the data isn't real, but
+because the new visual layer cannot reliably be trusted to show it.
+**Options considered** for the verdict itself — (a) APPROVED WITH KNOWN ISSUES, given
+automated checks are clean, Export Evidence works exactly as specified, the Core's
+geometry is verified correct, and the honest degraded-state labeling is a real
+mitigation; (b) REJECTED, per this seat's standing rule that blocker bugs mean rejected
+and only CEO/PM can jointly overrule in writing.
+**Pros and cons** — (a) ships something that automated checks call clean and that looks
+right in a screenshot taken at the right instant, but this session directly observed the
+one thing this whole rebuild exists to prove — real telemetry visibly driving the
+display — fail inside the first few seconds of a real run, with no recovery path even on
+reload; shipping that into a competition-judged live demo on the strength of "the checks
+are green" is exactly the failure mode this seat exists to catch. (b) costs one more
+frontend pass (add REST hydration to the snapshot store on connect/reconnect — the
+single highest-leverage fix, since it would mask the SSE instability's visual impact even
+before that instability itself is separately root-caused) plus one CSS fix (BUG-1, small
+and mechanical) and one re-verification cycle, against a deadline that has already
+passed once (2026-08-20) — a real cost, weighed and named, not waved away.
+**Cost implications** — one more frontend-developer pass (estimated small: the REST
+hydration fix is a bounded, well-scoped addition to `connectMissionEvents`/`store.ts`;
+the CSS fix is two rules) plus this seat's own re-verification once fixed.
+**Security implications** — none identified; both bugs are display-layer only, no data
+integrity or auth issue. `sanitizeDisplayText`/`sanitizeDisplayList` convention was
+independently re-checked and remains intact throughout everything exercised in this
+pass — findings, patch diffs, and error messages all still render sanitized.
+**Scalability implications** — none directly; the underlying SSE `ERR_HTTP2_PROTOCOL_ERROR`
+is worth devops-engineer/backend-developer attention separately from the frontend fix
+above, since a stream that cannot survive more than a few seconds live has implications
+beyond this UI (any future consumer of the same endpoint).
+**Recommendation.** REJECTED. Fix BUG-2 first (REST hydration is the higher-leverage,
+lower-risk fix and should land regardless of whether the SSE transport issue itself gets
+root-caused in the same pass), fix BUG-1 (mechanical CSS), then route back through
+`qa-engineer` for re-verification before merge — same standing rule this project has
+applied at every prior gate (D-102, D-104, D-111).
+**Final approval authority** — `qa-engineer` (this seat) for the re-verification gate;
+`CTO` for the technical fix approach; `CEO`/`PM` jointly, in writing, if this rejection
+is to be overridden and merged with these two bugs still open.
+---
+
+---
+
+## D-117 — D-116's two blockers fixed: gate-matrix collision (BUG-1) and REST-based
+snapshot hydration/recovery (BUG-2), live-verified against a real browser and real app
+code with the API surface mocked · 2026-08-21 · `frontend-developer` seat
+**Context.** D-116 rejected the Command Center visual rebuild (D-115) with two real,
+reproduced bugs: BUG-1 (MAJOR), the gate matrix in `VerdictPanel`/`CandidateCompareOverlay`
+renders collapsed, overlapping rows in every state including the default idle "Pending"
+state; BUG-2 (BLOCKER), the entire new visual layer is driven exclusively by the SSE event
+stream with zero REST-based hydration or recovery path, and the stream was independently
+reproduced failing at the HTTP/2 framing layer (`net::ERR_HTTP2_PROTOCOL_ERROR` client-side,
+`CURLE_HTTP2_STREAM` via `curl --http2`) with no recovery even across a full page reload.
+This entry fixes both, documents a transport-layer investigation that did **not** result in
+an nginx change (reasoned below), and discloses two real gaps in this session's own
+verification rather than papering over them.
+**BUG-1 fix, and a second bug the first pass introduced.** `command-center-frame.css`'s
+`.bd-gate-matrix`/`.bd-gate-row` rules were fixed in two passes, not one, and the first pass
+is worth recording because re-driving it live is what caught the second bug:
+1. First pass: removed `.bd-gate-row`'s own nested `display: grid` (unnecessary — its two
+   children, `<dt>`/`<dd>`, are plain block elements that stack on their own) and added
+   `grid-auto-rows: min-content` to `.bd-gate-matrix` so each row track sizes to real content
+   instead of clamping to `.bd-gate-row`'s own `min-height: 20px` floor (the mechanism D-116
+   measured). Static checks (`npm run check`) passed clean.
+2. Live-driving this in a real browser (`astro dev` + Playwright, see Verification below)
+   showed `<dt>` and `<dd>` rendering **side by side**, not stacked, and inspection found why:
+   `global.css` carries a generic, unscoped `dl div { display: grid; grid-template-columns:
+   var(--bd-col-rail) minmax(0, 1fr); gap: var(--bd-space-4); }` rule, written for an
+   unrelated `<dl><div>…</div></dl>` pattern (the health-result/system-status panels).
+   `.bd-gate-row` is a bare `<div>` inside a `<dl>` (`.bd-gate-matrix`) — exactly the shape
+   that selector matches — so deleting `.bd-gate-row`'s own `display: grid` did not make it a
+   plain block; it fell through to that unrelated global rule instead. This did not collide
+   (two columns can't overlap) so it would have passed a naive "no collision" check, but it
+   was not the row shape D-115 built (explicitly single-column/stacked) and it depended on an
+   unrelated global selector reaching in — exactly the kind of implicit coupling that produces
+   bugs like BUG-1 in the first place. Fixed by making `.bd-gate-row` explicit:
+   `display: block` (wins on specificity — a class selector beats `dl div`'s two type
+   selectors — regardless of stylesheet load order), so it no longer depends on what else in
+   `global.css` happens to match `<dl> <div>`. Full reasoning recorded as a comment at the
+   fix site (`command-center-frame.css`, the `.bd-gate-matrix`/`.bd-gate-row` block), mirroring
+   the `.bd-centre-col` comment's own standard from D-115.
+**BUG-2 fix — REST-based hydration and a fallback poller, both new in `src/lib/events/`.**
+- `src/lib/api/client.ts`: added `replayMissionEvents`, a thin wrapper over `GET
+  /missions/{id}/events/replay` — an endpoint that already existed as "gap recovery for the
+  SSE stream" (`api/routers/missions.py::replay_events`) but nothing in the frontend ever
+  called. It reads the same persisted `MissionEvent` log the live stream tails, through the
+  same schema conversion, so replaying it reconstructs identical state to receiving every
+  event live — there is one definition of "what does this mission look like," not a
+  hand-reconstructed approximation stitched from several other REST resources that could
+  drift from what the live path renders.
+- `src/lib/events/store.ts`: added `applyMissionEvent` (the one place any event — live SSE or
+  REST-replayed — is folded into `$missionSnapshot`, with a cross-mission guard and a
+  sequence guard so replaying is safe to race against live SSE events without double-applying
+  or regressing already-newer state), `hydrateMissionSnapshot` (pages through
+  `replayMissionEvents` from the snapshot's own `latestSequence`, so repeated calls only ever
+  fetch the gap, not the whole mission's history each time), and `startRestFallbackPoller`
+  (polls `hydrateMissionSnapshot` on a fixed interval **only** while `$streamState` is
+  `'error'`/`'stale'`, mirroring `startStaleWatcher`'s existing "only ever degrades/recovers
+  the display, never fakes progress" convention). `ingestMissionEvent` now routes through the
+  same `applyMissionEvent`.
+- `src/lib/events/connection.ts`: `connectMissionEvents` now calls `hydrateMissionSnapshot`
+  immediately on connect (aborted via a new `hydrationAbort` controller in
+  `disconnectMissionEvents`) rather than only ever waiting for the first live SSE event —
+  closing the exact gap D-116 found: "a fresh page load ... still showed the stale state ...
+  despite the page's own `GET /missions/{id}` network call correctly returning" the real
+  state.
+- `src/components/MissionCommandCenter.tsx`: wires `startRestFallbackPoller` for the active
+  mission, alongside the existing `startStaleWatcher` wiring.
+- Deliberately does **not** touch `$streamState`/`$lastEventReceivedAt` from the hydration
+  path — a successful REST catch-up means the *data* is fresh, not that the live connection
+  is healthy, and D-116 explicitly praised the honest degraded-state labelling (§6.1/§8 of the
+  design spec) as a real design strength worth preserving, not papering over with data that
+  quietly looks live again. Confirmed live (see Verification) that the fix adds recovery
+  *without* removing the honest `[ STREAM ERROR ]`/`[ DEGRADED ]` labelling.
+**Transport-layer investigation (item 1 of this task) — investigated, not fixed, with
+reasoning.** Read `infrastructure/compose/nginx/includes/sse.conf` in full (its own
+measured-not-assumed comment block) and `templates.dev/brahmadatta.conf.template`: `http2 on;`
+is set at the TLS listener level (one listener, one cert, `server_name _`), shared by the SSE
+location, the ordinary `/api/` location, and the Astro dev-server proxy. `sse.conf`'s own
+comment explicitly reasons through HTTP/2 vs the *buffering* stall class of bug ("HTTP/2 does
+NOT stall") but was never written against the specific framing-layer failure D-116 reproduced
+(`ERR_HTTP2_PROTOCOL_ERROR`/`CURLE_HTTP2_STREAM`), which is a distinct failure mode: HTTP/2
+multiplexes many short-lived `/api/` request/response cycles and one extremely long-lived,
+low-throughput SSE stream over the **same connection**, and a single misbehaving stream (or a
+connection-level frame/window-accounting edge case) can in principle affect the whole shared
+connection, including the innocent long-lived one — a known general class of issue with h2
+connection sharing, not something this session could root-cause to a specific nginx source
+line without reproducing it against the real infrastructure (blocked — see Verification gaps
+below).
+**Options considered for the transport fix itself:** (a) give the SSE location its own
+non-HTTP/2 listener on a second port, so the browser's `EventSource` connects over HTTP/1.1
+specifically (the literal shape the task suggested) — this is the more "durable" fix in
+principle, since HTTP/1.1 did not reproduce the failure in D-116's own testing window; (b)
+ship the REST hydration/fallback-poller fix only, and treat the transport root cause as a
+follow-up. **Chose (b).** (a) requires: a second TLS listener (a second `listen` directive
+can't share the first's ALPN/h2 negotiation, so genuinely needs its own port), CORS headers
+on that location (a different port is a different origin), a CSP `connect-src` change, a
+`docker-compose.yml`/`docker-compose.finale.yml` port-publish change in **both** the dev and
+finale profiles (dev-only would leave the actual competition deployment — the finale, which
+this repo's own operating notes call air-gapped with no do-overs — silently divergent and
+*still* carrying the bug the dev profile now hides), and a frontend change to point
+`EventSource` at an absolute cross-origin URL instead of a relative path. That is real
+infrastructure surface this session could not verify end-to-end: this sandbox's own docker
+access was restricted mid-session (`docker stop`/`docker ps --filter` against the shared dev
+stack were both blocked by the sandbox's own auto-mode classifier), and the shared dev stack
+already in use (compose project `brahmadatta-bfe5a38c`) is bind-mounted to a **different**
+worktree (`agent-a99972f7fb9731b59`) that this agent is structurally isolated from writing
+into (confirmed: both `git` operations and the `Write` tool refuse cross-worktree paths).
+Shipping an unverified nginx/CORS/CSP change days before an air-gapped, no-do-overs finale
+run is a worse risk than leaving the transport layer investigated-but-unfixed and shipping
+the REST-based defense in depth instead, which (i) is needed regardless of whether the
+transport bug is ever separately fixed (SSE can legitimately drop for many other reasons —
+network blips, proxy restarts, a future infra change), and (ii) directly eliminates the
+*user-visible* harm D-116 rated BLOCKER (no recovery path, ever, reload included) even if the
+underlying HTTP/2 framing issue persists. Recommending (a) as a follow-up, scoped to
+`devops-engineer`/`backend-developer` with `cybersecurity` review (nginx/nginx-adjacent, per
+CLAUDE.md's own rule that ingress changes need that review before merge) once it can be
+verified live against the real finale-shaped infrastructure, not blind.
+**Verification performed, live, in this session — and its real gaps, disclosed.**
+1. `npm run check` (12 sub-checks now, including a new
+   `check:mission-snapshot-hydration.mjs` — 6 behavioral tests: replay seeds/resumes
+   `$missionSnapshot`, pagination past the 500-event replay page limit, the sequence guard
+   blocking regression/duplication, cross-mission events dropped, the fallback poller only
+   touching the network while the stream is unhealthy) — 0 errors, 0 warnings, 0 hints across
+   42 files. `npm run check:security` — clean. Root `npm run lint` — clean. All three re-run
+   fresh, output shown in the handoff, not asserted from memory.
+2. **Real browser, real app code, BUG-1**: `astro dev` run directly from this worktree (no
+   docker needed — the idle Verdict panel needs no backend), Playwright against
+   `http://127.0.0.1:4322/` at 1440×900. `getBoundingClientRect()` on every `<dt>`/`<dd>` pair
+   in `.bd-gate-matrix` — zero overlap, row heights 48px (not the reported 20px clamp),
+   screenshot confirms clean stacked rows matching D-115's original single-column intent.
+3. **Real browser, real app code, BUG-2**: since this session's docker access to a live
+   Control API was blocked (above), verified the *frontend's own hydration/recovery
+   mechanism* — the thing this task actually changed — against the real, unmodified
+   `client.ts`/`store.ts`/`connection.ts`/`MissionCommandCenter.tsx`, with the Control API
+   surface mocked at the network layer via Playwright route interception (real fetches, real
+   SSE framing, real `EventSource` behavior — only the server responses are scripted, not the
+   app's own handling of them). Two scenarios, both matching D-116's own repro shape exactly:
+   - A full mission lifecycle (create → authorize → snapshot digest probe/retry → preflight →
+     start) with the SSE stream emitting two real events then dying (`route.abort`), the
+     browser's native `EventSource` auto-retrying and failing every time (5 attempts
+     observed, `data-stream-state` correctly stuck on `'error'`) — and the REST fallback
+     poller (3 replay calls observed) pulling the mission all the way to two `VERIFIED`/
+     `REJECTED` verifications, auto-opening the Candidate Compare overlay from that
+     REST-only data. Its gate matrix (byte-identical CSS to `VerdictPanel`, which D-116
+     flagged as unverified live because BUG-2 blocked opening it in that session) inspected
+     directly: 10 rows (2 candidates × 5 gates), zero collisions.
+   - D-116's second, more damning scenario — "a full page reload does not recover it" —
+     reproduced at its worst: a fresh page load deep-linked straight to a mission
+     (`?mission=<id>`) whose SSE stream is aborted on the very first attempt, never once
+     succeeding. The mission chip and the Core both show the real current state (`VERIFY`)
+     from REST hydration alone, while `data-stream-state` honestly stays `'error'` and the
+     UI's own `[ · STREAM ERROR ]`/`[ DEGRADED ]` labels render exactly as before — recovery
+     added, honest degradation preserved, the specific pairing D-116 asked for.
+   Screenshots and the two driver scripts are in this session's scratchpad
+   (`check-bug1-gate-matrix.mjs`, `e2e-hydration-and-compare.mjs`, `e2e-reload-recovery.mjs`),
+   not committed, matching D-100/D-102/D-116's own convention for disposable dev-verification
+   artifacts.
+4. **Real gap, disclosed rather than hidden**: this session did **not** drive a real mission
+   through the real orchestrator/fuzz-worker/model-gateway to a real terminal verdict, and did
+   **not** reproduce the live HTTP/2 framing failure against real nginx/Django (only against
+   Playwright's own scripted network layer). Both are exactly what D-116's own qa-engineer
+   pass did, and this session could not repeat that specific setup: the shared dev stack was
+   bind-mounted to a different, sandbox-isolated worktree this agent cannot write into, and
+   this agent's own attempt to free the ports by stopping those containers (to bring up an
+   isolated stack from this worktree instead, the documented fallback) was blocked by the
+   sandbox's own auto-mode classifier, not by a decision this seat made. This is a real
+   verification gap, named plainly rather than talked around — see Open questions.
+5. **No Agent/Task tool available in this session** to dispatch an independent `qa-engineer`
+   review as this task's own instructions asked for — this session's tool access was Read/
+   Write/Edit/Bash only. The independent re-verification this task's own standing rule
+   requires (D-102, D-104, D-111, D-116 itself) has **not** happened yet for this fix. See
+   Recommended next action.
+**Cost implications** — the shipped fix (BUG-1 CSS + BUG-2 hydration/poller) is small and
+bounded, matching D-116's own cost estimate. The deferred transport-layer fix (option (a)
+above) is a real, separately-scoped follow-up: a second nginx listener, CORS/CSP changes in
+both compose profiles, and a live-infrastructure verification pass — not free, not done here.
+**Security implications** — none identified in the shipped fix; both bugs are display-layer
+only. `sanitizeDisplayText`/`sanitizeDisplayList` convention preserved throughout (no new
+raw-output render path was added — `applyMissionEvent`/`hydrateMissionSnapshot` route through
+the exact same `reduceMissionSnapshot` the live SSE path already used, which is where
+sanitization happens). The deferred nginx change would be ingress-adjacent and needs
+`cybersecurity` review before merge per CLAUDE.md's standing rule, whenever it lands.
+**Scalability implications** — `hydrateMissionSnapshot`'s resumable, gap-only refetch design
+(starts from the snapshot's own `latestSequence`, not always from 0) keeps the REST fallback
+cheap even on a long mission with many events; the 500-event page ceiling matches the
+server's own `replay_events` limit exactly, so a mission with more events than that is still
+fully recoverable over more than one round trip rather than silently truncated.
+**Recommendation.** Merge BUG-1 and BUG-2's fixes; route the transport-layer root cause
+(option (a) above) to `devops-engineer`/`backend-developer` as a scoped follow-up, not a
+blocker on this merge, since the REST hydration fix already eliminates BUG-2's user-visible
+harm independent of whether that root cause is ever separately fixed. Get an independent
+`qa-engineer` pass on this fix before merge, per this project's own standing rule — this
+session could not dispatch one itself (no Agent/Task tool) and does not consider its own
+verification a substitute for that independent pass, particularly given the real gap named in
+point 4 above (no real live mission was driven to a real terminal verdict against real
+infrastructure in this session).
+**Final approval authority** — `qa-engineer`, for the pending independent re-verification;
+`CTO`, for the transport-layer fix approach (option (a)) whenever it is taken up;
+orchestrating session, for merge coordination once `qa-engineer` clears this.
+---
+
+---
+
+## D-118 — Independent `qa-engineer` live re-verification of D-117's fix against the
+REAL backend (not mocked): **REJECTED** — BUG-1 confirmed fixed; BUG-2 is still live,
+its own root cause misdiagnosed by both D-116 and D-117, now precisely identified as a
+pre-existing, deterministic backend bug · 2026-08-21 · `qa-engineer` seat
+**Decision.** REJECTED. Every claim below is traceable to a command, `docker logs`
+output, `curl`/Playwright run, or DOM measurement executed in this session against the
+real, running stack — not against D-117's mocked API layer, closing exactly the gap
+D-117's own text disclosed it could not close.
+**Stack used.** The existing dev stack (compose project `brahmadatta-bfe5a38c`) was
+confirmed still `Up`/healthy and bind-mounted directly to this worktree
+(`docker inspect brahmadatta-command-center` shows both mount sources resolving to
+`.../worktrees/agent-a99972f7fb9731b59/...`), serving commit `98893c9` (`git log` in the
+worktree, clean `git status`) — reused as instructed, no new stack brought up.
+`run_orchestrator` was confirmed already running inside `brahmadatta-control-api`
+(`docker exec ... ps aux` → `python manage.py run_orchestrator`, matching D-100/D-102/
+D-112/D-116's documented workaround; no manual start was needed this time). Bare-metal
+`fuzz-worker` was **not** started — not needed: the shared Postgres already held real,
+persisted missions from D-116's own live session, including one
+(`21c58123-d048-41f7-8255-8e7b4a8d6419`) that reached a genuine server-side `VERIFIED`
+verdict with real gates and real verifications, which this session reused directly
+rather than re-running a ~10+ minute FUZZ campaign to reproduce data that was already
+real and already there. A second, brand-new mission
+(`30788692-48d9-46bb-9151-0a4fb3daaa1b`) was also driven end-to-end through the real UI
+in this session for a from-scratch repro. Browser automation: no MCP browser tool was
+available in this session's toolset (Read/Write/Edit/Bash only), so Playwright was
+driven directly via Node scripts in the scratchpad
+(`/private/tmp/.../scratchpad/*.mjs`, using the repo's already-cached Chromium
+`~/Library/Caches/ms-playwright/chromium-1234` and a scratchpad-local `playwright`
+devDependency) — a real browser, real TLS, real `EventSource`, hitting
+`https://localhost:8443/` exactly as D-116 did, not a mock.
+**BUG-1 re-verified, independently, live — confirmed fixed.** `getBoundingClientRect()`
+on every `<dt>`/`<dd>` pair in the idle-page Verdict panel's `.bd-gate-matrix` (fresh
+page load, `networkidle`, no mission): 5 rows, each 48px tall
+(`y: 2660.67, 2708.67, 2756.67, 2804.67, 2852.67`, an 8px gap between each row's `<dd>`
+bottom and the next row's `<dt>` top), **zero collisions** — matches D-117's own claim
+exactly, independently re-measured, not re-quoted. (A downscaled full-page screenshot
+at reduced zoom — `verdict-panel-full-idle.png` — visually *suggests* tight/overlapping
+text at this compression ratio; the raw numeric `getBoundingClientRect()` data is what's
+authoritative here and shows real spacing, which is exactly why this task's own
+instructions called for DOM measurement over eyeballing a screenshot.) Read the shipped
+CSS fix directly (`command-center-frame.css:361-400`) and confirmed it matches its own
+code comment's description (`.bd-gate-row { display: block; }`, wins on specificity over
+the unscoped `dl div` rule; `.bd-gate-matrix { grid-auto-rows: min-content; }`) — a
+correct, well-reasoned fix. **Candidate Compare overlay could not be measured with real
+live data** — the same reason D-116 couldn't (see BUG-2 below: no mission's real state
+can ever be displayed against the real backend right now, VERIFIED or otherwise) — but
+independently confirmed via source read that `CandidateCompareOverlay.tsx:188-216` uses
+**byte-identical markup and CSS classes** to `VerdictPanel.tsx:141-169`
+(`<dl className="bd-gate-matrix">` → `<div className="bd-gate-row bd-gate-row--{tone}">`
+→ `<dt className="bd-gate-row__label">`/`<dd className="bd-gate-row__detail">`, no
+per-component conditional styling), so the same measured fix necessarily applies —
+disclosed here as an inference from identical markup, not a direct live measurement of
+the overlay itself, the same honesty standard the prior two entries used.
+**BUG-2 — NOT fixed against the real backend. Still a live BLOCKER, and D-116's own
+"page reload does not recover it" scenario still reproduces exactly, unchanged.** D-117's
+frontend mechanism (REST hydration on connect + fallback poller while unhealthy) is
+correctly built — its own mocked-API tests pass, and this session's fresh `npm run check`
+re-confirms that (below). But against the real, running control-api, both of BUG-2's
+recovery paths are defeated by the **same underlying cause**, a real backend bug neither
+D-116 nor D-117 found:
+- **Root cause, found live in `docker logs brahmadatta-control-api`, full traceback,
+  exact code path.** `orchestrator/queue.py::_emit_triage_stub_events` (introduced in
+  `5105212`, "#168 T0 — orchestrator tick loop", **months before D-115/114/115** — this
+  is not new code, not something this fix touched or could have caused) emits three
+  `MissionEvent` rows with `payload={"kind": "triage_stub"}` for every mission's
+  mandatory `TRIAGE` stage ("`TRIAGE` has no `JobKind`... emit the three events its
+  'hollow stage' contract requires", the function's own docstring). `api/sse.py::
+  to_schema()`'s `MissionEventSchema.payload` field is a Pydantic discriminated union
+  that does **not** include `triage_stub` as a valid tag (`union_tag_invalid`; valid
+  tags are `state_changed, stage_progress, snapshot, baseline, finding, reproducer,
+  fuzzing, patch_candidate, verification, mission_verdict, evidence_export,
+  resource_usage, teardown, policy_violation, log`). Every real mission that completes
+  `BASELINE` hits this — per the architecture's own mandatory workflow, that is
+  effectively every mission, not an edge case.
+- **This single unhandled `ValidationError` is raised from BOTH code paths BUG-2's fix
+  depends on**, confirmed with full tracebacks in `docker logs`:
+  1. The live SSE generator (`api/sse.py::event_frames` → `format_frame` → `to_schema`)
+     — the exception propagates out of the ASGI streaming response and aborts the
+     connection mid-stream, which is what the browser reports as
+     `net::ERR_HTTP2_PROTOCOL_ERROR` (reproduced live, browser console, this session —
+     the exact signature D-116 found).
+  2. The **new** REST replay endpoint BUG-2's own fix added a frontend client for
+     (`api/routers/missions.py::replay_events` → `sse.to_schema`) — returns
+     `500 Internal Server Error` (`{"error": {"code": "INTERNAL_ERROR", ...}}`) for any
+     page range spanning the `triage_stub` rows. Confirmed by `trace_id` correlation
+     between the client-observed `500` and the server-side traceback
+     (`trace_id=9cd55d4ecfbc46b88579fda0d16b0b35` in both).
+  Because `hydrateMissionSnapshot` pages forward from the snapshot's own last-successful
+  `latestSequence`, and that cursor can never advance past the first `triage_stub`
+  row (every replay call spanning it 500s, every time), **the REST fallback poller is
+  defeated by the identical root cause as the SSE stream it exists to work around** —
+  it polls every 5s (`startRestFallbackPoller`'s own default `intervalMs`), 500s every
+  time, forever, and never recovers.
+- **Reproduced on two independent missions, both against the real backend:**
+  1. A **brand-new mission** (`30788692-…`) driven end-to-end through the real UI form
+     (`CREATE + AUTHORIZE + SNAPSHOT` → real digest probe/retry `409`→`201`, matching
+     D-116's own documented shape → `PREFLIGHT` → `START`, real confirm dialog): SSE
+     failed at `net::ERR_HTTP2_PROTOCOL_ERROR` ~2.4s after start, `data-stream-state`
+     correctly flipped to `'error'` — and then the displayed state stayed **frozen on
+     `TRIAGE` for the entire 27-second observation window** while `GET
+     /missions/{id}` independently confirmed the real mission had already reached
+     `STRESS_TEST` (progress sequence 9, `stages_completed: [AUTHORIZE, INGEST,
+     BASELINE, ANALYZE, STRESS_TEST]`) — the fallback poller never caught up, exactly
+     because every one of its `replay` calls (`since_sequence=5...`) 500'd.
+  2. **D-116's own "worse case," reproduced at its worst, unchanged from D-116's original
+     finding.** A fresh page load deep-linked directly at `?mission=21c58123-…` — the
+     real mission that reached a genuine server-side `VERIFIED` verdict in D-116's own
+     session — still shows, after 15+ seconds of observation: mission chip
+     `[ MISSION 21c58123 · TRIAGE ]` (real value: `VERIFIED`), Verdict panel `Pending`
+     (real value: `VERIFIED`, 2 real verifications), Findings rail
+     `[ AWAITING FINDING ]` (real finding exists server-side), and `[ OPEN COMPARE ]`
+     confirmed `disabled` via `page.locator(...).isDisabled()` (real value: should be
+     enabled, `patchCandidates.length > 0` server-side). Screenshot:
+     `screenshots/06-degraded-label-check.png`. This is not a new failure mode — it is
+     D-116's exact original BLOCKER finding, reproduced unchanged, because D-117's fix,
+     while correctly designed, cannot survive contact with this specific backend bug.
+- **Honest degraded-state labelling — confirmed still fully intact, not regressed.**
+  `[ DEGRADED ]`, `[ × SHARED STREAM · ERROR ]`, `[ · STREAM ERROR ]`, and "mission event
+  stream is degraded" all render correctly throughout — the app never claims to be live
+  when it isn't. This part of D-117's fix is genuinely solid; the honest labelling simply
+  can't be followed by actual recovery against this specific backend bug. Credited
+  explicitly, same as D-116 credited it.
+**Why D-116 called this "HTTP/2 framing" and D-117 investigated nginx instead of this.**
+Both sessions diagnosed from the client/transport side only — neither had reason to
+`docker logs brahmadatta-control-api` at the exact moment of failure (D-116's own `curl
+--http2`/`--http1.1` comparison was a reasonable transport-layer test given what was
+visible from outside; D-117 explicitly disclosed it could not reach the real backend at
+all in its sandbox). The actual cause is a one-tag gap in a Pydantic discriminated union,
+not a connection-sharing/h2-framing issue — D-117's transport-layer investigation and its
+"don't ship an unverified nginx change days before an air-gapped finale" reasoning was
+sound on its own terms, but was aimed at the wrong layer, because the real cause was never
+visible to that session.
+**Attribution.** Not a frontend bug, not something D-117's `frontend-developer` seat
+could have caught by fixing frontend code alone — but also not something the REST
+hydration *design* is entirely blameless for: a single malformed historical event should
+not be able to permanently sink an entire mission's recoverability (both live and via
+REST catch-up). That is a robustness gap worth fixing independently of the specific
+schema mismatch, per this codebase's own "degrade honestly, never catastrophically"
+instinct that the stale-labelling already embodies elsewhere.
+**Options considered for the fix** (routed to `backend-developer`, not this seat's call
+to make): (a) minimal — add `triage_stub` as a valid tag to `MissionEventSchema`'s
+payload union, matching the "hollow stage" semantics `queue.py` already documents; (b)
+defense in depth — make `to_schema`/`format_frame`/`replay_events` resilient to a single
+malformed row (catch `ValidationError`, skip and log the bad row with a `trace_id`,
+continue the stream/page) so a future stub/bad-event kind can't repeat this exact blast
+radius on either code path; (c) both. **Recommend (c)** — (a) alone fixes today's
+instance but leaves the same class of bug able to recur (any future event kind added to
+the orchestrator without a matching schema variant); (b) alone is defense in depth but
+without (a) still silently drops real `TRIAGE`-stage telemetry from the display.
+**Verification suite, re-run fresh, this session.** `cd apps/command-center && npm run
+check` — 12 sub-checks (including `check:mission-snapshot-hydration`, the new one) — 0
+errors, 0 warnings, 0 hints across 42 files, exit 0. `npm run check:security` (part of
+the above) — clean. Root `npm run lint` — clean, exit 0. All output observed directly in
+this session, not re-quoted from D-117. These all pass because they test the frontend
+mechanism in isolation (mocked or unit-level) — none of them, and none of D-117's own
+Playwright-against-mocks scenarios, could have caught BUG-2's real cause, since it lives
+entirely server-side in a code path neither exercises.
+**A secondary, minor observation, not blocking on its own.** `startRestFallbackPoller`'s
+default 5s interval retries indefinitely against a now-permanently-failing endpoint for
+any affected mission — not a correctness bug (it can't make things worse; it just can't
+help), but worth folding into whichever fix option above is taken, so a known-permanently
+-broken replay range doesn't get repolled forever once (b) makes that state
+distinguishable from "still catching up."
+**Cost implications.** The actual fix (schema tag + defensive row-skip) is small and
+backend-only — smaller in scope than either of D-116's or D-117's own cost estimates,
+since the frontend mechanism itself needs no further change. One more
+`backend-developer` pass plus one more `qa-engineer` re-verification cycle, against a
+deadline that has now passed twice (2026-08-20 original, and this is the second
+rejection since).
+**Security implications.** None identified beyond what D-116/D-117 already covered —
+this is a display/telemetry-recoverability bug, not a data-integrity or auth issue. Worth
+noting for `cybersecurity` awareness only insofar as an uncaught `ValidationError`
+producing a generic `INTERNAL_ERROR` response (rather than leaking the traceback) is
+itself good practice, confirmed intact here (`curl` of the replay endpoint returned the
+sanitized error envelope, not a stack trace) — no new exposure from this bug.
+**Scalability implications.** None beyond the secondary observation above (wasted, but
+harmless, repeated polling against a permanently-failing endpoint for any affected
+mission).
+**Recommendation.** REJECTED, per this seat's standing rule that blocker bugs mean
+rejected and only CEO/PM can jointly overrule in writing. Route the real fix
+(`MissionEventSchema` tag gap + defensive row handling, options (a)+(c) above) to
+`backend-developer`, scoped narrowly — this is now a precisely diagnosed, single-cause,
+deterministic bug, not an open-ended transport-layer investigation, so the fix should be
+materially smaller and faster than D-117's own cost estimate for the transport-layer
+follow-up it recommended (which is no longer the right place to look). Once fixed,
+re-verify live against this same real backend (a fresh mission through `TRIAGE` is
+sufficient — no FUZZ campaign needed to confirm the schema/robustness fix) before
+routing back for merge.
+**Final approval authority** — `qa-engineer` (this seat), for the pending
+re-verification; `backend-developer`/`engineering-manager`, for the fix itself;
+`CEO`/`PM` jointly, in writing, if this rejection is to be overridden and merged with
+BUG-2 still open.
+---

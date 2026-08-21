@@ -1,22 +1,36 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+// Re-pointed at `AnalysisRail.tsx` by the design-system rebuild (docs/09-company/04-design-system.md):
+// this component was extracted out of `MissionCommandCenter.tsx` verbatim (same logic, same
+// markup, same CSS classes) when that file became the frozen five-panel frame's composition
+// root, which has no body-height budget left for a sixth panel (§3 — the centre column's 424 +
+// 24 + 236 closes at exactly 684, DS-01). Every assertion below still guards the same real
+// behaviour issue #20 shipped; only the file it reads moved.
 const appRoot = path.resolve(import.meta.dirname, '..');
-const componentPath = path.join(appRoot, 'src/components/MissionCommandCenter.tsx');
+const componentPath = path.join(appRoot, 'src/components/AnalysisRail.tsx');
 const storePath = path.join(appRoot, 'src/lib/events/store.ts');
 const cssPath = path.join(appRoot, 'src/styles/global.css');
+// The frozen-frame rebuild split component CSS across two files: `global.css` keeps the
+// pre-mission setup-drawer surfaces (including AnalysisRail's own rules, unmoved), and the new
+// `command-center-frame.css` carries the five P0 panels' styles, including the Core's
+// `.bd-core--degraded`/`.bd-core--failed` state modifiers this check also verifies. Both are
+// read so a selector living in either file still passes.
+const frameCssPath = path.join(appRoot, 'src/styles/command-center-frame.css');
 
 async function main() {
-  const [component, store, css] = await Promise.all([
+  const [component, store, css, frameCss] = await Promise.all([
     readFile(componentPath, 'utf8'),
     readFile(storePath, 'utf8'),
     readFile(cssPath, 'utf8'),
+    readFile(frameCssPath, 'utf8'),
   ]);
+  const combinedCss = `${css}\n${frameCss}`;
 
   assertAnalysisRailLabels(component);
   assertHashContract(component);
   assertEventStreamCounts(component, store);
-  assertDegradedAndFailedStates(component, store, css);
+  assertDegradedAndFailedStates(component, store, combinedCss);
   assertLongListWindowing(component, css);
 
   console.warn('issue #20 analysis rail ok: event ctest counts, hash truncation, degraded/failed states, bounded signal list');
@@ -62,9 +76,17 @@ function assertDegradedAndFailedStates(component, store, css) {
   for (const selector of [
     '.analysis-rail--degraded',
     '.analysis-rail--failed',
-    '.core-panel--degraded',
-    '.resource-strip--degraded',
-    '.resource-strip--failed',
+    // `.core-panel--*` / `.resource-strip--*` were AIParticleCore's and the old
+    // MissionCommandCenter bottom strip's state classes. The design-system rebuild
+    // (docs/09-company/04-design-system.md) replaced both: the Core's degraded/failed states
+    // now render via `BrahmadattaCore.tsx`'s `.bd-core--degraded`/`.bd-core--failed` (§6.1's own
+    // state table), and the bottom strip's degraded/failed signal is carried by the resource
+    // ledger's state-coloured chips and the alert line, not a strip-level modifier class.
+    '.bd-core--degraded',
+    '.bd-core--failed',
+    '.bd-chip--critical',
+    '.bd-chip--warning',
+    '.bd-alert-line--critical',
   ]) {
     assert(css.includes(selector), `CSS missing distinct state selector ${selector}`);
   }

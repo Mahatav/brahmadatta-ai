@@ -1,0 +1,521 @@
+/* ==========================================================================
+   Command Center frame — docs/09-company/04-design-system.md §3–§7.
+   The five P0 panels, the top/bottom strips, and the rule-and-tick
+   construction system (§2.4). Zero borders, zero backgrounds, zero radius —
+   every panel is located by a hairline rule and four corner crop marks.
+
+   KNOWN GAP, disclosed rather than silently claimed correct: DS-06 requires
+   measuring the shipped Fragment Mono woff2's advance against a 60-character
+   ruler string before trusting any width figure below, and doing so is
+   named as literally the first build task on any panel that does width
+   arithmetic (§2.2, §12 build note 7). That measurement was not run in this
+   pass — flagged in the handoff, not silently skipped.
+   ========================================================================== */
+
+.bd-app {
+  min-height: 100vh;
+  background: var(--bd-surface);
+  color: var(--bd-text);
+  font-family: var(--bd-font-mono);
+}
+
+/* ---- Crop-mark primitive (§2.4, §12 build note 5) -----------------------
+   Four corners, each two 1px strokes stopping --bd-tick-gap short of the
+   true corner, drawn as eight 1px background-gradient line segments on the
+   element's own box — no extra DOM nodes, reused on every panel and on the
+   outer page frame (~50 usages per the design system's own estimate).
+   `mission-control-panel.css` already established a two-corner variant
+   (`.bd-crop-frame`, TL+BR only, via ::before/::after) for the D-100 forms;
+   this is the four-corner version §2.4 requires ("Four per panel"), which a
+   single element's two pseudo-elements cannot express. Left as a distinct
+   class rather than editing that file, which is out of this task's scope. */
+.bd-crop {
+  --bd-tick-color: var(--bd-tick);
+  position: relative;
+  background-repeat: no-repeat;
+  background-image:
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color)),
+    linear-gradient(var(--bd-tick-color), var(--bd-tick-color));
+  background-size:
+    var(--bd-tick-len) var(--bd-rule-hair), var(--bd-rule-hair) var(--bd-tick-len),
+    var(--bd-tick-len) var(--bd-rule-hair), var(--bd-rule-hair) var(--bd-tick-len),
+    var(--bd-tick-len) var(--bd-rule-hair), var(--bd-rule-hair) var(--bd-tick-len),
+    var(--bd-tick-len) var(--bd-rule-hair), var(--bd-rule-hair) var(--bd-tick-len);
+  background-position:
+    left var(--bd-tick-gap) top 0, left 0 top var(--bd-tick-gap),
+    right var(--bd-tick-gap) top 0, right 0 top var(--bd-tick-gap),
+    left var(--bd-tick-gap) bottom 0, left 0 bottom var(--bd-tick-gap),
+    right var(--bd-tick-gap) bottom 0, right 0 bottom var(--bd-tick-gap);
+}
+
+.bd-crop--active { --bd-tick-color: var(--bd-tick-active); }
+.bd-crop--warning { --bd-tick-color: var(--bd-c-warning); }
+.bd-crop--critical { --bd-tick-color: var(--bd-c-critical); }
+
+/* ---- Setup drawer — pre-mission chrome, not one of the five P0 panels --- */
+.bd-setup-drawer {
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule-construction);
+  padding: var(--bd-space-3) var(--bd-space-6);
+}
+
+.bd-setup-drawer__summary {
+  cursor: pointer;
+  list-style: none;
+  padding: var(--bd-space-2) 0;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+}
+.bd-setup-drawer__summary::-webkit-details-marker { display: none; }
+.bd-setup-drawer__summary:hover,
+.bd-setup-drawer__summary:focus-visible { color: var(--bd-text); }
+
+.bd-setup-drawer__body {
+  display: grid;
+  gap: var(--bd-space-6);
+  padding-block: var(--bd-space-4) var(--bd-space-6);
+}
+
+.bd-control-plane {
+  display: grid;
+  gap: var(--bd-space-2);
+  border-top: var(--bd-rule-hair) solid var(--bd-rule-construction);
+  padding-top: var(--bd-space-4);
+}
+
+/* ---- Page frame (§3, §2.4) ----------------------------------------------- */
+.bd-frame {
+  position: relative;
+  margin: var(--bd-space-6) auto;
+  min-width: 1280px;
+  width: calc(100% - var(--bd-space-6) * 2);
+  max-width: 1600px;
+  padding: var(--bd-space-5);
+}
+
+.bd-frame__rule { position: absolute; background: var(--bd-rule); pointer-events: none; }
+.bd-frame__rule--top { top: 0; left: var(--bd-frame-corner-gap); right: var(--bd-frame-corner-gap); height: var(--bd-rule-heavy); background: var(--bd-rule-active); }
+.bd-frame__rule--bottom { bottom: 0; left: var(--bd-frame-corner-gap); right: var(--bd-frame-corner-gap); height: var(--bd-rule-hair); }
+.bd-frame__rule--left { left: 0; top: var(--bd-frame-corner-gap); bottom: var(--bd-frame-corner-gap); width: var(--bd-rule-hair); }
+.bd-frame__rule--right { right: 0; top: var(--bd-frame-corner-gap); bottom: var(--bd-frame-corner-gap); width: var(--bd-rule-hair); }
+
+/* ---- Top strip (§3) ------------------------------------------------------ */
+.bd-top-strip {
+  display: flex;
+  min-height: var(--bd-strip-top);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bd-space-5);
+  flex-wrap: wrap;
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule);
+  padding-bottom: var(--bd-space-3);
+}
+
+.bd-top-strip__wordmark {
+  font-family: var(--bd-font-display);
+  font-size: var(--bd-type-display-sm);
+  line-height: 1;
+}
+
+.bd-top-strip__chips,
+.bd-top-strip__clock {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bd-space-3);
+  align-items: center;
+}
+
+/* ---- Bracket chips (§2.5) ------------------------------------------------ */
+.bd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--bd-space-1);
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  white-space: nowrap;
+}
+.bd-chip--idle { color: var(--bd-state-idle); }
+.bd-chip--running { color: var(--bd-state-running); }
+.bd-chip--verified { color: var(--bd-state-verified); }
+.bd-chip--warning { color: var(--bd-state-warning); }
+.bd-chip--critical { color: var(--bd-state-critical); }
+.bd-chip--not-run { color: var(--bd-state-not-run); }
+
+/* ---- Body: three columns (§3, §6) ---------------------------------------- */
+.bd-body {
+  display: grid;
+  grid-template-columns: var(--bd-col-rail) minmax(var(--bd-col-centre), 1fr) var(--bd-col-rail);
+  gap: var(--bd-space-5);
+  padding-block: var(--bd-space-5);
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule);
+  align-items: start;
+}
+
+.bd-panel { position: relative; min-width: 0; padding: var(--bd-space-4); }
+
+.bd-panel__title {
+  margin: 0 0 var(--bd-space-3);
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+}
+
+.bd-panel__empty {
+  display: grid;
+  gap: var(--bd-space-2);
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-sm);
+  line-height: var(--bd-type-mono-sm-lh);
+}
+.bd-panel__empty-label {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+}
+
+.bd-placeholder-rule { height: var(--bd-rule-hair); background: var(--bd-rule-construction); }
+.bd-placeholder-rule--40 { width: 40%; }
+.bd-placeholder-rule--65 { width: 65%; }
+
+/* ---- Stage Timeline (§6.2) — 336px rail ---------------------------------- */
+.bd-timeline { width: var(--bd-col-rail); }
+.bd-timeline__list { list-style: none; margin: 0; padding: 0; }
+.bd-timeline__row { border-top: var(--bd-rule-hair) solid var(--bd-rule-construction); }
+.bd-timeline__row:first-child { border-top: none; }
+
+.bd-timeline__row-toggle {
+  display: grid;
+  grid-template-columns: var(--bd-space-7) minmax(0, 1fr);
+  gap: var(--bd-space-2);
+  width: 100%;
+  min-height: var(--bd-row-h);
+  align-items: start;
+  padding: var(--bd-space-2) 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.bd-timeline__row-toggle:disabled { cursor: default; }
+.bd-timeline__row-toggle--static { cursor: default; }
+
+.bd-timeline__index {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-3xs);
+  letter-spacing: var(--bd-type-mono-3xs-ls);
+}
+
+.bd-timeline__body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--bd-space-2); }
+.bd-timeline__label { grid-column: 1; font-size: var(--bd-type-mono-sm); color: var(--bd-text); }
+.bd-timeline__label--running { font-size: var(--bd-type-mono-lg); color: var(--bd-state-running); }
+.bd-timeline__chip { grid-column: 2; font-size: var(--bd-type-mono-xs); color: var(--bd-text-secondary); white-space: nowrap; }
+.bd-timeline__detail { grid-column: 1 / -1; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); overflow-wrap: anywhere; }
+
+.bd-timeline__row--running .bd-timeline__chip { color: var(--bd-state-running); }
+.bd-timeline__row--ok .bd-timeline__chip { color: var(--bd-state-verified); }
+.bd-timeline__row--fail .bd-timeline__chip,
+.bd-timeline__row--fail .bd-timeline__label { color: var(--bd-state-critical); }
+.bd-timeline__row--warn .bd-timeline__chip { color: var(--bd-state-warning); }
+.bd-timeline__row--not_reached .bd-timeline__chip,
+.bd-timeline__row--not_reached .bd-timeline__label,
+.bd-timeline__row--not_reached .bd-timeline__detail { color: var(--bd-text-secondary); }
+
+.bd-timeline__events { list-style: none; margin: 0; padding: 0 0 var(--bd-space-2); }
+.bd-timeline__event {
+  min-height: var(--bd-row-event-h);
+  padding-left: var(--bd-space-6);
+  display: flex;
+  align-items: center;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-xs);
+  overflow-wrap: anywhere;
+}
+.bd-timeline__event--overflow { color: var(--bd-text-secondary); font-style: normal; }
+.bd-timeline__pin { margin-top: var(--bd-space-3); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-2xs); }
+
+/* ---- Centre column: Core + Verdict panel (§6.1, §6.5, DS-01) ------------- */
+.bd-centre-col {
+  /* Two grid ITEMS (Core panel, Verdict panel) with a 24px gap between them — the gap is
+     `row-gap`, not a third explicit row track. An earlier version of this rule used
+     `grid-template-rows: var(--bd-core-block) var(--bd-space-5) var(--bd-verdict-panel)` (three
+     tracks for two children): with no DOM element for the middle "gap" track, CSS Grid's
+     auto-placement put the Verdict panel into that 24px row instead of the 236px one, crushing
+     every gate row into a 24px box. `row-gap` is the correct primitive for spacing between grid
+     tracks that don't correspond to their own element. 424 + 24 + 236 = 684 either way (§3). */
+  display: grid;
+  grid-template-rows: var(--bd-core-block) var(--bd-verdict-panel);
+  row-gap: var(--bd-space-5);
+  min-width: 0;
+}
+
+.bd-core-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); place-items: center; gap: var(--bd-space-2); }
+.bd-core-panel .bd-panel__title { justify-self: start; width: 100%; }
+
+.bd-core { display: grid; justify-items: center; gap: 0; }
+.bd-core__wheel { position: relative; width: var(--bd-core-wheel); height: var(--bd-core-wheel); }
+.bd-core__svg { width: 100%; height: 100%; }
+
+.bd-core__centre {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.bd-core__word {
+  font-family: var(--bd-font-display);
+  font-size: var(--bd-type-display-md);
+  line-height: var(--bd-type-display-md-lh);
+  white-space: nowrap;
+}
+.bd-core__word--text { color: var(--bd-text); }
+.bd-core__word--secondary { color: var(--bd-text-secondary); }
+.bd-core__word--verified { color: var(--bd-state-verified); }
+.bd-core__word--critical { color: var(--bd-state-critical); }
+.bd-core__word--warning { color: var(--bd-state-warning); }
+
+.bd-core__label { height: var(--bd-core-label); display: grid; align-content: center; gap: var(--bd-space-1); text-align: center; }
+.bd-core__label-line { margin: 0; font-size: var(--bd-type-mono-md); line-height: var(--bd-type-mono-md-lh); }
+.bd-core__label-line--secondary { color: var(--bd-text-secondary); }
+.bd-core__label-line--running { color: var(--bd-state-running); }
+.bd-core__label-line--verified { color: var(--bd-state-verified); }
+.bd-core__label-line--warning { color: var(--bd-state-warning); }
+
+.bd-core__ray { stroke: var(--bd-rule-construction); stroke-width: 1; }
+.bd-core__ray--lit { stroke: var(--bd-rule); }
+.bd-core__rim-circle { fill: none; stroke: var(--bd-rule); stroke-width: 1; }
+.bd-core__spoke { stroke: var(--bd-rule); stroke-width: 1; }
+.bd-core__spoke--broken { stroke: var(--bd-state-critical); }
+.bd-core__verified-ring { fill: none; stroke: var(--bd-state-verified); stroke-width: 1; }
+.bd-core__chord { stroke: var(--bd-state-warning); stroke-width: 1; }
+.bd-core__plate { fill: none; stroke: var(--bd-rule-construction); stroke-width: 1; }
+.bd-core__yantra polygon { fill: none; stroke: var(--bd-rule-construction); stroke-width: 1; }
+
+.bd-core__ramp {
+  font-family: var(--bd-font-mono);
+  font-size: 6.5px;
+  letter-spacing: 0;
+}
+.bd-core__ramp--pending,
+.bd-core__ramp--skipped { fill: var(--bd-rule-construction); }
+.bd-core__ramp--running { fill: var(--bd-state-running); }
+.bd-core__ramp--complete { fill: var(--bd-rule); }
+.bd-core__ramp--failed { fill: var(--bd-state-critical); }
+.bd-core__ramp--live { animation: bd-core-ramp-tick var(--bd-motion-ramp) steps(1) infinite alternate; }
+@keyframes bd-core-ramp-tick { from { opacity: 1; } to { opacity: 0.55; } }
+.bd-core[data-stream-state='stale'] .bd-core__ramp--live,
+.bd-core[data-stream-state='error'] .bd-core__ramp--live { animation-play-state: paused; }
+
+/* Core-level state modifiers (§6.1's own state table). `.bd-core-panel`'s crop ticks pick up
+   the same colour so "the four crop ticks of the centre column turn warning-coloured" (Degraded
+   row) is a state carried by the panel's own location marks, not a separate indicator. */
+.bd-core-panel:has(.bd-core--degraded) { --bd-tick-color: var(--bd-c-warning); }
+.bd-core-panel:has(.bd-core--failed) { --bd-tick-color: var(--bd-c-critical); }
+.bd-core-panel:has(.bd-core--verified) { --bd-tick-color: var(--bd-c-verified); }
+.bd-core-panel:has(.bd-core--rejected) { --bd-tick-color: var(--bd-c-critical); }
+.bd-core--degraded,
+.bd-core--failed,
+.bd-core--verified,
+.bd-core--rejected { color: inherit; }
+.bd-core--error { display: grid; gap: var(--bd-space-3); padding: var(--bd-space-4); color: var(--bd-state-critical); }
+.bd-core__error-title { margin: 0; font-size: var(--bd-type-mono-sm); }
+.bd-core__error-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--bd-space-1); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); }
+.bd-core__error-note { color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); }
+
+/* ---- Verdict panel (§6.5) — 608 x 236 ------------------------------------ */
+.bd-verdict { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 0; align-content: start; }
+.bd-verdict__header { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-space-3); flex-wrap: wrap; }
+.bd-verdict__word-block { margin-bottom: var(--bd-space-2); }
+.bd-verdict__word {
+  margin: 0;
+  font-family: var(--bd-font-display);
+  font-size: var(--bd-type-display-lg);
+  line-height: var(--bd-type-display-lg-lh);
+}
+.bd-verdict__underline { height: var(--bd-rule-heavy); width: 100%; margin-top: var(--bd-space-1); }
+.bd-verdict__word-block--secondary .bd-verdict__word { color: var(--bd-text-secondary); }
+.bd-verdict__word-block--secondary .bd-verdict__underline { background: var(--bd-rule-construction); }
+.bd-verdict__word-block--running .bd-verdict__word { color: var(--bd-text); }
+.bd-verdict__word-block--running .bd-verdict__underline { background: var(--bd-rule-active); }
+.bd-verdict__word-block--verified .bd-verdict__word { color: var(--bd-state-verified); }
+.bd-verdict__word-block--verified .bd-verdict__underline { background: var(--bd-state-verified); }
+.bd-verdict__word-block--critical .bd-verdict__word { color: var(--bd-state-critical); }
+.bd-verdict__word-block--critical .bd-verdict__underline { background: var(--bd-state-critical); }
+.bd-verdict__word-block--warning .bd-verdict__word { color: var(--bd-state-warning); }
+.bd-verdict__word-block--warning .bd-verdict__underline { background: var(--bd-state-warning); }
+
+.bd-verdict__denominator { margin: var(--bd-space-2) 0 var(--bd-space-3); font-size: var(--bd-type-mono-lg); line-height: var(--bd-type-mono-lg-lh); color: var(--bd-text); }
+.bd-verdict__policy-note { margin: var(--bd-space-2) 0 0; font-size: var(--bd-type-mono-xs); color: var(--bd-state-warning); }
+
+/* ---- Gate matrix (§6.4.3, §6.5) — five fixed rows ------------------------ */
+/* D-114 BUG-1: `.bd-gate-row` used to be `display: grid` (a single `1fr` column) while also
+   being a grid ITEM of `.bd-gate-matrix`'s own `auto`-tracked rows. A grid item that is itself
+   a nested grid container computes its row-track contribution via the nested grid's own sizing
+   algorithm rather than simple content height; with an explicit `min-height: 20px` on that
+   nested-grid item, the browser resolved every `.bd-gate-matrix` row track to exactly 20px —
+   the item's own floor, not its two children's (`<dt>` label + `<dd>` detail, ~40-44px
+   together) real rendered height. Confirmed live: `getComputedStyle` on `.bd-gate-matrix`
+   showed `grid-template-rows: 20px 20px 20px 20px 20px`, and adjacent rows' text collided
+   (row N's `<dd>` and row N+1's `<dt>` occupied the identical y-range).
+
+   A first pass at this fix just deleted `.bd-gate-row`'s own `display: grid` (its two children,
+   `<dt>`/`<dd>`, are plain block-level elements that stack top-to-bottom on their own — the
+   nested grid bought nothing). That is necessary but was NOT sufficient, caught by re-driving
+   this live rather than trusting the CSS reasoning alone: `global.css` carries a generic,
+   unscoped `dl div { display: grid; grid-template-columns: var(--bd-col-rail) minmax(0, 1fr);
+   gap: var(--bd-space-4); }` rule, written for a completely different `<dl><div>…</div></dl>`
+   pattern elsewhere in the app (the health-result/system-status panels). `.bd-gate-row` is a
+   bare `<div>` inside a `<dl>` (`.bd-gate-matrix`) — the exact shape that global selector
+   matches — so deleting `.bd-gate-row`'s own `display: grid` did not make it a plain block; it
+   fell through to that unrelated global rule instead, silently turning every gate row into a
+   RAIL-WIDTH-label / flexible-detail TWO-COLUMN layout (confirmed live: `<dt>` and `<dd>`
+   rendered at the identical y-coordinate, side by side, not stacked). That accidentally doesn't
+   collide either — two columns can't overlap — but it is not the row shape this panel was built
+   with (D-113's `.bd-gate-row` was explicitly single-column/stacked) and it depends on an
+   unrelated global selector reaching in, which is exactly the kind of implicit coupling that
+   produces bugs like this one. `display: block` here is explicit and wins on specificity (a
+   class selector beats `dl div`'s two type selectors) regardless of load order, so `.bd-gate-row`
+   no longer depends on what else in `global.css` happens to match `<dl> <div>`.
+
+   Same class of bug as the `.bd-centre-col` row-gap issue above (a nested/implicit grid track
+   not sizing to its real content) for the OUTER fix — `grid-auto-rows: min-content` on
+   `.bd-gate-matrix` makes each row track size to its real content instead of a clamped floor. */
+.bd-gate-matrix { display: grid; grid-auto-rows: min-content; gap: 0; margin: 0; }
+.bd-gate-row { display: block; min-height: 20px; padding: var(--bd-space-1) 0; }
+.bd-gate-row__label { margin: 0; font-size: var(--bd-type-mono-sm); color: var(--bd-text); }
+.bd-gate-row__detail { margin: 0 0 0 var(--bd-space-4); font-size: var(--bd-type-mono-xs); color: var(--bd-text-secondary); overflow-wrap: anywhere; }
+.bd-gate-row--verified .bd-gate-row__label { color: var(--bd-state-verified); }
+.bd-gate-row--critical .bd-gate-row__label { color: var(--bd-state-critical); }
+.bd-gate-row--warning .bd-gate-row__label { color: var(--bd-state-warning); }
+.bd-gate-row--not-run .bd-gate-row__label { color: var(--bd-state-not-run); }
+
+/* ---- Findings rail (§6.3, §6.3a) — 336px rail ----------------------------- */
+.bd-findings { width: var(--bd-col-rail); }
+.bd-findings__header { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-space-2); flex-wrap: wrap; }
+.bd-findings__list { list-style: none; margin: 0 0 var(--bd-space-3); padding: 0; }
+.bd-findings__row { min-height: var(--bd-row-h); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0 var(--bd-space-2); align-items: baseline; padding: var(--bd-space-2) 0; border-left: 2px solid transparent; padding-left: var(--bd-space-2); }
+.bd-findings__row--selected { border-left-color: var(--bd-rule-active); }
+.bd-findings__index { color: var(--bd-text-secondary); font-size: var(--bd-type-mono-3xs); }
+.bd-findings__title { font-size: var(--bd-type-mono-md); color: var(--bd-text); }
+.bd-findings__location { grid-column: 1 / -1; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); overflow-wrap: anywhere; }
+
+.bd-evidence { display: grid; gap: var(--bd-space-3); }
+.bd-evidence__block { border-top: var(--bd-rule-hair) solid var(--bd-rule-construction); padding-top: var(--bd-space-2); display: grid; gap: var(--bd-space-1); }
+.bd-evidence__line { margin: 0; font-size: var(--bd-type-mono-sm); color: var(--bd-text); overflow-wrap: anywhere; }
+.bd-evidence__raw { margin: 0; font-size: var(--bd-type-mono-xs); color: var(--bd-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.bd-evidence__frames { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.bd-evidence__frame { font-size: var(--bd-type-mono-xs); color: var(--bd-text); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.bd-evidence__frame-count { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-space-2); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-2xs); }
+.bd-evidence__pending { color: var(--bd-state-not-run); font-size: var(--bd-type-mono-sm); margin: 0; }
+.bd-evidence__error { color: var(--bd-state-critical); font-size: var(--bd-type-mono-sm); margin: 0 0 var(--bd-space-2); }
+.bd-evidence--loading { display: grid; gap: var(--bd-space-2); }
+
+/* ---- Bottom strip (§6.6, §2.7) -------------------------------------------- */
+.bd-bottom-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--bd-space-5);
+  min-height: var(--bd-strip-bottom);
+  padding-top: var(--bd-space-3);
+}
+.bd-ledger { display: grid; gap: var(--bd-space-1); }
+.bd-ledger__line { margin: 0; display: flex; flex-wrap: wrap; gap: var(--bd-space-3); }
+
+.bd-bottom-strip__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--bd-space-4);
+  min-height: var(--bd-control-h);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.bd-bottom-strip__controls .bd-bracket-control { grid-column: auto; }
+.bd-bottom-strip__export-receipt { grid-column: 1 / -1; margin: 0; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-2xs); overflow-wrap: anywhere; }
+
+.bd-bracket-control--inline { display: inline-flex; min-width: auto; padding: 0 var(--bd-space-1); grid-column: auto; }
+
+.bd-alert-line--verified { color: var(--bd-state-verified); }
+.bd-alert-line--warning { color: var(--bd-state-warning); }
+.bd-alert-line--critical { color: var(--bd-state-critical); }
+
+/* ---- Candidate Compare overlay (§6.4) — 1328 x 684 ------------------------ */
+.bd-overlay-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--bd-c-field);
+  z-index: var(--bd-z-overlay);
+  display: grid;
+  place-items: center;
+  padding: var(--bd-space-5);
+}
+.bd-overlay {
+  position: relative;
+  width: min(100%, var(--bd-overlay-w));
+  max-height: var(--bd-overlay-h);
+  overflow: auto;
+  padding: var(--bd-space-5);
+}
+.bd-overlay__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--bd-space-5); border-bottom: var(--bd-rule-hair) solid var(--bd-rule); padding-bottom: var(--bd-space-3); margin-bottom: var(--bd-space-4); }
+.bd-overlay__finding-line { margin: var(--bd-space-1) 0 0; color: var(--bd-text); font-size: var(--bd-type-mono-sm); }
+.bd-overlay__grid { display: grid; grid-template-columns: repeat(2, minmax(0, var(--bd-compare-col))); gap: var(--bd-space-5); position: relative; }
+.bd-overlay__grid::after { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: var(--bd-rule-hair); background: var(--bd-rule); transform: translateX(-50%); }
+.bd-overlay__grid--degraded { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.bd-overlay__overflow-note { margin-top: var(--bd-space-3); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-2xs); }
+
+.bd-compare-col { display: grid; gap: var(--bd-space-2); align-content: start; min-width: 0; }
+.bd-compare-col--full { grid-column: 1 / -1; }
+.bd-compare-col__candidate { margin: 0; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-2xs); }
+.bd-compare-col__provenance { margin: 0; color: var(--bd-text); font-size: var(--bd-type-mono-md); }
+.bd-compare-col__policy { margin: 0; color: var(--bd-text); font-size: var(--bd-type-mono-sm); }
+.bd-compare-col__policy--fail { color: var(--bd-state-critical); }
+.bd-compare-col__suppressed { color: var(--bd-state-critical); font-size: var(--bd-type-mono-sm); }
+
+.bd-compare-col__verdict-block { border-top: var(--bd-rule-hair) solid var(--bd-rule-construction); border-bottom: var(--bd-rule-hair) solid var(--bd-rule-construction); padding: var(--bd-space-2) 0; }
+.bd-compare-col__verdict-word { margin: 0; font-family: var(--bd-font-display); font-size: var(--bd-type-display-lg); line-height: var(--bd-type-display-lg-lh); }
+.bd-compare-col__verdict-underline { height: var(--bd-rule-heavy); width: 100%; margin-top: var(--bd-space-1); }
+.bd-compare-col__gates-ran { margin: var(--bd-space-2) 0 0; font-size: var(--bd-type-mono-lg); color: var(--bd-text); }
+.bd-compare-col__verdict-block--verified .bd-compare-col__verdict-word { color: var(--bd-state-verified); }
+.bd-compare-col__verdict-block--verified .bd-compare-col__verdict-underline { background: var(--bd-state-verified); }
+.bd-compare-col__verdict-block--critical .bd-compare-col__verdict-word { color: var(--bd-state-critical); }
+.bd-compare-col__verdict-block--critical .bd-compare-col__verdict-underline { background: var(--bd-state-critical); }
+.bd-compare-col__verdict-block--warning .bd-compare-col__verdict-word { color: var(--bd-state-warning); }
+.bd-compare-col__verdict-block--warning .bd-compare-col__verdict-underline { background: var(--bd-state-warning); }
+.bd-compare-col__verdict-block--running .bd-compare-col__verdict-word,
+.bd-compare-col__verdict-block--secondary .bd-compare-col__verdict-word { color: var(--bd-text-secondary); }
+.bd-compare-col__verdict-block--running .bd-compare-col__verdict-underline,
+.bd-compare-col__verdict-block--secondary .bd-compare-col__verdict-underline { background: var(--bd-rule-construction); }
+
+.bd-compare-col__self-report { border-top: var(--bd-rule-hair) solid var(--bd-rule-construction); padding-top: var(--bd-space-2); color: var(--bd-model-selfreport); font-size: var(--bd-type-mono-xs); }
+.bd-compare-col--evidence { border-top: none; }
+
+/* ---- Diff body (§6.4.4) --------------------------------------------------- */
+.bd-diff { border-top: var(--bd-rule-hair) solid var(--bd-rule-construction); padding-top: var(--bd-space-2); display: grid; gap: var(--bd-space-1); }
+.bd-diff__meta { margin: 0; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); }
+.bd-diff__body { list-style: none; margin: 0; padding: 0; max-height: var(--bd-diff-scroll-h); overflow-y: auto; font-family: var(--bd-font-mono); font-size: var(--bd-type-mono-md); line-height: var(--bd-type-mono-md-lh); }
+.bd-diff__line { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: var(--bd-space-1); }
+.bd-diff__gutter { text-align: center; color: var(--bd-text-secondary); }
+.bd-diff__text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.bd-diff__line--added { border-left: var(--bd-rule-heavy) solid var(--bd-state-verified); padding-left: var(--bd-space-1); }
+.bd-diff__line--added .bd-diff__gutter,
+.bd-diff__line--added .bd-diff__text { color: var(--bd-state-verified); }
+.bd-diff__line--removed { border-left: var(--bd-rule-heavy) solid var(--bd-state-critical); padding-left: var(--bd-space-1); }
+.bd-diff__line--removed .bd-diff__text { color: var(--bd-text-secondary); }
+.bd-diff__line--context .bd-diff__text { color: var(--bd-text); }
+.bd-diff__disclosure { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-space-2); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); }
+.bd-diff--refused .bd-diff__body { opacity: 0.55; }
+
+/* Below 1280px is explicitly not supported (§3: "the pack's collapse-to-drawers behaviour is
+   cut, §11"). `.bd-frame`'s `min-width: 1280px` above lets the frame overflow into horizontal
+   scroll rather than collapsing into a broken layout, which is the same choice the pre-existing
+   `.command-center` rules made. */

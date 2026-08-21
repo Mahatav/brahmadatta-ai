@@ -137,7 +137,7 @@ export interface paths {
         };
         /**
          * Replay ordered events from a sequence number
-         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery.
+         * @description Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.safe_to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery. A single malformed row (D-116) is skipped and logged rather than failing the whole page with a 500 — `total`/`limit`/`offset` still describe the underlying row range queried, `items` may hold fewer than `limit` entries when a row in that range could not be serialized.
          */
         get: operations["replayMissionEvents"];
         put?: never;
@@ -1215,7 +1215,7 @@ export interface components {
              * Payload
              * @description Typed, discriminated on `kind`. Everything the UI renders comes from here.
              */
-            payload: components["schemas"]["StateChangedPayload"] | components["schemas"]["StageProgressPayload"] | components["schemas"]["SnapshotPayload"] | components["schemas"]["BaselinePayload"] | components["schemas"]["FindingPayload"] | components["schemas"]["ReproducerPayload"] | components["schemas"]["FuzzingPayload"] | components["schemas"]["PatchCandidatePayload"] | components["schemas"]["VerificationPayload"] | components["schemas"]["MissionVerdictPayload"] | components["schemas"]["EvidenceExportPayload"] | components["schemas"]["ResourceUsagePayload"] | components["schemas"]["TeardownPayload"] | components["schemas"]["PolicyViolationPayload"] | components["schemas"]["LogPayload"];
+            payload: components["schemas"]["StateChangedPayload"] | components["schemas"]["StageProgressPayload"] | components["schemas"]["SnapshotPayload"] | components["schemas"]["BaselinePayload"] | components["schemas"]["FindingPayload"] | components["schemas"]["ReproducerPayload"] | components["schemas"]["FuzzingPayload"] | components["schemas"]["PatchCandidatePayload"] | components["schemas"]["VerificationPayload"] | components["schemas"]["MissionVerdictPayload"] | components["schemas"]["EvidenceExportPayload"] | components["schemas"]["ResourceUsagePayload"] | components["schemas"]["TeardownPayload"] | components["schemas"]["PolicyViolationPayload"] | components["schemas"]["LogPayload"] | components["schemas"]["TriageStubPayload"];
             /**
              * Sequence
              * @description Gap-free per-mission ordinal. Also the SSE `id:` field, so a reconnecting client can detect and replay a gap.
@@ -2028,6 +2028,28 @@ export interface components {
              * @default
              */
             reason: string;
+        };
+        /**
+         * TriageStubPayload
+         * @description `TRIAGE` has no `JobKind` (architecture spec §2.5) — a deliberate "hollow
+         *     stage" whose three required events (`STAGE_STARTED`, `LOG`, `STAGE_COMPLETED`)
+         *     carry no additional structured data, only the tag identifying which stub emitted
+         *     them (`orchestrator.queue._emit_triage_stub_events`, which has emitted exactly
+         *     `{"kind": "triage_stub"}` since `5105212`, months before this variant existed).
+         *
+         *     D-116: this tag was missing from the union entirely, so every real mission —
+         *     `TRIAGE` is mandatory in the workflow — produced an event the discriminated union
+         *     rejected with `union_tag_invalid`. That crashed both `GET .../events` (SSE) and
+         *     `GET .../events/replay` the moment they reached it. Added as a real, correctly
+         *     typed variant rather than a permissive catch-all, so a *genuinely* new/unknown
+         *     `kind` added later still fails loudly here instead of silently passing through.
+         */
+        TriageStubPayload: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "triage_stub";
         };
         /**
          * Verdict

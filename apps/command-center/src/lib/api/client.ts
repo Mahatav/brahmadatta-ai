@@ -45,6 +45,7 @@ export type VerificationRecord = components['schemas']['VerificationRecord'];
 export type EvidenceBundle = components['schemas']['EvidenceBundle'];
 export type ExportRequest = components['schemas']['ExportRequest'];
 export type ExportReceipt = components['schemas']['ExportReceipt'];
+export type MissionEventEnvelope = components['schemas']['MissionEvent'];
 export type Page<T> = { items: T[]; total: number; limit: number; offset: number };
 
 export interface ModelGatewayStatus {
@@ -185,6 +186,27 @@ export async function createMission(payload: MissionCreateRequest, signal?: Abor
 
 export async function getMissionDetail(missionId: string, signal?: AbortSignal): Promise<MissionDetail> {
   return request<MissionDetail>(`/api/v1/missions/${encodeURIComponent(missionId)}`, withSignal({}, signal));
+}
+
+/**
+ * `GET /missions/{id}/events/replay` — D-114 BUG-2's fix. Built server-side as "gap recovery
+ * for the SSE stream" (`api/routers/missions.py::replay_events`): reads the exact same
+ * persisted `MissionEvent` log the live stream tails, through the same schema conversion, so a
+ * client replaying from `sinceSequence` reconstructs identical state to one that received every
+ * event live. `src/lib/events/store.ts`'s `hydrateMissionSnapshot` is the only caller — see that
+ * function's own doc comment for why this exists (the SSE stream had zero REST-based recovery
+ * path before this).
+ */
+export async function replayMissionEvents(
+  missionId: string,
+  params: { sinceSequence?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<Page<MissionEventEnvelope>> {
+  const suffix = queryString({ since_sequence: params.sinceSequence, limit: params.limit });
+  return request<Page<MissionEventEnvelope>>(
+    `/api/v1/missions/${encodeURIComponent(missionId)}/events/replay${suffix}`,
+    withSignal({}, signal),
+  );
 }
 
 export async function authorizeMission(
