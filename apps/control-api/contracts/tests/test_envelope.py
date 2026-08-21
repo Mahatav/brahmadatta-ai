@@ -14,6 +14,7 @@ from contracts.schemas.envelope import (
     LogPayload,
     MissionEvent,
     StateChangedPayload,
+    TriageStubPayload,
 )
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
@@ -116,6 +117,36 @@ def test_the_d3_gate_signal_is_an_unambiguous_literal():
 
     unbuilt = green.model_copy(update={"build_ok": False})
     assert unbuilt.passed is False
+
+
+def test_triage_stub_payload_is_a_real_recognized_variant():
+    """D-116 regression: `orchestrator.queue._emit_triage_stub_events` emits exactly
+    `{"kind": "triage_stub"}` for the mandatory TRIAGE "hollow stage" — before this
+    fix, `EventPayload`'s discriminated union had no `triage_stub` variant at all, so
+    parsing this exact real payload raised `union_tag_invalid` and, in turn, crashed
+    both `GET .../events` (SSE) and `GET .../events/replay` for essentially every
+    mission (TRIAGE is mandatory). This is the exact payload shape the orchestrator
+    actually sends, not a synthetic approximation of it."""
+    real_orchestrator_payload = {"kind": "triage_stub"}
+
+    parsed = event(
+        type=EventType.STAGE_COMPLETED,
+        state=MissionState.TRIAGE,
+        payload=real_orchestrator_payload,
+    )
+
+    assert isinstance(parsed.payload, TriageStubPayload)
+    assert parsed.payload.kind == "triage_stub"
+    # Round-trips cleanly through JSON, exactly like every other variant.
+    restored = MissionEvent.model_validate_json(parsed.model_dump_json())
+    assert restored == parsed
+
+
+def test_triage_stub_payload_still_forbids_unknown_fields():
+    """Not a permissive catch-all (D-116 explicitly rejected that shape) — a
+    genuinely different, not-yet-modeled event still fails loudly."""
+    with pytest.raises(ValidationError):
+        event(payload={"kind": "triage_stub", "extra_field_nobody_asked_for": True})
 
 
 def test_metrics_are_numeric_only():

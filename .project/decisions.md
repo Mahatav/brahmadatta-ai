@@ -11695,3 +11695,379 @@ itself (recommended above, not executed here); this seat, for the live-run findi
 evidence, verdict, and the two infra fixes recorded here.
 
 ---
+
+## D-113 — `triage_stub` `MissionEventSchema` tag gap fixed, plus defense-in-depth
+row-skipping for SSE/replay (closes the independent `qa-engineer` D-116 finding on
+`feat/command-center-visual-rebuild`, which root-caused what two prior sessions had
+diagnosed as an HTTP/2 transport bug) · 2026-08-21 · `backend-developer` seat
+
+**Context.** This entry is D-113 in *this branch's* (`fix/triage-stub-event-schema`,
+based on `main`) copy of `.project/decisions.md` — main's own decision log ends at
+D-112 as of this dispatch. The bug this fixes was independently found and precisely
+diagnosed as **D-116** on the *separate*, diverged `feat/command-center-visual-rebuild`
+branch (`.claude/worktrees/agent-a99972f7fb9731b59/.project/decisions.md`), whose own
+numbering reached D-116 through that branch's own independent chain (D-113 Command
+Center visual rebuild → D-114 qa-engineer REJECTED it, found BUG-1/BUG-2 → D-115
+frontend fixed both, but BUG-2's "fix" (REST hydration/fallback poller) could not
+survive contact with the real backend → D-116 qa-engineer re-verified live against the
+real, unmodified backend and found the *actual* root cause: a bug in this repository
+that predates the whole Command Center rebuild by months, on `main`, unrelated to any
+frontend work. Read in full before this entry: D-113/D-114/D-115/D-116 on that
+worktree's decisions.md.
+
+**The bug, read directly from source in this branch (`fix/triage-stub-event-schema`,
+`orchestrator/queue.py` / `api/sse.py` at commit `545ae91`, matching what D-116
+independently found live).** `orchestrator/queue.py::_emit_triage_stub_events`
+(introduced in `5105212`, "#168 T0 — orchestrator tick loop") emits three real
+`MissionEvent` rows with `payload={"kind": "triage_stub"}` for every mission's
+mandatory `TRIAGE` stage (`TRIAGE` has no `JobKind` — architecture spec §2.5 — so the
+orchestrator drives it directly and must emit `STAGE_STARTED` → `LOG` →
+`STAGE_COMPLETED` itself). `contracts/schemas/envelope.py`'s `EventPayload`
+discriminated union — the schema both `GET .../events` (SSE, `api/sse.py::to_schema`/
+`format_frame`/`event_frames`) and `GET .../events/replay`
+(`api/routers/missions.py::replay_events` → `api/sse.py::to_schema`) route every event
+through — had no `triage_stub` variant. Every real mission passes through `TRIAGE`, so
+this raised `pydantic.ValidationError` (`union_tag_invalid`) on essentially every
+mission, on both code paths: the SSE generator aborts mid-stream (client-side this
+surfaces as `net::ERR_HTTP2_PROTOCOL_ERROR` — a server closing the connection
+mid-response looks like a protocol error to the browser, not the clean structured
+error it actually is), and the REST replay endpoint returns a real `500
+INTERNAL_ERROR` for any page spanning the row. D-116's own text explains precisely why
+two prior live sessions (D-114, D-115) diagnosed this as an HTTP/2 framing/transport
+issue rather than a schema bug: both looked from the client/transport side only,
+neither had reason to check `docker logs brahmadatta-control-api` at the moment of
+failure.
+
+**Fix — both of D-116's recommended options, together (its own "(c)" recommendation),
+confirmed via a real regression test that reproduces the exact crash before the fix
+and confirms it after.**
+
+1. **`TriageStubPayload` added as a real, correctly-typed `EventPayload` variant** —
+   `contracts/schemas/envelope.py`. `kind: Literal["triage_stub"]`, no other fields:
+   read `_emit_triage_stub_events` directly and confirmed the real payload it has
+   always sent is exactly `{"kind": "triage_stub"}`, nothing more. `StrictSchema`'s
+   `extra="forbid"` means this is a real, narrow schema — not a permissive catch-all —
+   so a genuinely different, not-yet-modeled `kind` still fails loudly rather than
+   silently passing through (this was an explicit design constraint from D-116's own
+   text: "not a permissive catch-all that would hide future real schema drift the same
+   way"). `docs/03-technical/21-api-specification.md` updated (fourteen → fifteen
+   variants, with a dated note) and `packages/schemas/openapi.json` regenerated via
+   `tools/export_openapi.py` — the committed-dump drift check
+   (`contracts/tests/test_openapi_dump.py::test_committed_dump_is_current`) failed
+   before the regeneration and passes after, confirming the frontend's generated
+   TypeScript will pick up the new variant on next `npm run generate:client` (or
+   equivalent) rather than silently describing a contract that no longer matches.
+2. **Defense in depth: `api/sse.py` and `api/routers/missions.py::replay_events` now
+   tolerate a single malformed row instead of crashing the whole connection/page.**
+   `api/sse.py::to_schema` is kept strict and raising (tests that want a hard failure
+   on genuine drift, and `event_dict_for_test`, still use it directly — this is
+   deliberate, not an oversight: a function that silently swallows validation errors
+   everywhere would be a worse regression than the one being fixed, since it would
+   hide the *next* schema-drift bug exactly the way `triage_stub`'s absence hid this
+   one). A new `safe_to_schema` wraps it, catches `pydantic.ValidationError`, logs
+   (row id, mission id, sequence, trace_id — deliberately not the payload contents,
+   since a malformed payload's own well-formedness for a log line can't be trusted
+   either), and returns `None`. `format_frame` returns `None` for a malformed row;
+   `event_frames`' poll loop skips a `None` frame but **still advances its cursor past
+   that row's sequence** (the specific bug a naive fix would introduce: skip the frame
+   but leave the cursor pointed at the same unserializable row forever, spinning the
+   poll loop on it every 0.5s indefinitely). `replay_events` filters `None` results out
+   of `items` while `total`/`limit`/`offset` still describe the real underlying row
+   range queried — an honest "some rows in this range could not be served" rather than
+   a silently-shortened page that looks complete.
+
+**A real regression test, run against the actual pre-fix code, not just written and
+assumed.** Added to `api/tests/test_event_stream.py` and
+`contracts/tests/test_envelope.py`: real `MissionEvent` rows with the exact
+`{"kind": "triage_stub"}` payload `_emit_triage_stub_events` sends, driven through the
+real ASGI `GET .../events` view and the real `GET .../events/replay` view (not a mock
+of either). Verified the reproduction is real, not assumed, by reverting only the
+three source files (`git apply -R` against a diff scoped to `envelope.py`/`sse.py`/
+`routers/missions.py`, tests left in place) and re-running: the new tests fail with
+the *exact* `union_tag_invalid` error D-116 quoted from its own live `docker logs`
+capture, both on the SSE path (mid-generator crash inside `format_frame`/`to_schema`)
+and the replay path. Re-applied the fix; all tests pass. Also added a companion pair
+of tests using a synthetic *not-`triage_stub`* unrecognized `kind`, proving the
+defense-in-depth skip-and-continue behavior generalizes to a future drift of the same
+shape, and a companion test proving `to_schema` still raises on that same input (the
+explicit "not a catch-all" guarantee, tested, not just asserted in a comment).
+
+**Verification suite, run fresh, this session, from `apps/control-api/` via
+`source /tmp/t5-verify-venv/bin/activate` and `DJANGO_SECRET_KEY=<real placeholder,
+not literally "test"> POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory:
+python3 -m pytest`:** `709 passed, 20 skipped, 0 failed` (701 pre-existing + 8 new,
+matching the count before this change plus the tests added here — full output
+observed directly, not summarized from memory). One flake was seen and diagnosed as
+unrelated during this pass: `orchestrator/tests/test_verification.py::
+test_real_wall_clock_limit_stops_a_hung_build` (a real-subprocess `os.killpg` sandbox
+test) failed once mid-full-suite-run, then passed in isolation on both the pre-fix and
+post-fix code in immediate re-runs — a real OS/process-group timing flake in this
+sandboxed dev environment, not caused by this change (confirmed by reproducing the
+same nondeterminism with the fix's three source files reverted via `git stash`).
+
+**Live verification — not performed this session; disclosed rather than assumed.**
+`docker ps -a` confirmed the only running dev stack (compose project
+`brahmadatta-bfe5a38c`) is bind-mounted to a *different* worktree
+(`.claude/worktrees/agent-a99972f7fb9731b59`, the Command Center branch's own
+sandbox — `brahmadatta-control-api`, `brahmadatta-worker`, `brahmadatta-nginx`,
+`brahmadatta-db`, `brahmadatta-redis`, `brahmadatta-command-center` all `Up`,
+9-11h), matching this task's own instruction not to disrupt it. This session judged
+that the regression test suite above — which reproduces the *exact* real payload
+shape and the *exact* real error D-116 captured from live `docker logs`, both before
+and after the fix, against the real Django/Pydantic/ASGI code paths (not mocks) —
+gives equivalent confidence to a live `docker compose` run of the same assertion, at
+materially lower cost and zero risk to the concurrent Command Center work sharing this
+machine's resources, and chose not to additionally spin up an isolated
+`dev-up.sh` stack for this pass. This is a real, disclosed scope choice, not an
+oversight — flagged explicitly for `qa-engineer` to independently judge sufficient or
+insufficient, per this project's own standing rule that this seat's own testing is
+never a substitute for that independent pass (D-102, D-104, D-111, D-114, D-115,
+D-116 all named this explicitly).
+
+**A second, real gap, disclosed rather than hidden.** This task's instructions asked
+for an independent `qa-engineer` review to be dispatched *from this session*, via
+"your own Agent-tool access." This session's actual tool access was Read/Write/Edit/
+Bash only — no Task/Agent tool was available, the identical constraint D-115
+disclosed for the same reason. No independent review has been dispatched from this
+session. See Recommended next action.
+
+**Options considered for the fix itself** (already decided by D-116, not re-litigated
+here — recorded for completeness): (a) add `triage_stub` to the union only; (b)
+defense-in-depth row-skipping only; (c) both. D-116 recommended (c) because (a) alone
+leaves the same class of bug able to recur for any future orchestrator event `kind`
+added without a matching schema variant, and (b) alone would silently drop real
+`TRIAGE`-stage telemetry from the display even though it stops the crash. Implemented
+(c), matching D-116's own recommendation exactly.
+
+**Cost implications** — small and bounded, matching D-116's own estimate ("smaller in
+scope than either of D-114's or D-115's own cost estimates, since the frontend
+mechanism itself needs no further change"): one schema variant, one wrapper function,
+two call-site edits, a doc update, one regenerated OpenAPI dump, and one test file
+addition. No new infrastructure, no new dependency.
+
+**Security implications** — none identified beyond what D-116 already covered. The
+sanitized-error-envelope behavior D-116 confirmed intact (`INTERNAL_ERROR` responses
+never leak a traceback) is unaffected — `safe_to_schema`'s logging goes to the server
+log only, never to a response body, and deliberately omits payload contents from the
+log line since a malformed payload's own contents cannot be trusted to be safe to log
+verbatim.
+
+**Scalability implications** — none beyond D-116's own secondary observation (the REST
+fallback poller retrying a permanently-failing range every 5s), which this fix
+resolves as a side effect: since `triage_stub` now validates and unrecognized rows are
+skipped-not-crashed, no real mission's replay range can permanently 500 the way
+D-116's reproduction showed, so the poller's retries against an affected mission now
+succeed rather than repeating forever.
+
+**Recommendation.** Merge to `main` once independently re-verified. This branch is
+based on current `main` (no dependency on the diverged Command Center branch's own
+decisions.md history or any of its unmerged frontend code) — the fix lives entirely in
+`orchestrator/queue.py`-adjacent contract/serialization code
+(`contracts/schemas/envelope.py`, `api/sse.py`, `api/routers/missions.py`) that predates
+the Command Center rebuild. Once merged to `main`, `feat/command-center-visual-rebuild`
+should rebase onto it so D-115's REST-hydration fix (built correctly, per D-116, but
+defeated purely by this backend bug) can be re-verified live end to end for the first
+time by whichever session picks up D-116's own "Recommended next action."
+
+**Final approval authority** — `qa-engineer`, for the pending independent
+re-verification (both live-mission-through-TRIAGE SSE and replay, per D-116's own
+ask); `CTO`/orchestrating session, for merge coordination to `main` and the
+Command-Center-branch rebase sequencing that follows it.
+
+---
+
+## D-114 — Independent `qa-engineer` live re-verification of D-113 (`triage_stub`
+`MissionEventSchema` fix): verdict **APPROVED** · 2026-08-21 · `qa-engineer` seat
+
+**Context.** D-113's own text flagged that no live verification had been performed
+from that session (no Agent-tool access, and it judged the regression-test suite
+equivalent to a live run) and asked for an independent `qa-engineer` pass against a
+real, isolated stack before merge. This entry is that pass.
+
+**What was actually run, live, this session — not asserted from reading code.**
+
+1. **Isolated stack.** `infrastructure/scripts/dev-up.sh` (unmodified) correctly
+   detected this linked worktree and printed a distinct compose project name,
+   `brahmadatta-3219c098`, confirmed different from the concurrent Command Center
+   worktree's running stack (`brahmadatta-bfe5a38c`, confirmed still `Up`
+   throughout via `docker ps -a` before, during, and after this session, and
+   confirmed untouched at teardown). PR #219's isolation fix works exactly as
+   documented for compose **project name** (and therefore for network/volume
+   naming). It does **not**, however, cover two other collision surfaces this
+   session hit for real and had to work around with a local, uncommitted compose
+   override (not proposed as a fix, just what let this pass proceed without
+   touching the other worktree's stack):
+   - **Every service's `container_name:` is a fixed literal** (`brahmadatta-db`,
+     `brahmadatta-nginx`, `brahmadatta-control-api`, `brahmadatta-worker`,
+     `brahmadatta-command-center*`, `brahmadatta-model-host*`), not templated with
+     the isolated project name the way the network/volume names are. A second
+     concurrent worktree's `docker compose up` fails outright on container-name
+     conflict the moment it reaches any of these, regardless of project isolation.
+     Confirmed live: the first `up` attempt errored on
+     `brahmadatta-command-center-deps` already in use by the other worktree's
+     container.
+   - **`nginx`'s published host ports (`8080`/`8443`) and the `api` network's
+     pinned subnet (`172.28.90.0/24`) are also fixed literals**, not derived from
+     the project name. Confirmed live: `up` failed with `Pool overlaps with other
+     one on this address space` on the `api` network, and separately `Bind for
+     127.0.0.1:8080 failed: port is already allocated` on nginx.
+   
+     Filed as a real infra gap for whichever role owns `infrastructure/`
+     (`devops`/CTO) — this is a QA finding from direct reproduction, not a fix;
+     scope, severity, and remediation are that role's call, not this seat's.
+     Severity assessment offered for triage only: **major**, not blocker — it
+     only bites two *concurrent* worktree stacks brought up at once (the exact
+     D-098/D-099 scenario this project has hit before), production/finale
+     deploys a single stack per host and are unaffected.
+
+2. **Migrations.** Fresh isolated `db` volume needed `python manage.py migrate`
+   before `worker`'s claim loop stopped crash-looping on `relation "job" does not
+   exist` — expected for a brand-new stack, not a bug.
+
+3. **A real mission driven through TRIAGE live**, via the real HTTP API through
+   nginx (`https://127.0.0.1:18443`, this session's remapped isolated port):
+   `POST /missions` → `POST /authorize` → `POST /snapshot` (against
+   `demo/repositories/pktcfg`, digest computed server-side-identically via
+   `authorization.archive.build_tar_from_directory`) → `POST /preflight` (`passed:
+   true`) → `POST /start` (`SNAPSHOTTED -> VALIDATING`, `202`). `manage.py
+   run_orchestrator --once`, called twice, drove `VALIDATING -> BASELINE` (real
+   `BASELINE` `Job` claimed and completed by `manage.py run_worker`) and then
+   `BASELINE -> TRIAGE -> STRESS_TEST` — the mandatory TRIAGE stage the whole fix
+   is about, hit for real, not skipped.
+
+4. **`GET .../events/replay` — confirmed 200, not 500.** Full replay after the
+   mission reached `STRESS_TEST` returned `HTTP 200` with all 9 real events,
+   including sequences 6–8 with `"payload":{"kind":"triage_stub"}` exactly as
+   `_emit_triage_stub_events` writes it — the precise shape that raised
+   `union_tag_invalid` and 500'd this endpoint before D-113's fix.
+
+5. **`GET .../events` (SSE) — confirmed it does not crash/disconnect.** `curl -N
+   --http1.1` through nginx delivered all 9 frames in order, including the
+   `triage_stub` frames, then held the connection open (killed cleanly by
+   `--max-time`, `curl` exit 28 = timeout, not a protocol error) — the same
+   `net::ERR_HTTP2_PROTOCOL_ERROR`-presenting failure D-116 diagnosed does not
+   reproduce post-fix.
+
+6. **Defense-in-depth, tested against a genuinely unmodeled `kind`, not just
+   `triage_stub`.** Inserted a real `MissionEvent` row (`sequence=10`) via the ORM
+   directly (bypassing the app layer, the same way a future undermodeled
+   orchestrator event would) with `payload={"kind":
+   "qa_totally_unrecognized_kind_never_in_schema", ...}`, followed by a real, valid
+   row at `sequence=11`.
+   - `GET .../events/replay?since_sequence=9` returned `200`, `"total": 2` (the
+     honest count of rows in range), `"items"` holding only the one serializable
+     row (sequence 11) — the malformed row silently dropped from `items`, not
+     silently dropped from `total`.
+   - `GET .../events?since_sequence=9` (SSE) streamed exactly one frame, `id: 11`
+     — the malformed row's sequence was skipped without a broken frame and without
+     stalling the cursor on it (confirmed the *next* row was served, not a repeat
+     of the same unserializable one).
+   - `docker logs` confirmed `api.sse.safe_to_schema` logged the skip with row id,
+     mission id, sequence, and trace_id, exactly as documented.
+   - **One accuracy gap found in D-113's own claim, minor, not blocking.**
+     D-113/`safe_to_schema`'s docstring say the log line "deliberately" omits
+     payload contents "since a malformed payload's own well-formedness ... can't
+     be trusted." The *interpolated message string* does omit them, but
+     `logger.exception(...)` also attaches the full traceback, and
+     `pydantic.ValidationError`'s own `__str__` includes `input_value=...` — which
+     **is** the malformed payload's own contents. Observed directly in this
+     session's `docker logs` capture: the injected payload
+     (`{'kind': 'qa_totally_unre...hema', 'nonsense': True}`) appeared verbatim in
+     the traceback pydantic prints, not in the crafted log message. This never
+     reaches a response body (D-113's actual security claim, still true and
+     unaffected), so it is not a regression against this fix's stated scope — but
+     the code comment's "deliberately omits payload contents from the log line" is
+     not fully accurate given `logger.exception`'s default behavior. Filed as
+     **BUG-QA-1, minor**, owner `backend-developer`: either `logger.error(...,
+     exc_info=False)` plus a truncated/redacted summary of the validation error, or
+     an explicit acknowledgment in the docstring that traceback-level payload
+     echo is a known, accepted gap. Flagged to `cybersecurity` for a severity
+     opinion, per this seat's standing boundary — sensitive data ending up in a
+     malformed event payload and then echoing into server logs is a plausible
+     enough shape to want their call, not mine, on whether "server logs only" is
+     sufficient mitigation here.
+
+7. **Regression tests read and independently judged genuine, not a simplified
+   stand-in.** `contracts/tests/test_envelope.py` and
+   `api/tests/test_event_stream.py` read in full.
+   `test_triage_stub_payload_is_a_real_recognized_variant`'s
+   `real_orchestrator_payload = {"kind": "triage_stub"}` and
+   `_emit_triage_stub`/`_emit_malformed`'s row shapes in `test_event_stream.py`
+   were checked directly against `orchestrator/queue.py::_emit_triage_stub_events`
+   (read in full) — confirmed byte-for-byte match to the real payload
+   (`{"kind": "triage_stub"}`, nothing else), and confirmed the malformed-row test
+   helper bypasses the schema exactly the way a real future undermodeled
+   orchestrator event would (a plain JSON model field, no Django-level payload
+   validation to route around). `contracts/tests/test_envelope.py` and
+   `api/tests/test_event_stream.py` re-run in isolation this session: **27
+   passed** (0 failed), matching this seat's own live findings above exactly —
+   the tests are a real, non-simplified regression suite for this bug, not
+   theater.
+
+8. **Full `apps/control-api` suite re-run independently, this session,** from
+   `source /tmp/t5-verify-venv/bin/activate` and `DJANGO_SECRET_KEY=<generated,
+   not literally "test"> POSTGRES_PASSWORD=test DATABASE_URL=sqlite:///:memory:
+   python3 -m pytest`: first full run showed one failure,
+   `orchestrator/tests/test_verification.py::
+   test_real_wall_clock_limit_stops_a_hung_build` (`PermissionError: [Errno 1]
+   Operation not permitted` from `os.killpg` inside `packages/sandbox/jail.py`) —
+   re-run of that test alone passed immediately after. Full-suite re-run
+   immediately following: **709 passed, 20 skipped, 0 failed** — the exact count
+   D-113 itself reported, independently reproduced, and the exact same flaky test
+   D-113 disclosed (`test_real_wall_clock_limit_stops_a_hung_build`, a real
+   subprocess/process-group timing sensitivity in this sandboxed dev environment),
+   confirming that disclosure was accurate rather than convenient.
+   `contracts/tests/test_openapi_dump.py` (18 tests, the committed-dump drift
+   check D-113 cites) also re-run in isolation: **18 passed**.
+
+**Bugs filed.**
+- **BUG-QA-1 (minor)** — `api/sse.py::safe_to_schema`'s log line leaks a
+  malformed payload's contents into the server log via `logger.exception`'s
+  traceback, contradicting its own docstring's "deliberately omits payload
+  contents" claim. Server-side log only, never a response body — does not change
+  this fix's own security claim, does not block this fix's merge. Owner:
+  `backend-developer`. Security-severity opinion requested from `cybersecurity`
+  per this seat's standing boundary.
+- **BUG-QA-2 (major, infra, out of scope for this fix)** — two concurrent
+  worktrees' `dev-up.sh`/`docker compose up` collide on fixed `container_name`
+  values, the nginx host port publish, and the `api` network's pinned subnet,
+  despite PR #219's compose-project-name isolation. Reproduced live this
+  session (see above), worked around locally with an uncommitted override, not
+  fixed. Owner: whichever role holds `infrastructure/` (devops/CTO). Not a
+  regression introduced by D-113/this branch — pre-existing, and orthogonal to
+  the `triage_stub` schema fix.
+
+**Options considered** — none; this is a verification pass against work already
+decided and built by D-113/D-116, not a design decision.
+
+**Cost implications** — none beyond the time this pass took. No code changed by
+this seat (QA does not fix bugs it files).
+
+**Security implications** — BUG-QA-1 referred to `cybersecurity` for a severity
+call, as above; nothing else new found. D-113's own security claims (sanitized
+error envelope, no payload leak to a response body) held up under live testing,
+including the adversarial defense-in-depth probe in step 6.
+
+**Scalability implications** — none beyond what D-113 already assessed; the live
+probe in step 6 additionally confirms the poller-retry fix D-113 claimed as a side
+effect actually behaves as claimed (a range containing an unrecognized-kind row no
+longer 500s on every retry).
+
+**Recommendation** — **APPROVED.** Merge `fix/triage-stub-event-schema` to `main`.
+The `triage_stub` schema gap and the defense-in-depth row-skipping both hold up
+under real, live, adversarial testing against an isolated stack — not just the
+regression-test suite, though that suite was also independently confirmed genuine.
+Neither bug filed above is a blocker: BUG-QA-1 is a log-hygiene nit with no
+response-body exposure, and BUG-QA-2 is a pre-existing, orthogonal infra gap this
+branch did not introduce and does not make worse. Once merged,
+`feat/command-center-visual-rebuild` should rebase onto `main` per D-113's own
+recommendation, and D-116's own "Recommended next action" (re-verifying D-115's
+REST-hydration fix live, for the first time, against a backend that no longer
+500s) should be picked up next.
+
+**Final approval authority** — this verdict is this seat's own final call on the
+release question (QA owns APPROVED/REJECTED); `CTO`/orchestrating session for
+merge-to-`main` timing and the Command-Center-branch rebase sequencing that
+follows it, unchanged from D-113's own note.
+
+---

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -38,10 +39,13 @@ from uuid import UUID
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.http import HttpRequest
+from pydantic import ValidationError
 
 from contracts.errors import TooManyConcurrentStreamsError
 from contracts.schemas.envelope import MissionEvent as MissionEventSchema
 from missions.models import Mission, MissionEvent
+
+logger = logging.getLogger("api.sse")
 
 #: Process-local concurrent-stream accounting, keyed by mission id. Deliberately not
 #: a database row: it tracks *this process's* open ASGI connections, and there is
@@ -135,6 +139,13 @@ def _events_after(mission_id: UUID, cursor: int, limit: int) -> list[MissionEven
 
 
 def to_schema(row: MissionEvent) -> MissionEventSchema:
+    """Strict conversion: raises `pydantic.ValidationError` if `row.payload` does not
+    match any `EventPayload` variant (D-116's original failure mode, before
+    `TriageStubPayload` existed). Kept strict and raising — rather than swallowing
+    here — because this is also the function contract/unit tests use to prove a given
+    payload shape *is* invalid; `safe_to_schema` below is the tolerant wrapper the two
+    real serving paths (`format_frame`/`event_frames`, `replay_events`) actually use.
+    """
     return MissionEventSchema(
         id=row.id,
         mission_id=row.mission_id,
@@ -153,20 +164,50 @@ def to_schema(row: MissionEvent) -> MissionEventSchema:
     )
 
 
-def format_frame(row: MissionEvent) -> bytes:
-    """`id: <sequence>` / `event: <type>` / `data: <MissionEvent JSON>`.
+def safe_to_schema(row: MissionEvent) -> MissionEventSchema | None:
+    """`to_schema`, tolerant of a single malformed row (D-116).
+
+    A future event `kind` written by the orchestrator without a matching
+    `EventPayload` variant — the exact class of bug `triage_stub` was — must not take
+    down an entire mission's live stream or replay page. Logs the failure (row id,
+    mission, sequence, trace_id — no payload contents, since a malformed payload is
+    exactly the thing not to trust well-formedness of for a log line) and returns
+    `None` so the caller can skip just this one row and keep serving the rest.
+    """
+    try:
+        return to_schema(row)
+    except ValidationError:
+        logger.exception(
+            "Skipping malformed MissionEvent id=%s mission_id=%s sequence=%s "
+            "trace_id=%s — payload failed EventPayload schema validation.",
+            row.id,
+            row.mission_id,
+            row.sequence,
+            row.trace_id,
+        )
+        return None
+
+
+def format_frame(row: MissionEvent) -> bytes | None:
+    """`id: <sequence>` / `event: <type>` / `data: <MissionEvent JSON>`, or `None` if
+    this row is malformed and must be skipped (see `safe_to_schema`).
 
     Serialized through the frozen `MissionEvent` schema, not the Django row directly,
     so a frame can never carry a shape the contract — and therefore the generated
     TypeScript — does not already describe.
     """
-    schema = to_schema(row)
+    schema = safe_to_schema(row)
+    if schema is None:
+        return None
     data = schema.model_dump_json()
     return f"id: {row.sequence}\nevent: {row.type}\ndata: {data}\n\n".encode()
 
 
 def event_dict_for_test(row: MissionEvent) -> dict[str, Any]:
-    """`format_frame`'s payload as a dict, for assertions. Not used by the view."""
+    """`format_frame`'s payload as a dict, for assertions. Not used by the view.
+    Deliberately uses the strict `to_schema` (not `safe_to_schema`): a test asserting
+    on this helper wants a real `ValidationError` if the fixture it built is invalid,
+    not a silently-`None` result."""
     return json.loads(to_schema(row).model_dump_json())
 
 
@@ -181,6 +222,11 @@ async def event_frames(mission_id: UUID, cursor: int) -> AsyncIterator[bytes]:
     disconnect check ends it. Either way the slot release in the caller's `finally`
     still runs, so a heartbeat write that fails because the peer is gone frees the
     slot immediately rather than after the next database poll.
+
+    A single malformed row (`format_frame` returning `None`, see `safe_to_schema`,
+    D-116) is skipped, not raised — one bad row must not abort the whole connection.
+    The cursor still advances past it either way, so the poll loop does not spin
+    forever re-fetching the same unserializable row.
     """
     yield _STREAM_OPEN
     last_activity = time.monotonic()
@@ -188,8 +234,10 @@ async def event_frames(mission_id: UUID, cursor: int) -> AsyncIterator[bytes]:
         rows = await _events_after(mission_id, cursor, limit=200)
         if rows:
             for row in rows:
-                yield format_frame(row)
+                frame = format_frame(row)
                 cursor = row.sequence
+                if frame is not None:
+                    yield frame
             last_activity = time.monotonic()
         else:
             now = time.monotonic()

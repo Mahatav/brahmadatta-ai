@@ -206,8 +206,12 @@ def cancel_mission(request: HttpRequest, mission_id: UUID, payload: CancelReques
         "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a "
         "client that sees a jump replays from its last known value. Reads the same "
         "persisted `MissionEvent` log the stream tails, through the same schema "
-        "conversion (`api.sse.to_schema`) — there is one definition of what an event "
-        "looks like, not one for the live path and a second for gap recovery."
+        "conversion (`api.sse.safe_to_schema`) — there is one definition of what an "
+        "event looks like, not one for the live path and a second for gap recovery. "
+        "A single malformed row (D-116) is skipped and logged rather than failing "
+        "the whole page with a 500 — `total`/`limit`/`offset` still describe the "
+        "underlying row range queried, `items` may hold fewer than `limit` entries "
+        "when a row in that range could not be serialized."
     ),
     operation_id="replayMissionEvents",
 )
@@ -226,8 +230,13 @@ def replay_events(
     ).order_by("sequence")
     total = query.count()
     rows = list(query[:limit])
+    items = [
+        schema
+        for schema in (sse.safe_to_schema(row) for row in rows)
+        if schema is not None
+    ]
     return Page[MissionEvent](
-        items=[sse.to_schema(row) for row in rows],
+        items=items,
         total=total,
         limit=limit,
         offset=since_sequence,
