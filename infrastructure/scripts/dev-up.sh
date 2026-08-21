@@ -32,12 +32,41 @@ note() { printf '  %s\n' "$1"; }
 # renames the project for a worktree, leaving the primary checkout's existing
 # `brahmadatta-*` container/volume names (and everything that already assumes
 # them) unchanged.
+#
+# #230: COMPOSE_PROJECT_NAME alone does not isolate everything docker-compose.yml pins
+# outside Compose's own project-prefixed naming — every `container_name:`, nginx's two
+# published host ports, and the `api` network's subnet. See that file's own header
+# comment for why each one collided. All three are derived below from the SAME worktree
+# hash as COMPOSE_PROJECT_NAME, so a given worktree gets stable values across repeated
+# dev-up.sh runs, and each is exported only if not already set — an operator's own
+# override always wins, same convention COMPOSE_PROJECT_NAME itself already uses.
 if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
   git_dir="$(git -C "${REPO_ROOT}" rev-parse --git-dir)"
   common_dir="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir)"
   if [[ "${git_dir}" != "${common_dir}" ]]; then
-    export COMPOSE_PROJECT_NAME="brahmadatta-$(printf '%s' "${REPO_ROOT}" | shasum | cut -c1-8)"
+    worktree_hash="$(printf '%s' "${REPO_ROOT}" | shasum | cut -c1-8)"
+    export COMPOSE_PROJECT_NAME="brahmadatta-${worktree_hash}"
     note "linked worktree detected — isolated compose project: ${COMPOSE_PROJECT_NAME}"
+
+    # Decimal form of the same 8 hex chars, for deriving a port/subnet offset. Ranges are
+    # chosen clear of the primary checkout's own defaults (8080/8443, 172.28.90.0/24) and
+    # of this host's other known Docker networks (172.17-25.0.0/16) — collision between
+    # two worktrees is possible in principle (a hash collision, or an unlucky modulo) but
+    # was judged acceptable for a handful of concurrent checkouts rather than worth an
+    # allocate-and-retry loop; a collision fails loudly at `docker compose up` (port/subnet
+    # already in use), it does not silently share resources the way the pre-#230 bug did.
+    worktree_hash_dec="$((16#${worktree_hash}))"
+    if [[ -z "${NGINX_HTTP_PORT:-}" ]]; then
+      export NGINX_HTTP_PORT=$(( 20000 + (worktree_hash_dec % 10000) ))
+    fi
+    if [[ -z "${NGINX_HTTPS_PORT:-}" ]]; then
+      export NGINX_HTTPS_PORT=$(( 30000 + (worktree_hash_dec % 10000) ))
+    fi
+    if [[ -z "${UVICORN_DEV_FORWARDED_ALLOW_IPS:-}" ]]; then
+      export UVICORN_DEV_FORWARDED_ALLOW_IPS="10.90.$(( (worktree_hash_dec % 250) + 1 )).0/24"
+    fi
+    note "isolated nginx ports: ${NGINX_HTTP_PORT} / ${NGINX_HTTPS_PORT}"
+    note "isolated api network subnet: ${UVICORN_DEV_FORWARDED_ALLOW_IPS}"
   fi
 fi
 
@@ -101,13 +130,17 @@ set +x
 echo
 docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" ps
 
-cat <<'EOF'
+# #230: these were a literal heredoc; now interpolated, because a linked worktree's ports
+# are not 8080/8443 any more. `${VAR:-default}` matches the primary checkout unchanged.
+http_port="${NGINX_HTTP_PORT:-8080}"
+https_port="${NGINX_HTTPS_PORT:-8443}"
+cat <<EOF
 
-  Command Center   https://localhost:8443/          (self-signed: accept the warning once)
-  API              https://localhost:8443/api/v1/
-  Event stream     https://localhost:8443/api/v1/missions/<id>/events
-  Django admin     https://localhost:8443/admin/    (dev only; 404 in the finale profile)
-  nginx liveness   http://localhost:8080/healthz
+  Command Center   https://localhost:${https_port}/          (self-signed: accept the warning once)
+  API              https://localhost:${https_port}/api/v1/
+  Event stream     https://localhost:${https_port}/api/v1/missions/<id>/events
+  Django admin     https://localhost:${https_port}/admin/    (dev only; 404 in the finale profile)
+  nginx liveness   http://localhost:${http_port}/healthz
 
   Test SSE THROUGH nginx, never against the API directly:
       infrastructure/scripts/smoke-sse.sh

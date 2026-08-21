@@ -148,13 +148,22 @@ def test_finale_exposes_only_the_ingress() -> None:
 
 
 def test_finale_stage_origin_is_loopback_http_only() -> None:
-    """Issue #92: the stage browser must not hit a TLS warning on localhost."""
+    """Issue #92: the stage browser must not hit a TLS warning on localhost.
+
+    #230: the HOST side of this port is now `${NGINX_FINALE_HTTP_PORT:-8080}`, not a
+    bare literal — a linked worktree's finale-up.sh assigns a distinct host port so two
+    worktrees' nginx containers do not collide trying to bind the same one. The
+    CONTAINER side stays a literal `8080` always (nginx's own `listen` directive, see
+    test_finale_localhost_ingress.py), which is what this test actually cares about:
+    loopback-scoped, exactly one mapping, plaintext only. It no longer pins the host
+    port's literal value, only its shape and default.
+    """
     doc = _load(FINALE)
     nginx = (doc.get("services") or {}).get("nginx") or {}
     ports = nginx.get("ports") or []
     volumes = nginx.get("volumes") or []
 
-    assert ports == ["127.0.0.1:8080:8080"]
+    assert ports == ["127.0.0.1:${NGINX_FINALE_HTTP_PORT:-8080}:8080"]
     assert not any("8443" in str(port) for port in ports)
     assert not any("certs" in str(volume) for volume in volumes)
 

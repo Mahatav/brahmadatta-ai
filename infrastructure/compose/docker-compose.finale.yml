@@ -25,6 +25,11 @@
 # UNVERIFIED as of D1: this file has never been brought up. apps/command-center/ does not
 # exist, so `dist/` does not exist, so nginx has nothing to serve. `docker compose config`
 # validates it and `nginx -t` validates its configuration; nothing else has been run.
+#
+# #230 (fast-follow on D-099/PR #219): same fix as docker-compose.yml's matching header
+# comment, mirrored here — `container_name:`, nginx's published host port, and the `api`
+# network's pinned subnet all parameterized the same way, all defaulting to today's exact
+# values, all overridden by finale-up.sh only for a linked worktree.
 
 name: brahmadatta-finale
 
@@ -40,7 +45,7 @@ x-hardening: &hardening
 services:
   nginx:
     image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
-    container_name: brahmadatta-finale-nginx
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-nginx
     <<: *hardening
     read_only: true
     tmpfs:
@@ -79,7 +84,9 @@ services:
     ports:
       # Published on loopback: the stage browser runs on the same machine. Keep the
       # finale origin plain HTTP so there is no browser TLS warning on stage.
-      - "127.0.0.1:8080:8080"
+      # #230: host port parameterized, container port is not — see docker-compose.yml's
+      # matching comment on its own nginx `ports:` block for the full reasoning.
+      - "127.0.0.1:${NGINX_FINALE_HTTP_PORT:-8080}:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/includes:/etc/nginx/includes:ro
@@ -139,7 +146,7 @@ services:
         # D-100: services/model-gateway/, so `gateway.*` is importable inside this
         # image at all. See control-api.Dockerfile's matching COPY comment.
         model-gateway-source: ../../services/model-gateway
-    container_name: brahmadatta-finale-control-api
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-control-api
     <<: [*env-file, *hardening]
     read_only: true
     tmpfs:
@@ -217,7 +224,7 @@ services:
     build:
       context: .
       dockerfile: images/postgres-tls.Dockerfile
-    container_name: brahmadatta-finale-db
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-db
     <<: *hardening
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
@@ -240,7 +247,7 @@ services:
 
   redis:
     image: redis@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103  # 8.2-alpine
-    container_name: brahmadatta-finale-redis
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-redis
     <<: *hardening
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
@@ -291,7 +298,7 @@ services:
         # D-100: services/model-gateway/, so `gateway.*` is importable inside this
         # image at all. See control-api.Dockerfile's matching COPY comment.
         model-gateway-source: ../../services/model-gateway
-    container_name: brahmadatta-finale-worker
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-worker
     <<: [*env-file, *hardening]
     read_only: true
     tmpfs:
@@ -330,7 +337,7 @@ services:
   model-host:
     profiles: ["model"]
     image: ollama/ollama@sha256:f478761c18fea69b1624e095bce0f8aab06825d09ccabcd0f88828db0df185ce
-    container_name: brahmadatta-finale-model-host
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-model-host
     <<: *hardening
     mem_limit: ${MODEL_HOST_MEM_LIMIT:-8g}
     environment:
@@ -363,7 +370,7 @@ services:
   model-host-auth:
     profiles: ["model"]
     image: nginxinc/nginx-unprivileged@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
-    container_name: brahmadatta-finale-model-host-auth
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-model-host-auth
     <<: *hardening
     read_only: true
     tmpfs:
@@ -400,7 +407,11 @@ networks:
     ipam:
       config:
         # Fixed subnet so UVICORN_FORWARDED_ALLOW_IPS can name it instead of "*".
-        - subnet: 172.31.0.0/24
+        # #230: parameterized on that same variable (see control-api's environment block
+        # below) rather than a new one, since the two already had to agree. finale-up.sh
+        # overrides it for a linked worktree so two worktrees' `api` networks do not
+        # collide; the primary checkout keeps today's 172.31.0.0/24.
+        - subnet: ${UVICORN_FORWARDED_ALLOW_IPS:-172.31.0.0/24}
 
   backend:
     driver: bridge
