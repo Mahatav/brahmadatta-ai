@@ -28,8 +28,13 @@ Every one of these is repeated across the doc pack. They are not up for reinterp
 - **A patch is never accepted on model confidence alone.** The original reproducer,
   regression tests, static checks, and renewed fuzzing decide the verdict. Any code path
   that lets confidence substitute for verification is a bug.
-- **Repository content is never sent to an external inference API.** CPU-first; self-hosted
-  models on rented GPUs. No calls to hosted LLM providers from product code.
+- **Repository content is never sent to an external inference API.** CPU-first, self-hosted
+  models. No calls to hosted LLM providers from product code. **Rented GPU was cut entirely**
+  (D-015, 2026-08-06, cost/schedule-risk/external-dependency reasons) — CPU-only inference
+  (codellama:7b-instruct via a local Ollama container, D-121) is the real, committed path,
+  not a placeholder. `docs/03-technical/17-technology-stack-document.md` and
+  `26-infrastructure-and-hosting-plan.md` still describe the pre-D-015 rented-GPU plan in
+  places; this line wins.
 - **Safety boundary:** authorized repositories and isolated environments only. No public
   target scanning, no exploit deployment, no automatic production merge.
 - **Target language:** C/C++ first. Python support is optional and must not delay C/C++.

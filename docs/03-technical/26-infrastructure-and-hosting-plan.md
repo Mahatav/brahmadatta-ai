@@ -45,7 +45,12 @@ The MVP is **cloud-isolated on rented infrastructure**, not physically air-gappe
 - **Architecture:** three evidence-driven tiers: fast deterministic triage, destructive sandbox testing with lightweight patching, and heavy repository-level reasoning only when escalation is justified.
 - **Interface:** a dense futuristic armor-command-center dashboard with a central mission core, live telemetry, drill-down panels, and operator controls. The visual language is original and does not copy third-party logos or branded interface assets.
 - **Primary workflow:** authorize → ingest → baseline → analyze → correlate → stress-test → patch → verify → export evidence.
-- **Compute:** CPU-first processing with self-hosted models on rented GPU infrastructure. Repository content is not sent to an external inference API.
+- **Compute:** CPU-first, self-hosted-model processing. Repository content is not sent to an
+  external inference API. **Superseded by D-015** (`.project/decisions.md`, 2026-08-06):
+  rented GPU was cut entirely for cost/schedule-risk/external-dependency reasons — CPU-only
+  inference is the real, committed path, not a placeholder pending GPU. The GPU-lease
+  language above (hard lease timer, teardown-on-terminal-state, dashboard lease reporting)
+  describes the pre-D-015 plan; CLAUDE.md is authoritative on the current stack.
 - **MVP target:** C/C++ repositories first; Python support is optional.
 - **Verification rule:** a patch is never accepted on model confidence alone. The original reproducer, regression tests, static checks, and renewed fuzzing determine the verdict.
 - **Safety boundary:** authorized repositories and isolated environments only; no public-target scanning, no exploit deployment, and no automatic production merge.
