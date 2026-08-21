@@ -116,8 +116,21 @@ ring on the most visible element in the product for an operator action that work
 
 `MissionEvent`: `id`, `mission_id`, `sequence`, `timestamp`, `type`, `stage`, `state`,
 `status`, `severity`, `message`, `payload`, `evidence_refs`, `metrics`, `trace_id`.
-`payload` is a union discriminated on `kind` with fourteen variants, so the frontend
-gets an exhaustively-checked `switch` and a new variant breaks its build.
+`payload` is a union discriminated on `kind` with fifteen variants (`triage_stub`
+added 2026-08-21, D-116 — the `TRIAGE` "hollow stage" stub events
+(`orchestrator.queue._emit_triage_stub_events`) had been emitting an event `kind`
+with no matching payload variant since months before this entry, which crashed both
+`GET .../events` and `GET .../events/replay` on essentially every mission; see below),
+so the frontend gets an exhaustively-checked `switch` and a new variant breaks its
+build.
+
+**Malformed-row resilience (D-116).** Both `GET .../events` (SSE) and
+`GET .../events/replay` now tolerate a single `MissionEvent` row whose `payload`
+fails schema validation: the row is logged (with its `trace_id`) and skipped rather
+than aborting the stream or 500ing the whole replay page. This is defense in depth
+for the *next* orchestrator-side schema drift, not a substitute for keeping this
+union's variant list matched to every `kind` the orchestrator actually emits —
+`api.sse.safe_to_schema` is the one place both paths route through.
 
 SSE framing: `id: <sequence>`, `event: <type>`, `data: <MissionEvent JSON>`. The
 endpoint sets `X-Accel-Buffering: no`; nginx also needs `proxy_buffering off`

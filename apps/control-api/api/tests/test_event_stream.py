@@ -353,3 +353,268 @@ def test_replay_endpoint_paginates_with_limit():
     assert body["total"] == 5
     assert body["limit"] == 2
     assert [item["sequence"] for item in body["items"]] == [1, 2]
+
+
+# --- D-116 regression: triage_stub events and malformed-row resilience -------------
+#
+# `orchestrator.queue._emit_triage_stub_events` has emitted real `MissionEvent` rows
+# with `payload={"kind": "triage_stub"}` for every mission's mandatory TRIAGE stage
+# since months before this schema variant existed. `contracts.schemas.envelope.
+# MissionEventSchema`'s payload union had no matching tag, so `api.sse.to_schema`
+# raised `pydantic.ValidationError` on every such row — crashing the live SSE stream
+# (`GET .../events`) mid-connection and 500ing the REST replay endpoint
+# (`GET .../events/replay`) outright. These tests reproduce that failure against the
+# *unpatched* strict path (`api.sse.to_schema`, still strict by design) and then
+# prove both real HTTP-reachable paths survive it end to end.
+
+
+async def _emit_triage_stub(mission: Mission, sequence: int) -> MissionEvent:
+    """The exact row shape `orchestrator.queue._emit_triage_stub_events` writes."""
+
+    def _write() -> MissionEvent:
+        return MissionEvent.objects.create(
+            mission=mission,
+            sequence=sequence,
+            timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+            type=EventType.STAGE_COMPLETED.value,
+            stage=MissionStage.ANALYZE.value,
+            state=MissionState.TRIAGE.value,
+            status=EventStatus.SUCCEEDED.value,
+            severity=Severity.INFO.value,
+            message="TRIAGE completed",
+            payload={"kind": "triage_stub"},
+            evidence_refs=[],
+            metrics={},
+            trace_id=TRACE,
+        )
+
+    return await sync_to_async(_write)()
+
+
+@pytest.mark.django_db
+def test_triage_stub_row_now_validates_through_the_strict_schema_path():
+    """D-116's actual root-cause fix: `TriageStubPayload` is a real, recognized
+    variant now, so the strict conversion function (`api.sse.to_schema`, used by
+    tests/tooling that want a hard failure on genuine drift) accepts the real
+    orchestrator payload rather than raising."""
+    from api import sse
+
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    row = MissionEvent.objects.create(
+        mission=mission,
+        sequence=1,
+        timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        type=EventType.STAGE_COMPLETED.value,
+        stage=MissionStage.ANALYZE.value,
+        state=MissionState.TRIAGE.value,
+        status=EventStatus.SUCCEEDED.value,
+        severity=Severity.INFO.value,
+        message="TRIAGE completed",
+        payload={"kind": "triage_stub"},
+        evidence_refs=[],
+        metrics={},
+        trace_id=TRACE,
+    )
+
+    schema = sse.to_schema(row)
+    assert schema.payload.kind == "triage_stub"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_sse_stream_survives_a_real_triage_stub_event_without_dying():
+    """Reproduces D-116's SSE crash (`ERR_HTTP2_PROTOCOL_ERROR` client-side, a
+    `ValidationError` raised mid-generator server-side) against real `_emit`-shaped
+    rows, with a real triage_stub event sandwiched between two ordinary ones. Before
+    the schema fix this would abort the whole generator on the middle row; after it,
+    all three frames stream through in order, live."""
+    mission = await _create_mission()
+    await _emit(mission, 1)
+    await _emit_triage_stub(mission, 2)
+    await _emit(mission, 3)
+
+    response = await AsyncClient().get(
+        f"/api/v1/missions/{mission.id}/events", **auth_header(OPERATOR)
+    )
+    assert response.status_code == 200
+    body = (await _collect(response.streaming_content, 4)).decode()
+    await response._iterator.aclose()
+
+    assert body.index("id: 1") < body.index("id: 2") < body.index("id: 3")
+    assert '"sequence":2' in body
+    assert '"kind":"triage_stub"' in body
+
+
+@pytest.mark.django_db
+def test_replay_endpoint_survives_a_real_triage_stub_event_without_500ing():
+    """Reproduces D-116's REST replay crash (a real 500 `INTERNAL_ERROR`, confirmed
+    live via `docker logs` + `trace_id` correlation) against a real triage_stub row,
+    then confirms it returns 200 with the event correctly typed."""
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    MissionEvent.objects.create(
+        mission=mission,
+        sequence=1,
+        timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        type=EventType.STAGE_COMPLETED.value,
+        stage=MissionStage.ANALYZE.value,
+        state=MissionState.TRIAGE.value,
+        status=EventStatus.SUCCEEDED.value,
+        severity=Severity.INFO.value,
+        message="TRIAGE completed",
+        payload={"kind": "triage_stub"},
+        evidence_refs=[],
+        metrics={},
+        trace_id=TRACE,
+    )
+
+    response = Client().get(
+        f"/api/v1/missions/{mission.id}/events/replay?since_sequence=0",
+        **bearer(OPERATOR),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["payload"]["kind"] for item in body["items"]] == ["triage_stub"]
+
+
+# --- defense in depth: a genuinely malformed row must not sink the whole mission ---
+
+
+async def _emit_malformed(mission: Mission, sequence: int) -> MissionEvent:
+    """A row with a `kind` no `EventPayload` variant recognizes — simulates the
+    *next* orchestrator/schema drift, the class of bug `triage_stub` was. Bypasses
+    Django's own model-level validation (there is none on `payload`, a plain JSON
+    field) exactly the way a real bug in the orchestrator would: it writes something
+    the schema was never told about."""
+
+    def _write() -> MissionEvent:
+        return MissionEvent.objects.create(
+            mission=mission,
+            sequence=sequence,
+            timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+            type=EventType.LOG.value,
+            stage=MissionStage.BASELINE.value,
+            state=MissionState.BASELINE.value,
+            status=EventStatus.RUNNING.value,
+            severity=Severity.INFO.value,
+            message="from a future, not-yet-modeled event kind",
+            payload={"kind": "some_future_kind_nobody_added_a_schema_for"},
+            evidence_refs=[],
+            metrics={},
+            trace_id=TRACE,
+        )
+
+    return await sync_to_async(_write)()
+
+
+@pytest.mark.django_db
+def test_to_schema_still_raises_on_a_genuinely_unrecognized_kind():
+    """The strict path (`api.sse.to_schema`) must keep raising — this is what proves
+    the resilience below is a deliberate skip-and-log, not a permissive catch-all
+    that would hide real future schema drift the same way `triage_stub` hid this
+    one."""
+    from pydantic import ValidationError
+
+    from api import sse
+
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    row = MissionEvent.objects.create(
+        mission=mission,
+        sequence=1,
+        timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        type=EventType.LOG.value,
+        stage=MissionStage.BASELINE.value,
+        state=MissionState.BASELINE.value,
+        status=EventStatus.RUNNING.value,
+        severity=Severity.INFO.value,
+        message="from a future, not-yet-modeled event kind",
+        payload={"kind": "some_future_kind_nobody_added_a_schema_for"},
+        evidence_refs=[],
+        metrics={},
+        trace_id=TRACE,
+    )
+
+    with pytest.raises(ValidationError):
+        sse.to_schema(row)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_sse_stream_skips_one_malformed_row_and_keeps_serving_the_rest():
+    """Defense in depth (D-116 recommendation (b)/(c)): a single malformed row must
+    not take down the whole connection. The good events on either side of it still
+    stream through, in order; the malformed one is silently absent from the frames
+    but does not stall the cursor (a real follow-up drift like this one must not
+    freeze the poll loop forever re-fetching the same bad row)."""
+    mission = await _create_mission()
+    await _emit(mission, 1)
+    await _emit_malformed(mission, 2)
+    await _emit(mission, 3)
+
+    response = await AsyncClient().get(
+        f"/api/v1/missions/{mission.id}/events", **auth_header(OPERATOR)
+    )
+    assert response.status_code == 200
+    body = (await _collect(response.streaming_content, 3)).decode()
+    await response._iterator.aclose()
+
+    assert "id: 1" in body
+    assert "id: 2" not in body  # the malformed row: skipped, not crashed on
+    assert "id: 3" in body
+    assert body.index("id: 1") < body.index("id: 3")
+
+
+@pytest.mark.django_db
+def test_replay_endpoint_skips_one_malformed_row_instead_of_500ing():
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    for seq, payload in (
+        (1, {"kind": "log", "text": "line 1"}),
+        (2, {"kind": "some_future_kind_nobody_added_a_schema_for"}),
+        (3, {"kind": "log", "text": "line 3"}),
+    ):
+        MissionEvent.objects.create(
+            mission=mission,
+            sequence=seq,
+            timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+            type=EventType.LOG.value,
+            stage=MissionStage.BASELINE.value,
+            state=MissionState.BASELINE.value,
+            status=EventStatus.RUNNING.value,
+            severity=Severity.INFO.value,
+            message=f"event {seq}",
+            payload=payload,
+            evidence_refs=[],
+            metrics={},
+            trace_id=TRACE,
+        )
+
+    response = Client().get(
+        f"/api/v1/missions/{mission.id}/events/replay?since_sequence=0",
+        **bearer(OPERATOR),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # `total` still counts every row in range (accurate about what exists);
+    # `items` holds only the ones that could actually be served.
+    assert body["total"] == 3
+    assert [item["sequence"] for item in body["items"]] == [1, 3]

@@ -158,6 +158,24 @@ class LogPayload(StrictSchema):
     )
 
 
+class TriageStubPayload(StrictSchema):
+    """`TRIAGE` has no `JobKind` (architecture spec §2.5) — a deliberate "hollow
+    stage" whose three required events (`STAGE_STARTED`, `LOG`, `STAGE_COMPLETED`)
+    carry no additional structured data, only the tag identifying which stub emitted
+    them (`orchestrator.queue._emit_triage_stub_events`, which has emitted exactly
+    `{"kind": "triage_stub"}` since `5105212`, months before this variant existed).
+
+    D-116: this tag was missing from the union entirely, so every real mission —
+    `TRIAGE` is mandatory in the workflow — produced an event the discriminated union
+    rejected with `union_tag_invalid`. That crashed both `GET .../events` (SSE) and
+    `GET .../events/replay` the moment they reached it. Added as a real, correctly
+    typed variant rather than a permissive catch-all, so a *genuinely* new/unknown
+    `kind` added later still fails loudly here instead of silently passing through.
+    """
+
+    kind: Literal["triage_stub"] = "triage_stub"
+
+
 EventPayload = Annotated[
     Union[
         StateChangedPayload,
@@ -175,6 +193,7 @@ EventPayload = Annotated[
         TeardownPayload,
         PolicyViolationPayload,
         LogPayload,
+        TriageStubPayload,
     ],
     Field(discriminator="kind"),
 ]

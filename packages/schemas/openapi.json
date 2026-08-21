@@ -1564,6 +1564,7 @@
                 "stage_progress": "#/components/schemas/StageProgressPayload",
                 "state_changed": "#/components/schemas/StateChangedPayload",
                 "teardown": "#/components/schemas/TeardownPayload",
+                "triage_stub": "#/components/schemas/TriageStubPayload",
                 "verification": "#/components/schemas/VerificationPayload"
               },
               "propertyName": "kind"
@@ -1613,6 +1614,9 @@
               },
               {
                 "$ref": "#/components/schemas/LogPayload"
+              },
+              {
+                "$ref": "#/components/schemas/TriageStubPayload"
               }
             ],
             "title": "Payload"
@@ -3249,6 +3253,20 @@
         "title": "TeardownRequest",
         "type": "object"
       },
+      "TriageStubPayload": {
+        "additionalProperties": false,
+        "description": "`TRIAGE` has no `JobKind` (architecture spec §2.5) — a deliberate \"hollow\nstage\" whose three required events (`STAGE_STARTED`, `LOG`, `STAGE_COMPLETED`)\ncarry no additional structured data, only the tag identifying which stub emitted\nthem (`orchestrator.queue._emit_triage_stub_events`, which has emitted exactly\n`{\"kind\": \"triage_stub\"}` since `5105212`, months before this variant existed).\n\nD-116: this tag was missing from the union entirely, so every real mission —\n`TRIAGE` is mandatory in the workflow — produced an event the discriminated union\nrejected with `union_tag_invalid`. That crashed both `GET .../events` (SSE) and\n`GET .../events/replay` the moment they reached it. Added as a real, correctly\ntyped variant rather than a permissive catch-all, so a *genuinely* new/unknown\n`kind` added later still fails loudly here instead of silently passing through.",
+        "properties": {
+          "kind": {
+            "const": "triage_stub",
+            "default": "triage_stub",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "title": "TriageStubPayload",
+        "type": "object"
+      },
       "Verdict": {
         "description": "The only three outcomes a verification run can produce (P0-11).",
         "enum": [
@@ -4325,7 +4343,7 @@
     },
     "/api/v1/missions/{mission_id}/events/replay": {
       "get": {
-        "description": "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery.",
+        "description": "Gap recovery for the SSE stream. `sequence` is gap-free per mission, so a client that sees a jump replays from its last known value. Reads the same persisted `MissionEvent` log the stream tails, through the same schema conversion (`api.sse.safe_to_schema`) — there is one definition of what an event looks like, not one for the live path and a second for gap recovery. A single malformed row (D-116) is skipped and logged rather than failing the whole page with a 500 — `total`/`limit`/`offset` still describe the underlying row range queried, `items` may hold fewer than `limit` entries when a row in that range could not be serialized.",
         "operationId": "replayMissionEvents",
         "parameters": [
           {
