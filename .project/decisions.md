@@ -12820,3 +12820,179 @@ availability permitting; continue direct verification in the meantime if it is n
 
 **Final approval authority** — pending independent review per the branch's standing
 requirement; this entry records direct self-verification only, not a substitute for it.
+
+---
+
+## D-120 — #230: `container_name:`, nginx host ports, and the `api` network subnet
+isolated per worktree, extending PR #219/D-099's `COMPOSE_PROJECT_NAME` fix ·
+2026-08-21 · `devops-engineer` seat
+
+**Context.** PR #219 (D-099) gave each linked git worktree its own `COMPOSE_PROJECT_NAME`
+(`dev-up.sh`/`finale-up.sh` derive it from a hash of the worktree's own path), which
+isolates most Compose-managed resource names — networks, volumes, the implicit
+project-prefixed container names Compose would otherwise assign. Issue #230 hypothesized
+that three spots in the compose YAML sit outside that project-prefixed naming and were
+never actually isolated. This seat read `infrastructure/compose/docker-compose.yml`,
+`docker-compose.finale.yml`, `dev-up.sh`, and `finale-up.sh` directly before touching
+anything, per the issue's own instruction not to trust the hypothesis as verified.
+
+**Confirmed, not hypothetical, all three.**
+
+1. **`container_name:`** — every one of the 9 services in `docker-compose.yml` (and 7 in
+   `docker-compose.finale.yml`) declared a literal `container_name:` (e.g.
+   `brahmadatta-nginx`). A literal `container_name:` overrides Compose's own
+   project-prefixed auto-naming outright — it does not inherit `COMPOSE_PROJECT_NAME`
+   isolation at all, by design of the Compose spec itself. Two worktrees requesting the
+   identical literal name collide even though their Compose *projects* are already
+   isolated.
+2. **nginx's published host ports** — `"127.0.0.1:8080:8080"` / `"127.0.0.1:8443:8443"`
+   (dev), `"127.0.0.1:8080:8080"` (finale) were literal strings. Two worktrees' nginx
+   containers cannot both bind the same host port.
+3. **the `api` network's subnet** — statically pinned (`172.28.90.0/24` dev,
+   `172.31.0.0/24` finale) rather than left to Compose's own auto-allocation, deliberately
+   per SEC-14 (#98): `UVICORN_DEV_FORWARDED_ALLOW_IPS` / `UVICORN_FORWARDED_ALLOW_IPS`
+   need to trust that exact subnet by name instead of trusting `*`. Two worktrees'
+   `api` networks collide on the identical pinned subnet.
+
+**Live reproduction, not just static reading.** A second, unrelated worktree
+(`agent-a99972f7fb9731b59`) already had its dev stack running throughout this session —
+Compose project `brahmadatta-bfe5a38c` (COMPOSE_PROJECT_NAME isolation from PR #219
+working correctly), but its containers held the plain literal names
+(`brahmadatta-nginx`, `brahmadatta-db`, ...) and its `api` network sat on the literal
+`172.28.90.0/24`. Running the *unmodified* `dev-up.sh` from this seat's own worktree
+against that live peer reproduced gap 3 immediately and concretely: `docker compose up`
+failed at network creation with `Error response from daemon: invalid pool request: Pool
+overlaps with other one on this address space` on the pinned subnet. (Gaps 1 and 2 were
+not separately live-reproduced as failures — network creation failed first in the up
+sequence — but are confirmed by direct reading of the compose YAML the same way gap 3
+was, and by the fixed version's own before/after behavior below.)
+
+**Fix — extends PR #219's own pattern, not a rewrite.** Every `container_name:` is now
+`${COMPOSE_PROJECT_NAME:-brahmadatta}-<service>` (dev) /
+`${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-<service>` (finale) — the primary checkout
+(`COMPOSE_PROJECT_NAME` unset) gets exactly today's names, unchanged. nginx's host ports
+are `${NGINX_HTTP_PORT:-8080}` / `${NGINX_HTTPS_PORT:-8443}` (dev) and
+`${NGINX_FINALE_HTTP_PORT:-8080}` (finale) — container-side ports stay literal `8080`/
+`8443` always; only the host-side mapping varies. The `api` subnet is parameterized on
+the *same* variable that already had to agree with it
+(`UVICORN_DEV_FORWARDED_ALLOW_IPS`/`UVICORN_FORWARDED_ALLOW_IPS`) rather than inventing a
+second variable name for the same value — the two were already required to stay in sync
+(see that variable's own pre-existing comment), and a second name would just be a new way
+for them to drift.
+
+`dev-up.sh`/`finale-up.sh` derive `NGINX_*_PORT` and `UVICORN_*_FORWARDED_ALLOW_IPS` from
+the *same* worktree-path hash already used for `COMPOSE_PROJECT_NAME` (ports:
+`20000 + hash % 10000` / `30000 + hash % 10000`, dev; `40000 + hash % 10000`, finale;
+subnet: `10.90.<hash % 250 + 1>.0/24` dev, `10.91.<...>.0/24` finale — ranges chosen clear
+of both stacks' own primary-checkout defaults and this host's other known Docker
+networks). A given worktree therefore gets stable values across repeated runs, and only
+a hash collision (accepted as vanishingly unlikely for a handful of concurrent worktrees,
+and fails loudly at `docker compose up` rather than silently sharing resources) would
+still collide. Each is exported only when not already set, so an operator's own override
+always wins — the same convention `COMPOSE_PROJECT_NAME` itself already established.
+
+**Options considered** — (a) the fix above (derive real uniqueness from the same
+worktree hash, ports/subnet included); (b) let Docker assign a fully ephemeral host port
+(`127.0.0.1::8080` short syntax) instead of computing one; (c) require the operator to
+manually pick a free port per worktree.
+
+**Pros and cons.** (b) needs no arithmetic and cannot collide on port number by
+construction, but the assigned port is not knowable until after `up` completes — every
+script and human that currently types `https://localhost:8443/` would need to run
+`docker compose port nginx 8443` first, and `dev-up.sh`'s own closing banner (which
+prints the live URLs) could not print them accurately without an extra query step; it
+also does not solve the *subnet* gap at all, since Compose has no equivalent "assign me
+something free" affordance for a network's IPAM subnet — that gap still needs a
+deterministic derivation regardless, so choosing (b) for ports would still leave a hybrid
+of two different isolation strategies in one script. (c) is what the project already had,
+by omission, and is exactly the operator toil the issue is about removing. (a) needed a
+few lines of arithmetic and carries the acknowledged small residual collision
+probability, but it is fully deterministic (an operator can predict their own worktree's
+ports before running `up`, useful for muscle-memory bookmarks), keeps ports and subnet
+derivation mechanically consistent with each other and with `COMPOSE_PROJECT_NAME`'s own
+already-established hash-based approach, and needed no new dependency.
+
+**Recommendation.** (a), as implemented — matches the issue's own stated preference
+("prefer deriving a port deterministically from a hash... over requiring the operator to
+manually pick a free port"), and keeps all four isolated values (project name, ports,
+subnet) sourced from one hash instead of mixing strategies.
+
+**A test had to change, not just new code land.**
+`tests/architecture/test_compose_topology.py::test_finale_stage_origin_is_loopback_http_only`
+asserted the finale nginx `ports:` entry equals the literal string
+`"127.0.0.1:8080:8080"`, read from the raw (uninterpolated) compose YAML. That literal
+string no longer exists once the host port is parameterized. Updated the assertion to
+match the new literal template string
+(`"127.0.0.1:${NGINX_FINALE_HTTP_PORT:-8080}:8080"`) with an added comment explaining
+why, rather than weakening or deleting the check — the property it actually protects
+(loopback-only, single mapping, no TLS/8443, issue #92) is unaffected by which literal
+host-port value or expression is on the left of the colon, and is still fully asserted.
+
+**Verification — live, not just `docker compose config`.** After landing the fix:
+brought this worktree's dev stack up (`db`/`redis`/`control-api`/`nginx`/
+`command-center`) via the *fixed* `dev-up.sh`, concurrently with the still-running
+unmodified peer worktree's stack — zero errors, isolated project `brahmadatta-ed01b35c`,
+container names `brahmadatta-ed01b35c-*`, nginx published on `127.0.0.1:21644`/`:31644`
+(not 8080/8443), `api` subnet `10.90.145.0/24` (not 172.28.90.0/24), `GET /healthz`
+through the isolated port returned `200`, peer's stack (ports 8080/8443, subnet
+172.28.90.0/24) undisturbed throughout. Went further than the minimum ask: created a
+*third*, throwaway linked worktree (`git worktree add --detach`) from this same fix
+commit and brought its dev stack up too, fully concurrent with both of the above —
+isolated project `brahmadatta-073fc277`, ports `29063`/`39063`, subnet `10.90.64.0/24`,
+`healthz` 200 — proving worktree-vs-worktree isolation directly (fixed vs. fixed), not
+only fixed-vs-unfixed-peer. All three stacks' `docker ps`/`docker network ls` showed
+fully disjoint container names and subnets simultaneously. Tore down both of this seat's
+own stacks cleanly (`docker compose down -v --remove-orphans`, then `git worktree
+remove` for the throwaway one) — `docker ps -a`/`docker network ls` afterward showed zero
+strays and the peer worktree's own stack exactly as found, untouched throughout, per this
+project's own rule (D-099) against unilaterally acting on another live worktree's
+resources.
+
+Also verified: `docker compose config --quiet` clean on both compose files (all
+declared profiles); `infrastructure/scripts/nginx-validate.sh` (`nginx -t`) passes both
+profiles; `tests/architecture/` 67 passed / 6 pre-existing skips, 0 failures, including
+the updated topology test; `shellcheck` clean on both modified scripts; rebased onto
+`origin/main` (`c63c47d`..`2a97fc8`, which landed a Command Center visual rebuild
+unrelated to this change) with a clean rebase and all of the above re-verified against
+the rebased tree.
+
+**Out of scope, flagged not fixed.** `DJANGO_CSRF_TRUSTED_ORIGINS`'s dev default
+(`https://localhost:8443,http://localhost:8080`) is still literal. A worktree's isolated
+stack is therefore reachable and healthy (confirmed above — GET requests, health checks,
+API reads all work), but a browser session driving a POST/PUT through the isolated nginx
+port would get CSRF-rejected unless the operator also sets
+`DJANGO_CSRF_TRUSTED_ORIGINS` to match their worktree's actual isolated port. This is a
+real, narrower residual gap, but distinct from #230's own scope (which is about
+concurrent *bring-up* colliding, not about full browser-driven functional parity once
+both stacks are up) — noted here rather than silently left undocumented, for whoever
+picks up full worktree-isolated browser access as a follow-up.
+
+**Cost implications** — none; no new infrastructure, no new running services.
+
+**Security implications** — none negative. The `api` network subnet's SEC-14 trust
+property (uvicorn trusts `X-Forwarded-*` only from the pinned subnet, not `*`) is
+preserved exactly — the subnet is still pinned, just to a worktree-specific value instead
+of always the same literal, and `UVICORN_*_FORWARDED_ALLOW_IPS` is parameterized on the
+identical value so the two can never drift apart. nginx's `read_only`/`cap_drop`/
+`tmpfs`-sizing hardening is untouched. No credential, secret, or trust boundary changed.
+
+**Scalability implications** — directly the point of this fix: an arbitrary number of
+concurrent worktrees (bounded only by the small collision-probability tradeoff accepted
+above) can now each bring up an independent dev or finale stack without operator
+coordination, where before only one worktree at a time could hold the plain
+`brahmadatta-*`/`brahmadatta-finale-*` names, the default host ports, or the pinned
+subnets.
+
+**Recommendation.** Merge PR (branch `fix/230-worktree-compose-collisions`) once CI is
+green. Given the very low blast radius (compose YAML variable substitution + two dev/ops
+scripts, no application code, no security-sensitive surface per CLAUDE.md's own
+definition of that term, and independently live-verified end to end by this same seat
+rather than only unit-tested), this seat judges it eligible for the standing
+Claude-may-merge-once-gates-pass authority — but is leaving the PR open for human/peer
+review rather than self-merging, since infra changes affecting every future concurrent
+worktree session are exactly the kind of change worth a second pair of eyes before
+merge, and this seat is also the one that just finished asserting its own fix works.
+
+**Final approval authority** — CTO, for the merge decision (or standing Claude-merge
+authority if no reviewer picks it up); this seat, for the fix and its verification
+record above.
