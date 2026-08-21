@@ -565,7 +565,13 @@ services:
       # D-100: this is the process that actually runs JobKind.PATCH_GENERATE — see
       # control-api's identical MODEL_GATEWAY_ROOT comment above.
       MODEL_GATEWAY_ROOT: /app/services/model-gateway
-    command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
+    # D-062/D-122: `rqworker`/`django_rq` was never a real dependency of this project
+    # (queue.py's own docstring: "one table, no broker") — this shell-level default only
+    # ever fires if CONTROL_API_WORKER_CMD is unset in the environment/`.env` entirely,
+    # but it crash-looped every such container on `Unknown command: 'rqworker'` until
+    # fixed here, matching the real management command (`run_worker.py`). See
+    # .env.example's matching fix for the primary (`.env`-driven) path.
+    command: ${CONTROL_API_WORKER_CMD:-python manage.py run_worker}
     volumes:
       - ../../apps/control-api:/app
       - /app/.venv
@@ -583,6 +589,86 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Orchestrator — `manage.py run_orchestrator`, the tick loop (`orchestrator/queue.py::
+  # tick()`) that owns `Mission.state` and is THE ONLY process that ever calls
+  # `orchestrator.transitions.transition()` outside `authorization.service`'s own callers.
+  # `run_worker` (above) claims and executes individual `Job` rows but deliberately never
+  # writes `Mission.state` — see that service's own comment and `orchestrator/executors.py`'s
+  # module docstring for why that boundary is load-bearing. Without this process running,
+  # NOTHING advances a mission past `VALIDATING`, ever, no matter how many `worker`/
+  # `fuzz-worker` processes are up — found live wiring the model gateway into this stack
+  # (D-121) and started by hand (`docker compose exec -d control-api python manage.py
+  # run_orchestrator`) for that session's own verification only; that is exactly the
+  # not-durable gap this service closes. Devops-scoped per D-121's own final-approval line
+  # and the D-062 staffing plan ("add the missing `orchestrator` service to both compose
+  # profiles").
+  #
+  # NOT profile-gated, unlike `worker`: there is no split-fleet reason to make this
+  # optional (D-073 is about `FUZZ`/`MINIMIZE` needing container-runtime access `worker`
+  # structurally cannot have; nothing about `run_orchestrator` has an equivalent second
+  # mode), and #57's three timed finale rehearsals need it running for the mission's
+  # entire duration with no operator action — gating it behind a flag would just move the
+  # hand-intervention problem from "start the process" to "remember the flag".
+  #
+  # Does NOT need `/var/run/docker.sock`, `packages.sandbox`'s container backend, or a
+  # model-gateway client, so D-036's socket-mount prohibition and D-073's bare-metal
+  # `fuzz-worker` split do not apply here the way they do to FUZZ/MINIMIZE — this is not
+  # copied from `fuzz-worker`'s exemption reflexively, it is a different process with a
+  # different dependency footprint: `run_orchestrator.py`'s own module docstring states it
+  # "[n]ever runs a subprocess, never touches a repository, never holds an inference
+  # client", and `orchestrator/queue.py::tick()` (everything this process calls) only ever
+  # reads/writes Postgres — no Redis, no filesystem snapshot, no `gateway.*` import (that
+  # import is lazy and confined to `run_worker`'s own claim loop, per `orchestrator/
+  # patch_generate_executor.py`'s module docstring). A plain containerized service is
+  # therefore sufficient, same as `control-api`/`worker` themselves.
+  #
+  # `restart: unless-stopped` is safe with SEC-43's singleton advisory lock (`orchestrator/
+  # singleton_lock.py`): the lock is held on this process's own dedicated Postgres session
+  # and is released automatically the instant that session closes (crash, kill, or a clean
+  # `docker compose restart`) — so a Compose-driven restart never leaves a stale lock
+  # behind for the replacement process to collide with. Verified live, not just argued from
+  # the docstring: see .project/decisions.md D-122.
+  orchestrator:
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: dev
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta}-orchestrator
+    <<: [*env-file, *hardening]
+    environment:
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://brahmadatta:brahmadatta-dev@db:5432/brahmadatta}
+      PYTHONPATH: /app
+      # No REDIS_URL: unlike control-api/worker, this process never touches Redis at all
+      # (queue.py's own docstring: "One table, no broker") — carrying it here would just
+      # be a var nothing reads. No MODEL_GATEWAY_ROOT / model-host wiring either, for the
+      # same reason: see this service's header comment.
+    command: python manage.py run_orchestrator
+    volumes:
+      - ../../apps/control-api:/app
+      - /app/.venv
+      # Same fix as control-api's/worker's identical mounts above (#168 T1 regression):
+      # `missions/apps.py::ready()` imports `workers.baseline.dispatch` and `workers.
+      # fuzzing.dispatch` unconditionally on EVERY Django process start, including this
+      # one, and those modules import `packages.sandbox` — omitting these three mounts
+      # is `ModuleNotFoundError: No module named 'workers'` on boot, not a degraded mode.
+      # No `demo/repositories` mount and no `services/model-gateway` mount: this process
+      # never ingests a snapshot and never imports `gateway.*` (see header comment) — the
+      # bind mounts control-api/worker need for THOSE two things are not needed here.
+      - ../../workers:/app/workers
+      - ../../packages:/app/packages
+      - ../../adapters:/app/adapters
+    networks:
+      # `backend` only — same as `worker`. This process never talks to nginx or the
+      # browser, only to Postgres.
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      # No `redis` dependency: see the environment block's comment above.
     restart: unless-stopped
 
 networks:

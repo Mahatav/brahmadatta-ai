@@ -309,9 +309,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
       REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
       # Mirrors control-api's ARTIFACT_ROOT fix above, for parity if this profile is
-      # ever activated. NOT independently verified working end to end — see #50's
-      # evidence bundle: `CONTROL_API_WORKER_CMD`'s default (`manage.py rqworker`)
-      # has no `django_rq` in requirements.txt and was never reached by this rehearsal.
+      # ever activated. D-062/D-122: the command default below now names the real
+      # management command (`run_worker`, not `rqworker` — see that line's own comment),
+      # but this service is still NOT independently verified end to end under the
+      # finale profile: finale-up.sh never passes `--profile worker`, so no rehearsal has
+      # actually exercised this container yet. Flagged, not fixed here — a larger,
+      # separate gap than the stale command default this fix closes.
       ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
       # D-100: same fix and reasoning as control-api's own MODEL_GATEWAY_ROOT above —
       # this is the process that actually runs JobKind.PATCH_GENERATE, so it needs
@@ -319,7 +322,7 @@ services:
       # once this profile is activated (see the NOT independently verified note above).
       MODEL_GATEWAY_ROOT: /app/services/model-gateway
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
-    command: ${CONTROL_API_WORKER_CMD:-python manage.py rqworker default}
+    command: ${CONTROL_API_WORKER_CMD:-python manage.py run_worker}
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
       - artifacts:/var/lib/brahmadatta/artifacts
@@ -331,6 +334,53 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Orchestrator — `manage.py run_orchestrator`, the tick loop that owns `Mission.state`.
+  # See docker-compose.yml's matching service for the full reasoning (why it must exist,
+  # why it is not profile-gated, why it needs neither the Docker socket nor a
+  # model-gateway client, why `restart: unless-stopped` is safe under SEC-43's singleton
+  # advisory lock). #57's three timed finale rehearsals are exactly the scenario this
+  # closes: without it running for the mission's entire duration, nothing advances past
+  # `VALIDATING`, and a hand-started `docker compose exec -d` process does not survive a
+  # container recreation or a rehearsal that runs unattended.
+  orchestrator:
+    build:
+      context: ../../apps/control-api
+      dockerfile: ../../infrastructure/compose/images/control-api.Dockerfile
+      target: runtime
+      # The `runtime` target's single COPY sequence is unconditional — every one of these
+      # five contexts must be supplied for the build to succeed at all, even though this
+      # service only ever needs workers-source/packages-source/adapters-source at
+      # runtime (see the environment/volumes-equivalent comment below). Exactly mirrors
+      # control-api's/worker's own `additional_contexts` block above for that reason, not
+      # because orchestrator needs demo/repositories or services/model-gateway baked in.
+      additional_contexts:
+        demo-repositories: ../../demo/repositories
+        workers-source: ../../workers
+        packages-source: ../../packages
+        adapters-source: ../../adapters
+        model-gateway-source: ../../services/model-gateway
+    container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-orchestrator
+    <<: [*env-file, *hardening]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.finale
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for the finale stack}
+      # No REDIS_URL, no ARTIFACT_ROOT, no MODEL_GATEWAY_ROOT: this process never touches
+      # Redis, never writes an artifact, and never imports `gateway.*` — see
+      # docker-compose.yml's matching service comment for why.
+    # Overrides the `runtime` image's default CMD (uvicorn) — same idiom `worker` above
+    # uses to run a different management command off the identical image.
+    command: python manage.py run_orchestrator
+    networks:
+      - backend
+    depends_on:
+      db:
         condition: service_healthy
     restart: unless-stopped
 

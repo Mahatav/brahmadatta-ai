@@ -13113,3 +13113,204 @@ devops-engineer (orchestrator process durability, technical infrastructure). The
 wiring and bug-fix diff themselves are ai-ml-engineer's own authority per scope (model
 gateway selection/config, output validation and retry behavior) and do not require
 escalation.
+
+---
+
+## D-122 — `run_orchestrator` is now a real, supervised Compose service in both
+profiles, closing the durability gap D-121/#168/D-062 all separately flagged; the
+stale `rqworker` `CONTROL_API_WORKER_CMD` default (D-062's paired devops item) fixed
+in the same pass · 2026-08-21 · `devops-engineer` seat
+
+**Context.** `manage.py run_orchestrator` (`orchestrator/queue.py::tick()`) is the only
+process that ever calls `orchestrator.transitions.transition()` outside
+`authorization.service`'s own callers — the tick loop architecture spec §1.1 names, and
+the thing D-060/§2.4 means by "after `start`, the pipeline runs with no human in the
+loop." It was never wired into either compose file. D-121 (this log, immediately above)
+found this live wiring the model gateway into the dev stack and started it by hand
+(`docker compose exec -d control-api python manage.py run_orchestrator`) for that
+session's own verification only, flagging the durability gap explicitly: "not
+supervised by compose, has no restart policy, and does not survive `control-api` being
+recreated." D-062 (this log, `.project/decisions.md`, staffing plan for #168)
+independently named the identical two devops-scoped fixes months earlier: "add the
+missing `orchestrator` service to both compose profiles" and "fix the `worker`
+service's `command` (drop `rqworker`)" — both done here, together, because the second
+is a real precondition for the first being *observably* correct: without a working
+`worker`, a mission advances out of `VALIDATING` (orchestrator's own job) but every
+job-backed stage after it sits `QUEUED` forever, which looks identical to "orchestrator
+still isn't running" from the outside.
+
+**Decision.** Three changes, all additive:
+
+1. **New `orchestrator` service**, `infrastructure/compose/docker-compose.yml` and
+   `docker-compose.finale.yml`, mirroring `worker`'s existing pattern (same base image,
+   `command:` override instead of a new Dockerfile) with the differences its own
+   dependency footprint requires — see the compose files' own header comments on this
+   service for the full reasoning, summarized:
+   - **Not profile-gated** (`worker` is `profiles: ["worker"]`; `orchestrator` is not).
+     `worker`'s gate exists for a real reason (D-073's FUZZ/MINIMIZE split); nothing
+     about `run_orchestrator` has an equivalent second mode, and gating a process every
+     mission needs would just relocate the exact "durable, no hand intervention"
+     problem this task exists to close.
+   - **No Docker-socket mount, no `packages.sandbox.container` dependency** — confirmed
+     by reading `orchestrator/queue.py::tick()` (everything this process calls) before
+     assuming D-073's `fuzz-worker` exemption pattern applied: `tick()` only ever reads/
+     writes Postgres via the Django ORM. D-036's socket-mount prohibition is therefore
+     not in tension with containerizing this service at all — there was never a
+     question to resolve, once actually checked against the code rather than pattern-
+     matched from `fuzz-worker`'s shape.
+   - **No `services/model-gateway` mount, no `demo/repositories` mount** (dev profile) —
+     `run_orchestrator.py`'s own module docstring: "Never runs a subprocess, never
+     touches a repository, never holds an inference client." Confirmed directly:
+     `_ensure_gateway_importable()` (`orchestrator/patch_generate_executor.py`) is only
+     ever called from inside `run_worker`'s claim loop, never from anything
+     `run_orchestrator` calls. `workers/`, `packages/`, `adapters/` ARE mounted (dev) /
+     supplied as build contexts (finale, since the shared `runtime` Dockerfile target's
+     COPY sequence is unconditional) — `missions/apps.py::ready()` imports
+     `workers.baseline.dispatch`/`workers.fuzzing.dispatch` unconditionally on every
+     Django process start, this one included, the same #168 T1 regression class
+     `control-api`/`worker` already had to fix.
+   - **`restart: unless-stopped`** — the same policy every other long-running service in
+     both files already uses (`nginx`, `control-api`, `db`, `redis`, `worker`). Verified
+     safe specifically against SEC-43's singleton advisory lock (`orchestrator/
+     singleton_lock.py`): the lock is held on this process's own dedicated `psycopg`
+     session (deliberately not `django.db.connection` — see that module's docstring)
+     and releases automatically the instant that session closes, so a Compose-driven
+     replacement process never collides with a stale lock from the one it replaced.
+2. **`CONTROL_API_WORKER_CMD`'s stale default fixed**, three places:
+   `.env.example`'s literal value, and both compose files' own `${CONTROL_API_WORKER_CMD
+   :-python manage.py rqworker default}` shell-level fallback. All three named
+   `rqworker`, a command that has never existed in this codebase — `django_rq` is not
+   and has never been a dependency (checked directly: absent from
+   `apps/control-api/requirements.txt`); the real command, `manage.py run_worker`, has
+   existed since #168 T0 landed. Every fresh `worker` container crash-looped on
+   `Unknown command: 'rqworker'` until this fix — reproduced live below, not assumed
+   from the D-098/D-121 prior reports of the same defect.
+3. No change to `worker`'s own `profiles: ["worker"]` gate or to `dev-up.sh`'s
+   `DEV_UP_WORKER` opt-in default — out of this task's scope (I was not asked to make
+   `worker` default-on, and doing so unasked would be exactly the kind of unrequested
+   scope creep CLAUDE.md's review chain exists to catch). Also left alone:
+   `finale-up.sh` never passes `--profile worker` at all, so the finale `worker` service
+   remains genuinely unexercised by any rehearsal to date — flagged in the compose
+   file's own comment, not fixed here; a larger, separate gap than the stale command
+   default this pass closes.
+
+**Options considered** — (a) a new dedicated `orchestrator` service, as implemented;
+(b) fold the tick loop into `control-api`'s own container as a background thread/second
+process (e.g. via a process supervisor like `supervisord`, or a Django management
+command spawned from `AppConfig.ready()`); (c) a systemd unit / cron-driven `--once`
+invocation outside Compose entirely.
+
+**Pros and cons.** (b) avoids one more container, but couples two processes with
+different failure and restart semantics into one PID 1 — `control-api` is what nginx's
+`depends_on: condition: service_started` actually gates on, so a `run_orchestrator`
+crash taking the ASGI process down with it (or a supervisor needed inside the image to
+stop that) would turn an orchestrator bug into a full outage of the operator-facing API,
+which today survives a `worker` or `fuzz-worker` crash with zero user-visible effect —
+this task's whole point is durability, and (b) trades one durability problem for a
+different, worse-blast-radius one. It also fights the codebase's own stated process
+architecture (architecture spec §1.1 names `run_orchestrator`/`run_worker` as separate
+processes; `run_orchestrator.py`'s docstring explicitly does not mention being embedded
+in anything). (c) is not "supervised by Compose" at all — it reintroduces a form of the
+exact gap this task exists to close (a process whose lifecycle nothing in this repo's
+own deployment artifact accounts for), just relocated from "not started" to "started by
+something outside version control." (a) costs one more container and one more image
+build (small — same Dockerfile, same layers, already cached), gets `restart: unless-
+stopped` for free from the same mechanism every other service already trusts, and keeps
+the process boundary the codebase's own docstrings already assume.
+
+**Cost implications** — negligible. One more long-running container per environment;
+no new image, no new named volume, no additional compute beyond what the (already
+mandatory, just previously hand-started) tick loop was always going to cost.
+
+**Security implications** — none widened, one narrowed. `orchestrator` has a strictly
+smaller attack surface than `worker`: no Docker CLI, no `packages.sandbox` container
+backend reachable, no model-gateway client, no repository-content mount, no host port,
+`backend`-network-only (same as `worker`), and — finale profile — `read_only: true` /
+`cap_drop: ["ALL"]` / `tmpfs`-only `/tmp`, identical hardening to `worker`'s own finale
+block. D-036's socket-mount prohibition and D-073's `fuzz-worker` bare-metal exemption
+were both re-examined against this service's actual code path (not assumed to transfer)
+and neither applies: confirmed directly, not argued from precedent, per the task's own
+instruction to verify D-036 before reusing its reasoning.
+
+**Scalability implications** — this is the thing that makes the rest of the pipeline
+scale to more than one manually-babysat mission at a time: every mission created from
+here on advances autonomously for its full lifecycle, which is the literal precondition
+for #57's three unattended timed rehearsals.
+
+**Verification — live, both compose files, not just `docker compose config`.**
+
+- `docker compose -f infrastructure/compose/docker-compose.yml config --quiet` and the
+  equivalent finale invocation (with the finale profile's required `:?` vars supplied):
+  both clean.
+- `tests/architecture/` — 67 passed, 6 pre-existing skips, 0 failures (same baseline as
+  D-120's own last run), including `test_compose_topology.py` and
+  `test_container_isolation.py` (D-036's own structural assertion) against the new
+  service.
+- **Fresh dev stack, this worktree's own isolated Compose project
+  (`brahmadatta-92624437`, `DEV_UP_WORKER=1 infrastructure/scripts/dev-up.sh`), not the
+  concurrently-running sibling worktree's stack** — every container reached `Up`/
+  `healthy`, including `orchestrator`, with no manual step beyond the script itself and
+  one `manage.py migrate` (a fresh database has no schema at all regardless of this
+  change; unrelated to it). Before migration, `orchestrator`'s own tick-loop error
+  handling (`except Exception: logger.exception(...)`, never a crash) logged the
+  expected `relation "job" does not exist` every tick and kept running rather than
+  exiting — the container needed zero restarts to recover once the schema existed,
+  confirmed via `docker inspect --format '{{.RestartCount}}'` staying `0` throughout.
+- **Restart-policy test, honestly reported.** `docker inspect` confirms
+  `HostConfig.RestartPolicy.Name = unless-stopped` on the built `orchestrator`
+  container, identical to every other long-running service. `docker kill` against it,
+  however, did **not** trigger an automatic restart in this session's sandboxed Docker
+  Desktop daemon (`Server Version: 29.6.1`, `linuxkit` VM) — confirmed this is an
+  environment property, not a defect in this change, by reproducing the identical
+  non-restart behavior against three independent, pre-existing, previously-reviewed
+  services in the same file with the same policy (`redis`, `nginx`, and `worker` itself)
+  under the identical `docker kill` + wait test. All three also failed to auto-restart
+  in this sandbox. I am not claiming the restart policy was observed working — it was
+  not, for any service, in this environment — only that the policy is correctly
+  declared and behaves identically to already-shipped, already-reviewed services under
+  the same test, so there is no evidence this change behaves differently from the
+  established pattern. Recommend whoever reviews this on a normal (non-sandboxed)
+  Docker host re-run `docker kill <orchestrator container>` and confirm it comes back
+  automatically before the first real #57 rehearsal — this is the one part of the
+  acceptance bar I could not directly observe passing.
+- **One real mission, driven end to end through the actual REST API, zero manual
+  `docker compose exec`.** Operator token read from the live container
+  (`CONTROL_API_OPERATOR_TOKEN`); sequence run against `https://localhost:<isolated
+  port>/api/v1` with `-k` (self-signed dev cert): `POST /missions` (201) → `POST
+  .../authorize` (201) → `POST .../snapshot` (409 with a placeholder digest, real
+  digest read back from `details.computed_archive_sha256`, retried — 201) → `POST
+  .../preflight` (200, 4/4 checks passed) → `POST .../start` (202,
+  `"SNAPSHOTTED -> VALIDATING"`). `GET /missions/{id}` 3 seconds later: `state:
+  "BASELINE"` — `advance_out_of_validating()` had already run with nothing else
+  touched. Left running: 13 seconds after `start`, the mission reached `state:
+  "STRESS_TEST"`, `stages_completed: [AUTHORIZE, INGEST, BASELINE, ANALYZE,
+  STRESS_TEST]`, `tests_passed: 8, tests_failed: 0` — a REAL baseline build/ctest run
+  (`GET /missions/{id}/baseline` confirms `configure_ok: true, build_ok: true`, a real
+  JUnit artifact ref), not a stub. `worker`'s own log shows it claiming kinds
+  `{BASELINE, CORRELATE, EXPORT, PATCH_GENERATE, SANITIZER_BUILD, TEARDOWN, VERIFY}` —
+  confirming the `CONTROL_API_WORKER_CMD` fix (item 2 above) is what made this possible;
+  without it the orchestrator alone would still have advanced `VALIDATING -> BASELINE`
+  but every job-backed stage after it would have queued forever with no worker to claim
+  it. `POST .../cancel` (202) cleanly reached `CANCELLED`/`CANCELLED` afterward,
+  exercising the orchestrator's `CANCELLING` dispatch path too (D-117/D-118's own prior
+  fix, unaffected by this change — confirmed still working, not re-litigated).
+- **Teardown, per D-099's rule against leaving strays.** `docker compose down` (this
+  worktree's own isolated project only) — zero containers, zero networks left; named
+  volumes explicitly removed after. The concurrently-running sibling worktree's own
+  stack (`brahmadatta-control-api`, unprefixed names, a pre-D-120 checkout) was
+  confirmed running, undisturbed, before and after every step above.
+
+**Recommendation** — merge once CI is green. This is durable infra/process-supervision
+with a small blast radius (compose YAML + `.env.example`, no application code touched,
+no security posture widened) and independently live-verified end to end by this same
+seat, matching D-120's own precedent for self-judged merge eligibility — but per that
+same precedent, and because this genuinely does change how every future mission runs
+(every mission created from here on is autonomous for its full lifecycle where before
+none were), this seat is leaving the PR open for a peer/CTO review rather than
+self-merging, not exercising the standing Claude-may-merge authority here.
+
+**Final approval authority** — CTO, for the merge decision, per D-121's own final-
+approval line naming "CTO or devops-engineer (orchestrator process durability,
+technical infrastructure)" and this seat's own judgment above that a second pair of
+eyes is warranted given the blast radius; this seat, for the fix and its verification
+record above.
