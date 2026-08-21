@@ -5,8 +5,8 @@
 | Repository | https://github.com/Mahatav/brahmadatta-ai (private) |
 | Board | https://github.com/users/Mahatav/projects/3 |
 | Deadline | **≈2026-08-29** (D-086: runway corrected from the stale 2026-08-20 date, ~10 days from 2026-08-19) |
-| Current phase | 5/7 — backend/orchestration pipeline D7-gate-complete; Command Center has a real mission-control surface (D-100) but the full 5-panel visual rebuild (D-086 item 2) has not started |
-| Last updated | 2026-08-20 — **#50 (D7 gate) closed, PASS** |
+| Current phase | 5/7 — backend/orchestration pipeline D7-gate-complete; Command Center's full visual rebuild against the approved rev-2 spec (D-086 item 2) is **merged** (PR #231, D-113..D-119) — next up is `#57`'s three timed rehearsals |
+| Last updated | 2026-08-21 — **Command Center visual rebuild merged to `main`** |
 
 ## #50 closed — the headline result
 
@@ -28,17 +28,27 @@ Mahatav's own next action, not an engineering gap.
 
 ## What's next
 
-Per D-086's priority order (CEO ruling on the extended runway): the Command Center's
-full visual rebuild against the approved rev-2 design spec (`docs/09-company/
-04-design-system.md`) — the Core, Stage Timeline, Findings rail, Candidate Compare
-overlay, Verdict panel, resource ledger — is the next major body of work, now that the
-backend it needs to render against is fully proven live. Then the three `#57` timed
-rehearsals, the reopened CUT items in D-086's stated order, and `#60` code freeze with a
-real reserve held at the tail. `#59` (finale roster) is answered: Mahatav + team,
-combined demo-operator/incident-lead role. The two small non-blocking follow-ups filed
-during today's reviews (#222, #224) and the hardening backlog from the earlier 16-finding
-triage (`docs/09-company/14-runway-task-plan-2026-08-19.md` §3) remain open, lower
-priority than the visual rebuild per D-086's own ordering.
+**Update, 2026-08-21: the Command Center visual rebuild (D-086 item 2) is done and
+merged** — `main`@`4704d7e` (PR #231, squash of D-113 through D-119). The Core, Stage
+Timeline, Findings/Evidence rail, Candidate Compare overlay, Verdict panel, resource
+ledger and bottom-strip controls are all live against the approved rev-2 spec
+(`docs/09-company/04-design-system.md`), independently QA-approved against the real
+running stack (not mocks) after two rejection rounds (D-114, D-116) and a final pass
+(D-119) that fixed a React SSR hydration mismatch and a Stage Timeline bug that hid 6 of
+10 genuinely-completed stages behind a stale `QUEUED` badge — both found and verified via
+a real curl-driven mission, not fixtures.
+
+Per D-086's priority order, next is the three `#57` timed rehearsals against
+`docs/10-competition/36-hour-finale-runbook.md`'s stage budgets (failure injection: GPU
+unavailable, target fails to build, a stage hangs; `infrastructure/scripts/
+finale-egress-evidence.sh` run and recorded each time), then the reopened CUT items in
+D-086's stated order, then `#60` code freeze with a real reserve held at the tail. `#59`
+(finale roster) is answered: Mahatav + team, combined demo-operator/incident-lead role.
+`#229` (SSE malformed-event log line, low severity) parked as `tier:P2` backlog. `#230`
+(worktree docker-compose collision gap left by PR #219) dispatched to a devops-engineer
+pass, in flight. The hardening backlog from the earlier 16-finding triage
+(`docs/09-company/14-runway-task-plan-2026-08-19.md` §3) remains open, lower priority
+than `#57` per D-086's own ordering.
 
 ## What this update is
 
