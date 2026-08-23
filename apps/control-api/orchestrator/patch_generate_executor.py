@@ -203,12 +203,21 @@ def _build_live_backend(settings):
     and `OllamaCodeLlamaBackend.bearer_token` was already a real field; this call site
     simply never connected the two, so every live-model `PATCH_GENERATE` call got a
     real `401` back from the sidecar instead of ever reaching Ollama.
+
+    `timeout_sec=settings.model_host_timeout_seconds` is D-123: this backend's own
+    dataclass default and the nginx sidecar's `proxy_read_timeout`/`proxy_send_timeout`
+    used to be two independently hardcoded `300s` literals that only matched by
+    coincidence. Threading the settings-derived value through here (rather than
+    leaving this call site on the dataclass's own default) is what makes
+    `MODEL_HOST_TIMEOUT_SECONDS` the actual single source of truth for the live
+    `PATCH_GENERATE` path specifically, not just in principle.
     """
     from gateway.ollama import DEFAULT_OLLAMA_ENDPOINT, OllamaCodeLlamaBackend
 
     return OllamaCodeLlamaBackend(
         endpoint=settings.endpoint or DEFAULT_OLLAMA_ENDPOINT,
         bearer_token=settings.model_host_bearer_token,
+        timeout_sec=settings.model_host_timeout_seconds,
     )
 
 

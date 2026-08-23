@@ -220,6 +220,41 @@ def test_build_live_backend_threads_the_bearer_token_from_settings():
     assert backend.bearer_token == "s3cr3t-sidecar-token"
 
 
+def test_build_live_backend_threads_the_model_host_timeout_from_settings():
+    """D-123: the same shape of bug as D-105/D-106's bearer-token miss, for the other
+    field this call site must actually pass through. Before this fix
+    `_build_live_backend` never read `settings.model_host_timeout_seconds` at all, so
+    `MODEL_HOST_TIMEOUT_SECONDS` had no effect on the live `PATCH_GENERATE` path even
+    though `gateway.settings.from_environment()` already parsed it correctly."""
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://model-host:11434",
+        resolve_endpoint=False,
+        model_host_timeout_seconds=900.0,
+    )
+
+    backend = pge._build_live_backend(settings)
+
+    assert backend.timeout_sec == 900.0
+
+
+def test_build_live_backend_defaults_to_the_named_300s_constant():
+    """The other half: an unconfigured `MODEL_HOST_TIMEOUT_SECONDS` must still land on
+    the same 300s this backend's own dataclass default already used, not a different,
+    accidentally-introduced number."""
+    from gateway.ollama import DEFAULT_OLLAMA_TIMEOUT_SECONDS
+
+    settings = GatewaySettings(
+        mode=GatewayMode.LIVE,
+        endpoint="http://127.0.0.1:11434",
+        resolve_endpoint=False,
+    )
+
+    backend = pge._build_live_backend(settings)
+
+    assert backend.timeout_sec == DEFAULT_OLLAMA_TIMEOUT_SECONDS == 300.0
+
+
 def test_build_live_backend_defaults_to_no_bearer_token(monkeypatch):
     """The other half of the same regression: an unconfigured token must not become
     a non-empty one by accident (e.g. `None` -> the literal string `"None"`), the

@@ -442,6 +442,14 @@ services:
       # generated and set — deliberately, because SEC-50's gate has to hold the moment
       # `model-host` is reachable in ANY environment, not just the finale deployment.
       MODEL_HOST_BEARER_TOKEN: ${MODEL_HOST_BEARER_TOKEN:-}
+      # D-123 (.project/decisions.md): the single source of truth this nginx conf's
+      # proxy_read_timeout/proxy_send_timeout now derive from (see the template's own
+      # header comment), shared with gateway.ollama.OllamaCodeLlamaBackend's client
+      # timeout via gateway.settings.GatewaySettings.model_host_timeout_seconds --
+      # not two independently hardcoded 300s literals that only matched by
+      # coincidence. Defaults to 300 (unchanged behavior) until an operator
+      # deliberately raises it.
+      MODEL_HOST_TIMEOUT_SECONDS: ${MODEL_HOST_TIMEOUT_SECONDS:-300}
     volumes:
       - ./nginx/model-host-auth/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/model-host-auth/templates:/etc/nginx/templates:ro
