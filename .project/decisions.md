@@ -13314,3 +13314,116 @@ approval line naming "CTO or devops-engineer (orchestrator process durability,
 technical infrastructure)" and this seat's own judgment above that a second pair of
 eyes is warranted given the blast radius; this seat, for the fix and its verification
 record above.
+
+## D-123 — PATCH-stage CPU timing profiled live: the real bottleneck is Docker Desktop
+memory pressure, not decode throughput or the 300s timeout constant · 2026-08-23 ·
+self-directed diagnostic (subagent dispatch unavailable mid-task — account usage limit;
+completed directly via Docker/Bash against the real running stack)
+
+**Context.** D-121 wired the dev stack's live model gateway; a follow-up profiling task
+(ADHD synthesis, D-121's own open question) was dispatched to measure whether
+PATCH_GENERATE's 300s-per-call overrun is cold-load, prefill-bound, or a decode-throughput
+ceiling, before anyone touched the timeout/attempt-count constants. The dispatched agent
+was killed mid-task by an account usage limit; its leftover scaffolding (a scoped,
+env-gated profiling patch to `gateway/ollama.py`, and a standalone probe script) was
+found, understood, and used as the starting point for finishing this directly.
+
+**What was measured, in order:**
+
+1. A full-size real request (5551-char prompt built from `gateway.context.build_context`
+   against a real `pktcfg` finding, `num_predict=3200` matching `_max_output_tokens`'s
+   real policy-derived value) via the actual product code path
+   (`patch_generate_executor._build_gateway`/`_build_live_backend`) timed out at the
+   client's 300s default on 3 consecutive attempts.
+2. Raising the client's own `timeout_sec` to 900s on a 4th attempt still failed — but this
+   time with `HTTP Error 504: Gateway Time-out` from `model-host-auth`, not a client
+   socket timeout. Root cause: `infrastructure/compose/nginx/model-host-auth/templates/
+   model-host-auth.conf.template` hardcodes `proxy_read_timeout 300s`/`proxy_send_timeout
+   300s`, independently of and only coincidentally matching
+   `gateway.ollama.OllamaCodeLlamaBackend`'s own 300s client default (the template's own
+   comment says exactly this: "Mirrors ... rather than nginx's much shorter one" — a
+   value chosen once to match, with nothing keeping the two in sync if either changes).
+   **This is a real, standalone bug**: raising the client timeout alone can never help,
+   because the proxy silently re-caps every call at 300s regardless.
+3. Temporarily raised the proxy's timeout to 900s (local diagnostic edit, reverted after
+   this measurement) to get past that ceiling and observe a real completion.
+4. A full 3200-token request still did not complete in 900s.
+5. Isolated the variable by calling Ollama directly on its real internal port
+   (`127.0.0.1:11435`, from inside `model-host-auth`'s shared network namespace,
+   bypassing the auth proxy and the whole product code path entirely):
+   - Trivial request (20 max tokens), model cold: `total_duration=67.5s`,
+     `load_duration=59.5s` (88% of total), `prompt_eval=5.9s`, `eval=2.0s`.
+   - Same request repeated immediately (model warm): `total_duration=9.7s`,
+     `load_duration=0.01s` — confirms cold-load is real and entirely avoidable if the
+     model stays resident between calls, not an unavoidable per-call cost.
+   - A 100-300 output-token request, model warm, produced wildly inconsistent results
+     across repeated tries: one completed in ~65s, another did not complete in 200s, a
+     third did not complete in 900s — **while `docker stats` showed `model-host` at a
+     genuine 1000-1300% CPU (using most of the host's 10 cores) the entire time**, ruling
+     out a hang; it was actively computing, just with severe, unpredictable slowdowns.
+6. Checked memory: `model-host`'s container `mem_limit` is `${MODEL_HOST_MEM_LIMIT:-8g}`
+   (`infrastructure/compose/docker-compose.yml`) — smaller than `codellama:7b-instruct`'s
+   own on-disk size (`ollama ps`: 9.0 GB) — and was observed at 7.68GiB/8GiB (96%) live
+   during generation. `docker system info`'s `MemTotal` for the whole Docker Desktop VM
+   is ~9.7 GiB total, meaning `model-host` alone is allowed to claim nearly the entire
+   VM, leaving almost nothing for the other seven containers (`control-api`, `worker`,
+   `db`, `redis`, `nginx`, `command-center`, `model-host-auth`) sharing the same box.
+
+**Conclusion.** The observed behavior — sometimes-fast, sometimes-never-completes, at
+genuinely high CPU utilization throughout — is the signature of severe memory pressure
+(the model's real working set right at or over its container's ceiling, likely forcing
+swap/reclaim churn under the host VM's own tight ~9.7 GiB total), not a clean, predictable
+"N tokens/second on this CPU" story. This is a materially different, more actionable
+finding than the profiling task's original three hypotheses (cold-load / prefill-bound /
+decode-ceiling) anticipated: **cold-load is real and fixable with a keep_alive/pre-warm
+strategy (confirmed: 59.5s → 0.01s on a warm repeat), but even warm, throughput is
+unpredictable because of memory pressure, not decode speed alone.**
+
+**A second, independent bug found in passing**: the dual-hardcoded-timeout coupling
+(client 300s, nginx proxy 300s) is real and will silently defeat any future attempt to
+fix this by raising only one of the two values. Not fixed here (left for the real,
+data-informed fix pass this entry recommends) — reverted to the original 300s/300s after
+the diagnostic measurement above, so the running stack is unchanged from before this
+session's investigation.
+
+**What this means for #57.** Timeout/attempt-count tuning, difficulty-based attempt
+tiering (the other D-121 follow-up idea), and any other pure-software fix will all still
+be fighting a hardware ceiling: this specific machine's Docker Desktop allocation
+(~9.7 GiB total) does not have comfortable headroom for a 9 GB local model plus seven
+other containers. Docker Desktop's memory was already raised once this session
+(8092→10240 MiB, with the user's explicit confirmation given the side effect on other
+running containers) specifically so the live model could produce verdicts at all — this
+finding says that raise was necessary but is not sufficient for reliable PATCH-stage
+throughput under real generation load, not that it didn't help.
+
+**Recommendation, not yet actioned (needs Mahatav's input — a host-level resource change
+with the same "affects everything else running" shape as the earlier memory raise, per
+CLAUDE.md's own guidance on when to stop and ask):**
+
+1. Raise `model-host`'s `mem_limit` (currently `8g`) and, most likely, Docker Desktop's
+   total VM allocation again, to give the model real headroom above its 9 GB on-disk
+   size rather than a ceiling smaller than the model itself.
+2. Fix the dual-timeout coupling: derive both the client's and the nginx proxy's timeout
+   from one source of truth, sized to the real worst-case measured after (1) is resolved
+   — not re-guessed as another round number.
+3. Set an explicit `keep_alive` (Ollama's own per-request field, or `OLLAMA_KEEP_ALIVE`
+   env) generous enough to survive the gap between PATCH_GENERATE attempts within one
+   mission, so the confirmed-avoidable ~60s cold-load cost is paid at most once per
+   mission rather than potentially once per attempt.
+4. Re-measure with (1)-(3) in place before concluding anything about whether the
+   finale runbook's 18-25hr Patching-phase budget is realistic on CPU-only hardware, or
+   whether D-015's GPU cut (2026-08-06, cost/schedule-risk reasons) is worth revisiting
+   now that this concrete a resource ceiling has been measured directly. That revisit
+   is explicitly not decided here — it is exactly the kind of decision this project's own
+   standing rule reserves for Mahatav, not an engineering default.
+
+**What was NOT changed.** No product code, timeout constant, or `mem_limit` was modified
+by this diagnostic — the nginx timeout bump and profiling instrumentation were both local,
+temporary, and reverted after the measurement above. The stack is in the same state it
+was before this investigation started, with three concrete, evidenced findings now on
+record instead of an open question.
+
+**Final approval authority** — Mahatav, for the Docker Desktop memory / `model-host`
+`mem_limit` raise (host-level, affects other concurrent work) and for whether to revisit
+D-015; CTO/ai-ml-engineer, for the timeout-coupling fix and `keep_alive` tuning once (1)
+is resolved.
