@@ -169,6 +169,7 @@ from orchestrator.executors import (
     register_transition_policy,
 )
 from orchestrator.findings import record_finding, record_reproducer
+from orchestrator.redaction import redact_sanitizer_report
 from packages.sandbox.container import ContainerJailPolicy
 from packages.sandbox.errors import JailError
 from workers.fuzzing.run import FuzzingOutcome, run_fuzzing_stage
@@ -548,7 +549,15 @@ def _finding_kwargs_from_sanitizer(finding: SanitizerFinding) -> dict[str, Any]:
         "function": function,
         "fingerprint": _fingerprint(finding.tool, finding.kind, function or "<unknown>", finding.file, finding.line),
         "title": _title_for(category, function, file_path, finding.line),
-        "sanitizer_report": finding.raw,
+        # SEC-50 (#191): `finding.raw` is `adapters.cpp.sanitizer`'s verbatim capture
+        # of the sandboxed process's own stdout/stderr — exactly the kind of raw tool
+        # output `record_finding`'s own docstring says a caller must redact *before*
+        # this boundary ("callers are responsible for redaction before this
+        # boundary, this function does not scan for one"). `redact_sanitizer_report`
+        # (`orchestrator/redaction.py`) is the redaction pass that promise requires,
+        # applied here rather than deeper in, so nothing ever reads an unredacted
+        # `finding.raw` back out of a `Finding` row again.
+        "sanitizer_report": redact_sanitizer_report(finding.raw),
         "reproducible": False,
     }
 

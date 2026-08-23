@@ -13550,3 +13550,109 @@ review gate is on the file, not the bug class, per the task brief and `.claude/C
 **Final approval authority** — CTO (technical; sandbox/isolation code), gated on
 `cybersecurity` sign-off before merge per standing project rule for security-classified
 files; no CEO/business-scope call involved.
+---
+
+## D-125 — #191 (filed "SEC-50" — see note below on that number) fix: `Finding.sanitizer_report` redacted at the one write site, reusing the SEC-48 redaction module rather than importing `gateway`'s · 2026-08-23 · `backend-developer` seat
+
+**Trigger** — Cybersecurity found, during PR #188's (T2, FUZZ/MINIMIZE executors)
+review, that `Finding.sanitizer_report` (`workers/fuzzing/dispatch.py`) stored the
+full, unredacted ASan/UBSan capture — contradicting `FindingDetail.sanitizer_report`'s
+own field docstring ("Absolute paths and environment values are stripped before it
+reaches here") and `api/routers/evidence.py`'s module docstring ("never raw tool
+output"), reachable via the authenticated `GET /missions/{id}/findings/{finding_id}`
+endpoint. Confirmed not to reach the exported evidence bundle or the SSE stream
+(`EvidenceBundle.findings`/`FINDING_RECORDED` both use `FindingSummary`, which carries
+no raw-report field) — rated MEDIUM, filed as issue #191.
+
+**Note on the "SEC-50" label** — #191's own title calls this SEC-50, but that number
+was already assigned, in this same file, to a different, already-closed finding: D-082
+("move sanitization upstream into `assemble_evidence_bundle`"). This entry uses #191 as
+the primary reference throughout and leaves correcting the SEC registry itself to
+whoever owns it (flagged in this PR's handoff, not fixed unilaterally here).
+
+**Decision** — Added `orchestrator.redaction.redact_sanitizer_report`, a second
+function in the same `orchestrator/redaction.py` module D-081's `sanitize_detail`
+already lives in, and call it in `workers/fuzzing/dispatch.py::_finding_kwargs_from_
+sanitizer` on `finding.raw` before it is passed to `record_finding` as
+`sanitizer_report` — the one place in this codebase that ever writes a non-empty
+value into that column. `record_finding` itself is deliberately left unchanged: its
+own docstring already states "callers are responsible for redaction before this
+boundary, this function does not scan for one," and this fix satisfies exactly that
+existing contract rather than overriding it.
+
+**Options considered** — (a) reuse `sanitize_detail` verbatim; (b) import `services/
+model-gateway/gateway/context.py`'s private `_redact` (built for the structurally
+identical threat model — an absolute path, an environment-variable-style
+assignment — inside a sanitizer excerpt handed to the local model); (c) write a
+second function in `orchestrator/redaction.py`, mirroring `_redact`'s two regexes and
+substitution technique without importing either module across the boundary that
+separates them.
+
+**Pros and cons** — (a) does not work: `sanitize_detail`'s allowlist rejects any
+newline outright and replaces the *whole* value with a fixed placeholder on failure;
+a real ASan/UBSan report is inherently multi-line by construction
+(`adapters/cpp/sanitizer.py`'s own grammar — header, numbered stack frames, a
+`SUMMARY:` line), so running one through `sanitize_detail` would discard the entire
+crash type and stack trace, not redact it — the opposite of `FindingDetail.
+sanitizer_report`'s own promise to keep "stack frames and the failure kind." (b) is
+blocked in both directions, not just inconvenient: `tests/architecture/
+test_fuzz_worker_isolation.py` and `test_worker_executor_modules_import_boundary.py`
+enforce D-073/SEC-54 — `workers/fuzzing/` (the one process in this system with
+container-runtime access) must never be able to import the `gateway` package, so a
+compromise of it cannot reach the inference API — and `services/model-gateway` is
+already its own dependency closure the other way (`pytest.ini`: `pythonpath = .`;
+nothing under `gateway/` imports back into this repository's `contracts`/
+`orchestrator` trees today), so pulling its logic in either direction is a real
+cross-boundary coupling decision, not a same-PR refactor for a MEDIUM finding. (c)
+costs a genuine second implementation of the same two regexes, which is exactly the
+"two independently-maintained redaction functions for one threat model" drift #191
+itself warned against — accepted anyway, documented explicitly in both the new
+function's docstring and this entry, because the two real constraints above rule out
+literal reuse and #191's own fallback instruction was to build the minimal scoped
+version and say so plainly rather than guess past an architecture boundary.
+
+**What `redact_sanitizer_report` does** — in-place substitution, not `sanitize_
+detail`'s whole-value replacement: an absolute Unix or Windows path is replaced with
+`[redacted absolute path]` wherever it appears (a relative path like `decode.c:43`,
+which is what `adapters.cpp.sanitizer` actually parses into `Finding.file_path`/
+`.line`, is untouched); a whole line shaped like an environment-variable assignment
+(`DATABASE_URL=postgresql://...`, `export KEY=value`) or a named-secret line
+(`api_key: ...`, `token=...`) is replaced with a fixed placeholder line. Crash type,
+stack frame indices/addresses/function names, and the `SUMMARY:` line's prefix all
+survive untouched in the common case; the one accepted trade-off is that a `SUMMARY:`
+line carrying both an absolute path and the trailing "`in <function>`" clause on the
+same line loses that trailing clause too (the character class the path regex uses
+permits spaces, so the match runs to end-of-line) — not a functional loss, since the
+same function name is already present, unredacted, on the `#0` stack frame line the
+`SUMMARY:` line is summarizing.
+
+**Testing** — `apps/control-api/orchestrator/tests/test_sanitizer_report_redaction.py`
+(new, 12 unit tests: poisoned-shape redaction, useful-content survival, idempotency,
+benign-input passthrough, Windows-path variant) and one new integration test in
+`apps/control-api/orchestrator/tests/test_fuzz_executor.py`
+(`test_a_real_crash_s_sanitizer_report_is_redacted_before_it_is_stored`), which poisons
+the same real captured ASan transcript the file's other tests already use, runs it
+through the real `JobKind.FUZZ` executor, and asserts the persisted `Finding.
+sanitizer_report` lost the injected absolute path and `DATABASE_URL=...` line while
+keeping the crash type and every function name in the stack trace, and that `Finding.
+file_path`/`.line`/`.function` (parsed independently, from the unmodified `SUMMARY:`
+line) are unaffected. Full `orchestrator/tests` and `workers/fuzzing/tests` suites,
+plus the `tests/architecture/` import-boundary suite, run green (one pre-existing,
+unrelated failure in `test_patch_generate_executor.py` — a `gateway`/`ollama` bearer-
+token wrapping mismatch on code this fix does not touch, reproduced identically before
+this change).
+
+**Security implications** — closes the concrete gap #191 named: `GET /missions/{id}/
+findings/{finding_id}` no longer returns a raw ASan/UBSan capture. Does not touch the
+export bundle or SSE paths, which #191 already confirmed were never affected. Known,
+disclosed residual gap, inherited from the same design trade-off `sanitize_detail`'s
+own "Known limitation" section already accepts for the sibling field: a secret shape
+carrying no path prefix, no `=`, and no named keyword (a bare token pasted inline)
+is not caught by either function.
+
+**Scalability implications** — none; two additional regex substitutions on a
+20,000-char-capped string, run once per recorded `Finding`.
+
+**Final approval authority** — `cybersecurity`, required before merge per this
+project's standing rule for security-classified findings (this PR must not be
+self-merged); CTO, if the SEC-registry renumbering above needs a ruling.
