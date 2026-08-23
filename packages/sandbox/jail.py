@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import resource
 import select
@@ -95,6 +96,8 @@ from packages.sandbox.errors import (
     WallClockExceededError,
 )
 from packages.sandbox.policy import JailPolicy
+
+logger = logging.getLogger(__name__)
 
 #: Reported into the evidence bundle. Mirrors `contracts.enums.IsolationMode`, as a
 #: string so this package stays importable without Django.
@@ -747,6 +750,22 @@ class Jail:
         walking `/proc` for descendants of `proc.pid` finds nothing, because there no
         longer are any. Snapshotting first, while the tree is still intact, is what makes
         the sweep able to find a process the group-kill was never going to reach anyway.
+
+        #184: `os.killpg` can raise `PermissionError` here even though nothing about this
+        jail's own privileges changed. `pgid` is snapshotted once, above, from
+        `os.getpgid(proc.pid)` — but a process group id is drawn from the same small,
+        reused numeric namespace as a pid, and is freed for the kernel to hand to a
+        completely unrelated, differently-owned process the instant every member of the
+        old group has both exited *and been reaped*. Between that snapshot and a later
+        `killpg()` call in this same method (the `SIGKILL` after a `SIGTERM` that already
+        finished the job, or the `else` clause's last-resort retry), that exact recycling
+        can happen — `killpg`, unlike a plain `kill`, has no way to say "no such group"
+        (`ESRCH`) apart from "a group by this number exists now, but you don't own it"
+        (`EPERM`); both surface identically. Treating every `EPERM` here as fatal turns a
+        completed, successful teardown into a spurious job failure under exactly the kind
+        of timeout race this method exists to make robust to. See
+        `_permission_error_is_benign_pid_reuse` for how the two cases are told apart
+        rather than every `EPERM` being assumed benign.
         """
         known_descendants = _proc_descendants(proc.pid)
 
@@ -764,6 +783,10 @@ class Jail:
                     os.killpg(pgid, sig)
                 except ProcessLookupError:
                     break
+                except PermissionError:
+                    if not self._permission_error_is_benign_pid_reuse(proc, pgid, sig):
+                        raise
+                    break
                 except OSError as exc:  # pragma: no cover - defensive
                     if exc.errno != errno.ESRCH:
                         raise
@@ -779,10 +802,72 @@ class Jail:
                 # sweep below, rather than giving up on the ordinary case.
                 try:
                     os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
+                except ProcessLookupError:
                     pass
+                except PermissionError:
+                    if not self._permission_error_is_benign_pid_reuse(
+                        proc, pgid, signal.SIGKILL
+                    ):
+                        raise
+                except OSError as exc:  # pragma: no cover - defensive
+                    if exc.errno != errno.ESRCH:
+                        raise
 
         self._sweep_detached_descendants(proc.pid, known_descendants)
+
+    @staticmethod
+    def _permission_error_is_benign_pid_reuse(
+        proc: subprocess.Popen[bytes], pgid: int, sig: signal.Signals
+    ) -> bool:
+        """Decide whether a `PermissionError` from `os.killpg(pgid, sig)` — aimed at
+        `proc`'s own process group — is the pid/pgid-reuse race (#184), or a genuinely
+        unexpected permission failure that must not be silently absorbed.
+
+        The one thing still authoritative after `pgid` may have been recycled is whether
+        *this jail's own tracked child* — `proc`, identified by the live `Popen` object,
+        never by a bare number that can be reassigned — has already exited. `Popen.poll()`
+        calls `waitpid(WNOHANG)` internally, which only ever reports on this process's own
+        real child and cannot be fooled by pid or pgid reuse: the kernel never hands back
+        someone else's process through our own child's wait status.
+
+        * `proc` has already exited: this `PermissionError` cannot be about signalling
+          *our* target, because there is nothing left of it to signal — the numeric group
+          id was almost certainly already freed and handed to an unrelated,
+          differently-owned process by the time this `killpg()` call landed. Safe to treat
+          as "the group is already gone", the same outcome `ProcessLookupError` reports
+          right above this call, just arriving as `EPERM` instead of `ESRCH` because
+          something now sits at that number again.
+        * `proc` is still running: this is not that race. Our own child is alive, and
+          signalling its own group failed with `EPERM` anyway — the realistic way that
+          happens is the child (or something it `exec`'d) crossing into a different
+          effective privilege context, e.g. running a setuid binary. `wait()` permission
+          is a fixed parent/child relationship the kernel never revokes; `kill()`
+          permission is a live uid/gid check and is not immune to that change. That is a
+          real, unexpected failure and must propagate, not be swallowed.
+
+        Logs clearly either way — the whole point is that a future spurious job failure
+        (or a future genuine one, now silently downgraded) is diagnosable from the log
+        rather than being a mystery again.
+        """
+        still_running = proc.poll() is None
+        if still_running:
+            logger.error(
+                "killpg(pgid=%s, %s) raised PermissionError while our own child "
+                "pid=%s is still running; this is not the benign pid/pgid-reuse race "
+                "(#184) -- treating it as a genuine, unexpected permission failure "
+                "and propagating it",
+                pgid, sig, proc.pid,
+            )
+            return False
+        logger.warning(
+            "killpg(pgid=%s, %s) raised PermissionError, but our own child pid=%s had "
+            "already exited -- treating this as the pid/pgid-reuse race (#184): the "
+            "process group id was almost certainly already recycled to an unrelated, "
+            "differently-owned process by the time this signal landed. Reporting "
+            "teardown for this group as complete rather than failing the job over it",
+            pgid, sig, proc.pid,
+        )
+        return True
 
     @staticmethod
     def _group_alive(pgid: int) -> bool:

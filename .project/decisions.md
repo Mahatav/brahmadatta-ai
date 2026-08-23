@@ -13427,3 +13427,126 @@ record instead of an open question.
 `mem_limit` raise (host-level, affects other concurrent work) and for whether to revisit
 D-015; CTO/ai-ml-engineer, for the timeout-coupling fix and `keep_alive` tuning once (1)
 is resolved.
+
+## D-124 — `Jail._kill_group` no longer treats every `killpg` `PermissionError` as
+fatal: the pid/pgid-reuse race (#184) is now told apart from a genuine, unexpected
+permission failure and each is logged clearly · 2026-08-23 · `backend-developer` seat
+(branch `fix/184-jail-kill-group-permission-error`)
+
+**Decision.** `packages/sandbox/jail.py::Jail._kill_group` catches `PermissionError`
+from `os.killpg()` explicitly instead of letting it fall into the existing
+`except OSError as exc: if exc.errno != errno.ESRCH: raise` branch, which re-raised it
+unconditionally. On `EPERM`, a new `_permission_error_is_benign_pid_reuse` helper checks
+whether this jail's own tracked child (`proc.poll()`, authoritative regardless of pid/pgid
+reuse elsewhere on the machine) has already exited. If it has, the error is logged at
+`WARNING` and treated as a completed teardown (same outcome as the `ProcessLookupError`
+branch immediately above it, just arriving as `EPERM` instead of `ESRCH`). If the child is
+still running, the error is logged at `ERROR` and re-raised — this is not the benign race,
+and swallowing it would hide a real, unexpected failure.
+
+**Context / root cause.** Filed as #184, found during PR #175's final security
+re-review (reproduced twice independently), not introduced by that PR — last touched in
+PR #162 (SEC-38/SEC-35). Confirmed by reading the code (no live reproduction attempted;
+the race requires an unrelated process on the machine to be assigned a recycled pid/pgid
+at exactly the wrong instant, which is not something a test can schedule directly — see
+the forced/deterministic tests below instead): `os.killpg`'s `pgid` argument is drawn
+from the same small, kernel-managed numeric namespace as a pid. `pgid` is snapshotted
+once near the top of `_kill_group` via `os.getpgid(proc.pid)`. Once every member of that
+process group has exited *and been reaped*, the numeric id is freed and the kernel can
+hand it to a completely unrelated, differently-owned process the next time anything else
+on the machine forks — before this method's own subsequent `killpg()` calls (the
+`SIGKILL` after `SIGTERM`, or the `else` clause's last-resort retry) run. `os.killpg` has
+no way to distinguish "no such group" (`ESRCH`) from "a group by this number exists now,
+but you don't own it" (`EPERM`) — both are plain `OSError`s, differing only in `errno`.
+The pre-existing code treated `ESRCH` as "already gone, done" and every other `errno`
+(including `EPERM`) as fatal, so this specific, real race manifested as an uncaught
+`PermissionError` propagating out of a successful teardown — caught by
+`verify_dispatch.py`'s broad `except Exception` as an infra failure
+(`ErrorCode.SANDBOX_UNAVAILABLE`), i.e. a spurious VERIFY/BASELINE job failure under
+exactly the kind of timeout race the issue describes. Not a security bypass — the sandbox
+still killed everything it could reach; the bug is availability (a false failure signal),
+not confidentiality/integrity, matching the issue's own classification.
+
+**Options considered.**
+1. **Catch and silently ignore every `PermissionError` from `killpg`.** Simplest, but
+   exactly what the task brief warned against: it would also swallow the case where the
+   target changed its effective privilege context (e.g. `exec`-ing a setuid binary) while
+   still alive — a real, different failure mode that should be visible, not silently
+   downgraded to "clean teardown."
+2. **Distinguish by checking `proc.poll()` before deciding** (chosen). `Popen.poll()`
+   calls `waitpid(WNOHANG)`, which is scoped to this process's own real child and is
+   immune to pid/pgid reuse — the one signal still trustworthy after the race. Cheap,
+   already-available, no new dependency.
+3. **Re-verify identity via `/proc/<pid>/stat` start-time comparison** before the
+   original kill and again before treating `EPERM` as benign. More precise in theory (can
+   distinguish "our exact process, still alive" from "a different process now at this
+   pid"), but Linux-only, more code, and does not actually improve the decision here: the
+   question that matters is "is our own child still alive", which `proc.poll()` already
+   answers without needing `/proc` at all. Rejected as unnecessary complexity for the
+   same answer.
+
+**Pros and cons.** Option 2: pro — narrow, matches the existing file's own idiom
+(`_pid_running`, `_group_alive` already special-case `PermissionError` the same
+"exists, just not ours to touch" way for probing calls); con — relies on `proc.poll()`
+being called promptly enough that a *new* unrelated process reusing our child's own pid
+number cannot yet exist (true here: a pid stays reserved as a zombie until reaped, and
+`proc.poll()` is exactly what would reap it, so there is no window where `poll()` itself
+could report stale data due to reuse of `proc.pid` specifically — only `pgid`, a distinct
+number, is at risk of reuse, which is what necessitates checking the child rather than
+re-checking the pgid).
+
+**Cost implications.** None — no new dependency, no infrastructure change; a few extra
+lines and one small logging addition.
+
+**Security implications.** None on the confidentiality/integrity axis (this file's own
+docstring already reserves anything more than "an availability fix" — see its "READ THIS
+BEFORE USING IT FOR ANYTHING" header). Availability improves: a spurious job failure
+during a real timed VERIFY/BASELINE run (finale-relevant, per D-036/D-049's status as the
+subprocess-jail backend for those stages) is now avoided instead of surfacing as an infra
+fault. The genuinely-unexpected-`EPERM`-while-alive path is preserved as a hard failure
+rather than silently absorbed, so this does not create a new way to hide a real teardown
+problem — flagged directly for `cybersecurity` review given this file's security
+classification (D-049/D-036 territory) despite the bug itself being availability-only.
+
+**Scalability implications.** None — purely a control-flow correctness fix inside a
+per-run teardown path; no change to concurrency model, resource limits, or the file's
+already-documented Linux-only sweep behavior.
+
+**Also fixed in the same pass, matching the same pattern:** the `for...else` clause's
+final last-resort `os.killpg(pgid, signal.SIGKILL)` previously caught
+`(ProcessLookupError, OSError)` together and swallowed *any* `OSError` silently,
+including a genuine unexpected `EPERM` there too, with no logging either way. Split into
+the same three-way `ProcessLookupError` / `PermissionError` (routed through the same
+`_permission_error_is_benign_pid_reuse` helper) / other-`OSError` (re-raised unless
+`ESRCH`) handling as the main loop, for consistency and so a failure at this specific,
+final call site is diagnosable too rather than silently absorbed.
+
+**Docstring correction also requested by #184, verified as already correct on `main`:**
+the issue asked for `orchestrator/verify_dispatch.py`'s docstring to stop claiming SEC-47
+(unsandboxed VERIFY execution) is open. Read the file (now at
+`apps/control-api/orchestrator/verify_dispatch.py`, moved since the issue was filed) —
+its "What this module deliberately does not do" section already states "SEC-47 closed
+that gap inside `orchestrator/verification.py` instead," correctly, with no stale claim
+anywhere else in the file (`grep`-verified). Diffed the module's initial PR #175 commit
+against its merge commit: identical for this file, so this was already correct at merge
+time, not fixed separately after. No change made — editing an already-correct file would
+be unrequested churn, not a fix.
+
+**Tests.** Two new tests in `packages/sandbox/tests/test_jail.py`, both forcing the exact
+race deterministically via `monkeypatch` rather than waiting for real pid/pgid reuse
+(not schedulable on demand): `test_kill_group_treats_permission_error_as_success_once_child_has_exited`
+(child already exited and reaped, `os.killpg` forced to raise `PermissionError` — must
+not raise) and `test_kill_group_does_not_swallow_a_permission_error_while_the_child_is_alive`
+(child still running, same forced `PermissionError` — must propagate). Confirmed the
+first test fails against the pre-fix code (reproducing the issue directly) before
+re-applying the fix. Full suite: `packages/sandbox/tests/test_jail.py` — 33 passed, 3
+skipped (Linux-only sweep tests, running on macOS) — no regression.
+
+**Recommendation.** Merge once `cybersecurity` has reviewed, per this file's standing
+security classification (D-049/D-036) — the bug itself is availability-only, but the
+review gate is on the file, not the bug class, per the task brief and `.claude/COMPANY.md`
+§2.
+
+**Final approval authority** — CTO (technical; sandbox/isolation code), gated on
+`cybersecurity` sign-off before merge per standing project rule for security-classified
+files; no CEO/business-scope call involved.

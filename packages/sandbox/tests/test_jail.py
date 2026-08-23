@@ -11,8 +11,10 @@ does to it.
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
@@ -568,6 +570,81 @@ def _alive(pid: int) -> bool:
             return False
         return not status.rpartition(")")[2].strip().startswith("Z")
     return True
+
+
+# --- _kill_group's PermissionError race (#184) -------------------------------------
+
+
+def test_kill_group_treats_permission_error_as_success_once_child_has_exited(
+    monkeypatch,
+) -> None:
+    """Root cause confirmed for #184: `os.killpg`'s `pgid` argument is drawn from the
+    same small, reused numeric namespace as a pid. Once every member of the old group
+    has exited *and been reaped*, the kernel is free to hand that same number to a
+    completely unrelated, differently-owned process the very next time anything else on
+    the machine forks -- and `os.killpg` cannot tell that case apart from "no such
+    group" (`ESRCH`); both surface as an `OSError`, just with a different `errno`
+    (`EPERM` instead of `ESRCH`).
+
+    Forced deterministically here rather than waited for, since real pid/pgid reuse by
+    an unrelated process is not something a test can schedule: start a real child, let
+    it exit and be reaped (so `proc.poll()` is authoritative from here on), then make
+    `os.killpg` raise `PermissionError` exactly the way a recycled pgid would.
+    `_kill_group` must treat that as a completed teardown, not propagate the exception —
+    unpatched, this reproduces the issue directly: the exception escapes and would be
+    caught by `verify_dispatch.py`'s broad `except Exception` as a spurious job failure.
+    """
+    with Jail.create(JailPolicy(wall_clock_seconds=30)) as jail:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        assert proc.poll() is not None, (
+            "the child must be confirmed exited for this test to mean anything"
+        )
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+
+        # A pgid this test process cannot signal for real (root-owned, say) would work
+        # too; monkeypatching both calls makes the race reproducible on any machine,
+        # any user, every run — not just one that happens to have a spare privileged
+        # process lying around.
+        monkeypatch.setattr(os, "getpgid", lambda pid: 999_999_999)
+        monkeypatch.setattr(os, "killpg", fake_killpg)
+
+        jail._kill_group(proc)  # must not raise
+
+
+def test_kill_group_does_not_swallow_a_permission_error_while_the_child_is_alive(
+    monkeypatch,
+) -> None:
+    """The other half of #184's fix: a `PermissionError` from `os.killpg` while our own
+    tracked child is still running is *not* the pid/pgid-reuse race — something else
+    changed the group's effective privilege context out from under this jail (the
+    realistic cause is the child `exec`-ing a setuid binary; unlike `wait()`, which stays
+    a fixed parent/child relationship, `kill()` permission is a live uid/gid check and is
+    not immune to that). That is a real, unexpected failure and must propagate rather
+    than being silently downgraded to "clean teardown" — the exact failure mode the
+    naive "catch and ignore every PermissionError" fix would have introduced.
+    """
+    policy = JailPolicy(cpu_seconds=60, wall_clock_seconds=30, kill_grace_seconds=0.2)
+    with Jail.create(policy) as jail:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            assert proc.poll() is None, (
+                "the child must still be running for this test to mean anything"
+            )
+
+            def fake_killpg(pgid: int, sig: int) -> None:
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+
+            monkeypatch.setattr(os, "getpgid", lambda pid: 999_999_999)
+            monkeypatch.setattr(os, "killpg", fake_killpg)
+
+            with pytest.raises(PermissionError):
+                jail._kill_group(proc)
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 # --- cleanup ----------------------------------------------------------------------
