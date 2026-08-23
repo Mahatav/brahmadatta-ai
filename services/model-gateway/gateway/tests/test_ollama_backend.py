@@ -9,6 +9,8 @@ from gateway.errors import LiveGenerationError
 from gateway.ollama import (
     DEFAULT_CODELLAMA_MODEL,
     DEFAULT_OLLAMA_ENDPOINT,
+    DEFAULT_OLLAMA_KEEP_ALIVE,
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     OllamaCodeLlamaBackend,
     patch_candidate_from_model_text,
 )
@@ -104,6 +106,48 @@ def test_ollama_backend_sends_bearer_token_when_configured(
     OllamaCodeLlamaBackend(bearer_token="s3cr3t-token").generate(request_)
 
     assert seen["authorization"] == "Bearer s3cr3t-token"
+
+
+def test_ollama_backend_sends_keep_alive_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """D-123/D-124: the confirmed-live cold-load cost (~60s -> ~0.01s warm) is only
+    avoidable between calls if the model is told to stay resident. Before this fix
+    nothing set `keep_alive` at all, so Ollama's own 5-minute default applied and the
+    model was observed getting evicted between PATCH_GENERATE attempts."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("gateway.client.urlopen", _make_fake_urlopen(seen))
+
+    OllamaCodeLlamaBackend().generate(request_)
+
+    assert seen["payload"]["keep_alive"] == DEFAULT_OLLAMA_KEEP_ALIVE
+
+
+def test_ollama_backend_keep_alive_is_overridable_and_omittable(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """A caller that wants to measure cold-load behavior on purpose (tests,
+    `model_prep.py`) must be able to turn this back off rather than being forced onto
+    the generous default."""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("gateway.client.urlopen", _make_fake_urlopen(seen))
+
+    OllamaCodeLlamaBackend(keep_alive="10m").generate(request_)
+    assert seen["payload"]["keep_alive"] == "10m"
+
+    seen.clear()
+    OllamaCodeLlamaBackend(keep_alive="").generate(request_)
+    assert "keep_alive" not in seen["payload"]
+
+
+def test_ollama_backend_default_timeout_matches_the_named_constant() -> None:
+    """D-123: `gateway.settings.GatewaySettings.model_host_timeout_seconds` and this
+    dataclass field must agree on what "unset" means, or the single-source-of-truth
+    fix is only true for callers that go through settings."""
+    assert OllamaCodeLlamaBackend().timeout_sec == DEFAULT_OLLAMA_TIMEOUT_SECONDS
+    assert DEFAULT_OLLAMA_TIMEOUT_SECONDS == 300.0
 
 
 def test_ollama_candidate_parser_accepts_json_inside_text() -> None:
