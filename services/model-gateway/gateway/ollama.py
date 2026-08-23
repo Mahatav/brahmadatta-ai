@@ -46,7 +46,7 @@ DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300.0
 #: real testing — so a mission's PATCH_GENERATE attempts (there can be several per
 #: mission, `MissionPolicy.patch_generation_attempts`) could each separately re-pay
 #: the cold-load cost. Set as a per-request field (not `OLLAMA_KEEP_ALIVE` on the
-#: `model-host` container) — see this repo's `.project/decisions.md` D-124 for the
+#: `model-host` container) — see this repo's `.project/decisions.md` D-125 for the
 #: decision record on why. "30m" is generous relative to the gap between attempts in
 #: one mission (each attempt itself is capped at `timeout_sec`, comfortably under this)
 #: while still letting Ollama reclaim the model between missions rather than pinning it
@@ -69,7 +69,7 @@ class OllamaCodeLlamaBackend:
     default `endpoint`) has no auth of any kind to send, and sending no header rather
     than an empty one is what `gateway.client._auth_headers` does with it.
 
-    `keep_alive` is D-123/D-124: sent as Ollama's own per-request `keep_alive` field
+    `keep_alive` is D-123/D-125: sent as Ollama's own per-request `keep_alive` field
     on every `/api/chat` call, so the model stays resident for this long after the
     LAST call rather than Ollama's own 5-minute default. Empty string/`None` means
     "do not send the field at all" (Ollama's own default applies) — kept overridable

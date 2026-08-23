@@ -13656,3 +13656,162 @@ is not caught by either function.
 **Final approval authority** — `cybersecurity`, required before merge per this
 project's standing rule for security-classified findings (this PR must not be
 self-merged); CTO, if the SEC-registry renumbering above needs a ruling.
+
+## D-126 — Dual-hardcoded model-host timeout replaced with one env var; explicit
+`keep_alive` set on every live-generation call · 2026-08-23 · `ai-ml-engineer` seat
+(branch `fix/d123-timeout-source-and-keepalive`), following directly from D-123's two
+independent, live-confirmed bugs
+
+**Decision.** Fixed the two bugs D-123 found in passing during its own PATCH-stage
+timing diagnostic, independent of D-123's memory-pressure finding (explicitly not
+touched here — reserved for Mahatav per D-123's own recommendation and this task's
+constraints):
+
+1. **Single source of truth for the model-host timeout.** `gateway.ollama.
+   OllamaCodeLlamaBackend.timeout_sec` (client) and `model-host-auth`'s nginx
+   `proxy_read_timeout`/`proxy_send_timeout` (`infrastructure/compose/nginx/
+   model-host-auth/templates/model-host-auth.conf.template`) were two independently
+   hardcoded `300s` literals that only matched by coincidence — the template's own
+   comment said as much. D-123 confirmed live that raising the client's timeout alone
+   does nothing, because the proxy independently re-caps every call at its own value
+   and returns a 504 instead. Both now read `MODEL_HOST_TIMEOUT_SECONDS`: the nginx
+   template via the same envsubst mechanism `MODEL_HOST_BEARER_TOKEN` already uses
+   (`infrastructure/compose/docker-compose.yml`/`docker-compose.finale.yml`'s
+   `model-host-auth` service `environment:` block, `${MODEL_HOST_TIMEOUT_SECONDS:-300}`),
+   and the Python client via a new `GatewaySettings.model_host_timeout_seconds` field
+   (`services/model-gateway/gateway/settings.py::from_environment()`), threaded through
+   `apps/control-api/orchestrator/patch_generate_executor.py::_build_live_backend` the
+   same way D-105/D-106 already threaded `model_host_bearer_token` through. Default
+   stays 300.0 in every fallback (the dataclass field, the settings parser, the compose
+   interpolation default) — this task changes the MECHANISM only, not the VALUE, per
+   its own explicit constraint and D-123's recommendation that the real number needs
+   re-measuring only after Mahatav resolves the separate memory-capacity question.
+   A non-numeric or non-positive `MODEL_HOST_TIMEOUT_SECONDS` is a
+   `GatewayConfigurationError` (fail loud), not a silent fallback to the default.
+
+2. **Explicit `keep_alive` on every live-generation call.** D-123 confirmed live that a
+   cold model load costs ~60s (`load_duration` in Ollama's own response) against a
+   ~0.01s warm repeat — a ~6000x difference — and observed the model getting evicted
+   between attempts because nothing in this codebase set `keep_alive`, leaving Ollama's
+   own ~5 minute default in effect. Fixed by adding a `keep_alive: str = "30m"` field to
+   `OllamaCodeLlamaBackend` (`DEFAULT_OLLAMA_KEEP_ALIVE`), sent as Ollama's own
+   per-request `keep_alive` field on every `/api/chat` call, overridable/omittable per
+   instance (empty string means "do not send the field", for callers like
+   `model_prep.py`'s CLI that deliberately measure cold-load behavior).
+
+**Options considered (keep_alive mechanism).**
+
+| Option | Pros | Cons |
+|---|---|---|
+| Per-request `keep_alive` field (chosen) | Ties the keep-alive lifetime to actual usage, not container lifetime; visible in the same payload construction this codebase already tests; zero infra/compose changes; works identically whether `model-host` was started fresh or has been up for days | None found — Ollama's own API supports this field natively on every generate/chat call |
+| `OLLAMA_KEEP_ALIVE` env var on the `model-host` compose service | Simpler mental model ("one setting, one place") | Coarser: applies to every model Ollama ever loads regardless of caller, not just this gateway's calls; requires a container recreate to change; does nothing for a bare `ollama serve` outside compose (e.g. a developer's own local install), which the per-request field still covers since it is sent by the client regardless of how Ollama was started |
+
+**Cost implications.** None beyond what D-123 already identified: paying the ~60s
+cold-load cost at most once per mission (when the model has been idle for the whole
+30-minute window) instead of potentially once per `PATCH_GENERATE` attempt (default
+policy: up to 10 attempts). This is a latency/CPU-time saving, not a new cost — 30
+minutes of resident memory is bounded, not indefinite (`-1`/"never unload" was
+considered and rejected specifically because it would work against, not sidestep,
+D-123's separate and still-unresolved memory-pressure finding).
+
+**Security implications.** This PR touches `model-host-auth`'s nginx config
+(D-075/SEC-50, a security-classified auth proxy) — a new env var
+(`MODEL_HOST_TIMEOUT_SECONDS`) is added to the same `environment:` block
+`MODEL_HOST_BEARER_TOKEN` already uses, following that variable's own precedent for
+what is and is not safe to write into a `${...}` reference inside this template (not a
+secret, so — unlike the bearer token — referencing it twice, once for
+`proxy_send_timeout` and once for `proxy_read_timeout`, carries none of the
+envsubst-leak risk the template's header comment warns about for the token). No change
+to the bearer-token check itself, the `if` block's logic, `proxy_pass` target, or
+`Host` header rewrite. Routed to `cybersecurity` for review before merge per
+`.claude/COMPANY.md`'s standing rule for auth-proxy-touching changes, not self-merged.
+
+**Scalability implications.** None materially — the timeout mechanism change is a
+refactor of where a number is read from, not a behavior change (same 300s default);
+`keep_alive="30m"` bounds resident-memory duration rather than removing the bound, so
+it does not change the shape of D-123's separate memory-pressure question, only how
+often the (already-confirmed-avoidable) cold-load cost is paid within its current
+ceiling.
+
+**Verification (live, this session).** All against a fully isolated dev stack (own
+git worktree, own Compose project name, own network/volumes — the already-running
+primary dev stack, compose project `brahmadatta-bfe5a38c`, was never started, stopped,
+or exec'd into; its `codellama:7b-instruct` model blobs were read via a
+volume-to-volume copy through a disposable Alpine container, never a shared write):
+
+1. Rendered nginx config read inside the container at the default
+   (`MODEL_HOST_TIMEOUT_SECONDS` unset -> `300`): both `proxy_send_timeout` and
+   `proxy_read_timeout` show `300s`, matching the pre-fix hardcoded value exactly
+   (unchanged behavior, confirmed).
+2. Set `MODEL_HOST_TIMEOUT_SECONDS=450` in `.env`, recreated `model-host-auth`, read
+   the rendered config again: both timeouts now show `450s` — proves the value is
+   actually derived from the env var, not coincidentally matching a second hardcoded
+   literal.
+3. `gateway.settings.from_environment()` with the same `MODEL_HOST_TIMEOUT_SECONDS=450`
+   resolves `GatewaySettings.model_host_timeout_seconds == 450.0` — the same number the
+   nginx template rendered in step 2, from the same variable.
+4. A real `gateway.ollama.OllamaCodeLlamaBackend.generate()` call (this branch's actual
+   code, not a hand-typed request) built with `timeout_sec=450.0` and a real
+   `bearer_token`, sent through `model-host-auth` over the real `backend` Docker
+   network at `model-host:11434`, completed in 93.6s with no 401 and no timeout —
+   confirming the client and the proxy agree on a timeout wide enough to complete a
+   real cold-load call, using the single source of truth end to end.
+5. `ollama ps` immediately after a request sent with no `keep_alive` field (the
+   pre-fix shape) reported the model resident `4 minutes from now` — confirms Ollama's
+   own ~5 minute default was genuinely in effect before this fix, matching D-123's own
+   finding.
+6. The same real `OllamaCodeLlamaBackend.generate()` call from step 4 (default
+   `keep_alive="30m"`, no override) was immediately followed by `ollama ps` reporting
+   the model resident `29 minutes from now` — confirms the fix's exact code path
+   causes Ollama to hold the model roughly 6x longer than its own default, using the
+   real payload the product code sends, not a hand-constructed approximation of it.
+7. A second, explicit `keep_alive="30m"` request via direct HTTP against Ollama's real
+   internal port (127.0.0.1:11435, from inside `model-host-auth`'s shared network
+   namespace — the same direct-probe technique D-123 itself used) showed
+   `load_duration` drop from 38.76s (cold) to 0.014s (warm) — reproducing D-123's own
+   ~6000x cold/warm ratio live, on this branch's isolated stack.
+8. `python -m pytest gateway/tests/ -q` (`services/model-gateway`): 385 passed, 6
+   skipped — includes 5 new tests for `keep_alive` payload construction, the timeout
+   default/override, and `MODEL_HOST_TIMEOUT_SECONDS` parsing (blank/unset -> 300,
+   explicit override, non-numeric and non-positive -> `GatewayConfigurationError`).
+9. `apps/control-api` test suite (`.venv/bin/python -m pytest -q`): every test related
+   to this change passes, including 2 new tests mirroring D-105/D-106's bearer-token
+   threading pattern for `timeout_sec`. Two failures are pre-existing and unrelated,
+   confirmed present on `origin/main` before this branch's changes (verified directly,
+   by stashing this branch's diff and re-running against the unmodified tree):
+   `test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`
+   (stale since PR #236 changed `gateway.client`'s exception wrapping — an `HTTPError`
+   is now caught and re-raised as `LiveGenerationError`, so the test's
+   `pytest.raises(urllib.error.HTTPError)` no longer matches; not this task's file to
+   fix) and a sanitizer-report-redaction test belonging to concurrent, unrelated WIP
+   found live in this same shared working tree (see below).
+
+**A process note, not a product one.** Mid-task, this shared primary checkout's `HEAD`
+was switched out from under this session by a second, concurrently active agent
+(`fix/184-jail-kill-group-permission-error`, now merged as D-124/#242) — discovered when
+a routine `git status` came back on the wrong branch with unrelated files (`packages/
+sandbox/jail.py`, `workers/fuzzing/dispatch.py`, `orchestrator/redaction.py`) showing as
+locally modified. No content from either session was lost: this task's own diff was
+confirmed to have zero file overlap with the concurrent session's, so it was isolated
+with a scoped `git stash push -- <their files>`, this branch was checked out and
+committed and pushed from the now-clean tree, and the other session's branch/stash was
+restored exactly as found before continuing. All further work (the live Docker
+verification above and this decision record) was done from a dedicated `git worktree`
+rather than continuing to share `HEAD` on the primary checkout, to avoid repeating the
+collision. Flagged here because it is a repeatable hazard for the next agent that
+branches directly in this checkout rather than using worktree isolation, not because it
+affected this fix's correctness.
+
+**What was NOT changed.** `model-host`'s `mem_limit`, Docker Desktop's memory
+allocation, and the actual `300` second value are all untouched, per this task's
+explicit constraints and D-123's own recommendation that (1) is Mahatav's call and (2)
+needs re-measuring only after (1) is resolved.
+
+**Final approval authority** — CTO, for the mechanism change itself (matches D-123's
+own final-approval line: "CTO/ai-ml-engineer, for the timeout-coupling fix and
+`keep_alive` tuning once (1) is resolved" — this seat's own judgment is that the
+mechanism-only version of that fix does not need to wait for (1), since it changes
+where a number is read from, not what the number is); `cybersecurity`, gating merge on
+review of the `model-host-auth` nginx template change per `.claude/COMPANY.md`'s
+standing rule for auth-proxy-touching diffs; Mahatav, unchanged from D-123, for the
+memory-capacity question and the actual timeout value once it is re-measured.

@@ -112,7 +112,7 @@ def test_ollama_backend_sends_keep_alive_by_default(
     monkeypatch: pytest.MonkeyPatch,
     request_: GenerationRequest,
 ) -> None:
-    """D-123/D-124: the confirmed-live cold-load cost (~60s -> ~0.01s warm) is only
+    """D-123/D-125: the confirmed-live cold-load cost (~60s -> ~0.01s warm) is only
     avoidable between calls if the model is told to stay resident. Before this fix
     nothing set `keep_alive` at all, so Ollama's own 5-minute default applied and the
     model was observed getting evicted between PATCH_GENERATE attempts."""
