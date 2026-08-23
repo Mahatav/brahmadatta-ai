@@ -333,6 +333,67 @@ def test_a_real_crash_persists_a_report_and_a_structured_finding(mission: Missio
     assert finding.replay_source is None
 
 
+def test_a_real_crash_s_sanitizer_report_is_redacted_before_it_is_stored(
+    mission: Mission, monkeypatch
+):
+    """#191 (SEC-50 per that issue's title): `Finding.sanitizer_report` must never
+    carry the raw sandboxed-process capture verbatim — `FindingDetail.
+    sanitizer_report`'s own field docstring promises absolute paths and environment
+    values are stripped, and `api/routers/evidence.py`'s module docstring promises
+    "never raw tool output" for exactly this endpoint's response
+    (`GET /missions/{id}/findings/{finding_id}`). Poisons the same real captured
+    ASan grammar `test_a_real_crash_persists_a_report_and_a_structured_finding`
+    already exercises with an absolute path and an injected
+    `DATABASE_URL=postgresql://...`-shaped line — the concrete leak class SEC-44/45/
+    48 already named — and asserts the persisted row lost neither its usefulness nor
+    its safety.
+    """
+    # Poison only the `#0` frame line's path (not the `SUMMARY:` line) — this test
+    # is about `sanitizer_report`, not `Finding.file_path`/`.line`/`.function`
+    # (parsed separately from the `SUMMARY:` line by `adapters.cpp.sanitizer`, out
+    # of scope for #191, which names `sanitizer_report` specifically) — so the
+    # structured columns stay independently verifiable below, unperturbed by this
+    # fixture's own edit.
+    poisoned_capture = _REAL_ASAN_CAPTURE.replace(
+        "#0 0x000102ac8cf4 in emit_tab decode.c:43",
+        "#0 0x000102ac8cf4 in emit_tab /Users/someone/secret-project/pktcfg/src/decode.c:43",
+        1,
+    ).replace(
+        "WRITE of size 1 at 0x6020000000f4 thread T0",
+        "WRITE of size 1 at 0x6020000000f4 thread T0\n"
+        "DATABASE_URL=postgresql://svc_user:hunter2@db.internal:5432/missions",
+        1,
+    )
+    assert "/Users/someone/secret-project" in poisoned_capture  # the fixture is doing its job
+    assert "hunter2" in poisoned_capture
+
+    outcome = _clean_outcome(executions=4096, crashes=1, excerpt=poisoned_capture)
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", lambda *a, **k: outcome)
+
+    job = _job(mission)
+    result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+    assert result.outcome == JobOutcome.SUCCEEDED
+
+    finding = Finding.objects.get(mission=mission)
+
+    # The leak this issue names: gone.
+    assert "/Users/someone/secret-project" not in finding.sanitizer_report
+    assert "DATABASE_URL=postgresql://" not in finding.sanitizer_report
+    assert "hunter2" not in finding.sanitizer_report
+
+    # The report is still useful: crash type, stack frames, offending function.
+    assert "AddressSanitizer: heap-buffer-overflow" in finding.sanitizer_report
+    assert "emit_tab" in finding.sanitizer_report
+    assert "pkt_decode_into" in finding.sanitizer_report
+    assert "pkt_parse" in finding.sanitizer_report
+
+    # The structured columns (parsed separately, not from this free-text field)
+    # still carry the real crash location — this fix does not touch them.
+    assert finding.file_path == "decode.c"
+    assert finding.line == 43
+    assert finding.function == "emit_tab"
+
+
 # ---------------------------------------------------------------------------------
 # D-106: a durably-copied crash artifact becomes a real Reproducer row, and the row
 # is what VERIFY's own resolver actually reads back — this is the fix for the exact

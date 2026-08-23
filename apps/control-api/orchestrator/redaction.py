@@ -146,3 +146,102 @@ def sanitize_detail(detail: str) -> str:
     if not _SAFE_CHARS_RE.match(detail):
         return REDACTED_DETAIL
     return detail
+
+
+# ---------------------------------------------------------------------------------------
+# `redact_sanitizer_report` — #191, a narrower sibling of SEC-48 above.
+#
+# #191's own title labels this "SEC-50", but that number was already assigned (see
+# D-075/D-082 above) to a different, already-closed finding — the `GateResult.detail`
+# export-boundary gap this same file's `sanitize_detail` fixes. Flagged rather than
+# perpetuated: this comment and the `.project/decisions.md` entry for this fix use
+# the issue number (#191) as the primary reference and leave renumbering the
+# SEC-registry entry itself to whoever owns that registry (cybersecurity/CTO).
+# ---------------------------------------------------------------------------------------
+#
+# `sanitize_detail` above cannot be reused verbatim for `Finding.sanitizer_report`
+# (`missions/models.py`, surfaced through `contracts.schemas.evidence.FindingDetail`):
+# its all-or-nothing allowlist rejects *any* newline outright, and a real ASan/UBSan
+# report is inherently multi-line — the header, the stack frames, and the `SUMMARY:`
+# line each sit on their own line by construction (`adapters/cpp/sanitizer.py`'s own
+# module docstring lays out the exact grammar). Running a captured report through
+# `sanitize_detail` would not redact it, it would *discard* it — replacing the whole
+# crash type, stack trace, and offending function with `REDACTED_DETAIL`, i.e. the
+# opposite of `FindingDetail.sanitizer_report`'s own field docstring: "Sanitized
+# sanitizer output: stack frames and the failure kind. Absolute paths and
+# environment values are stripped before it reaches here." That promise needs
+# selective, in-place redaction of the unsafe spans, not a full-value replacement.
+#
+# The shape that *does* fit already exists, one layer over: `services/model-gateway/
+# gateway/context.py::_redact`, built for the structurally identical problem of
+# handing a sanitizer excerpt to a local model (same two leak classes: an absolute
+# filesystem path, and an environment-variable-style assignment). It could not be
+# imported here as-is, for two independent reasons, not merely convenience:
+#
+# 1. `tests/architecture/test_fuzz_worker_isolation.py` / `test_worker_executor_
+#    modules_import_boundary.py` are a security gate (D-073, SEC-54): the fuzz-worker
+#    process — the one process in this system with container-runtime access — must
+#    never be able to import the `gateway` package, specifically so a compromise of
+#    it cannot reach the inference API. `workers/fuzzing/dispatch.py` is exactly the
+#    caller this function serves, so an import edge from there into `gateway` would
+#    fail that gate by design, not by accident.
+# 2. `services/model-gateway` is deliberately its own dependency closure — its
+#    `pytest.ini` sets `pythonpath = .` and nothing under `gateway/` imports back
+#    into this repository's `contracts`/`packages`/`orchestrator` trees today. Adding
+#    that edge in either direction is a real cross-service coupling decision, not a
+#    same-PR refactor for a MEDIUM finding.
+#
+# So this function mirrors `gateway/context.py::_redact`'s two regexes/behaviour
+# (same two leak classes, same "substitute the unsafe span, keep the rest of the
+# line" technique) as the one already-reviewed shape for this exact threat model,
+# rather than inventing a third, differently-shaped implementation — see this PR's
+# handoff for the fuller reasoning on why a byte-for-byte import was not an option.
+# If `gateway/context.py` and this function drift apart, that is a real signal (the
+# threat model changed for one but not the other) rather than an oversight — but a
+# reviewer touching either should check the other.
+
+#: Same leak class as `sanitize_detail`'s `=`-ban above (`DATABASE_URL=postgresql://
+#: ...`-shaped content), but here redacting only the offending line rather than the
+#: whole report: an `ALLCAPS_NAME=value` assignment, optionally `export`-prefixed,
+#: is not a shape a genuine ASan/UBSan grammar line (header, stack frame, or
+#: `SUMMARY:`) ever produces — see `adapters/cpp/sanitizer.py`'s module docstring for
+#: that grammar.
+_ENV_ASSIGNMENT_LINE_RE = re.compile(r"(?im)^.*\b(?:export\s+)?[A-Z_][A-Z0-9_]{2,}\s*=\s*\S.*$")
+
+#: Mirrors `gateway/context.py::_SECRET_LINE`: a named-secret assignment
+#: (`api_key=...`, `token: ...`) regardless of casing, which `_ENV_ASSIGNMENT_LINE_RE`
+#: alone would miss for a lowercase key.
+_SECRET_LINE_RE = re.compile(r"(?im)^.*\b(?:api[_-]?key|token|secret|password)\s*[:=].*$")
+
+#: Mirrors `gateway/context.py::_ABSOLUTE_PATH`: a Unix absolute path or a Windows
+#: drive path. Substituted in place (not a whole-line drop) so a stack frame line
+#: like ``#0 0x... in emit_tab /Users/alice/proj/src/decode.c:43`` keeps its frame
+#: index, address, and function name, and loses only the path span — the file/line
+#: a report needs to *identify* the crash already lives in `Finding.file_path`/
+#: `Finding.line` (structured columns parsed by `adapters.cpp.sanitizer`), not in
+#: this free-text field.
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w./-])(?:/[A-Za-z0-9._@%+=:,~ -]+)+|[A-Za-z]:\\[^\s:]+")
+
+REDACTED_LINE = "[redacted: line removed - looked like a secret or environment assignment]"
+REDACTED_PATH = "[redacted absolute path]"
+
+
+def redact_sanitizer_report(report: str) -> str:
+    """Strip absolute paths and environment/secret-shaped lines from a raw ASan/
+    UBSan report, keeping everything else — crash type, stack frames, offsets.
+
+    Unlike `sanitize_detail`, never replaces the whole value: a truncated-to-nothing
+    "redacted" sanitizer report is useless to an operator triaging a real crash, and
+    the two leak classes this targets (a path, an assignment line) are each
+    identifiable and removable in place without discarding the rest.
+
+    Idempotent for the same reason `sanitize_detail` is: neither regex matches its
+    own placeholder text, so `redact_sanitizer_report(redact_sanitizer_report(x)) ==
+    redact_sanitizer_report(x)`.
+    """
+    if not report:
+        return report
+    redacted = _SECRET_LINE_RE.sub(REDACTED_LINE, report)
+    redacted = _ENV_ASSIGNMENT_LINE_RE.sub(REDACTED_LINE, redacted)
+    redacted = _ABSOLUTE_PATH_RE.sub(REDACTED_PATH, redacted)
+    return redacted
