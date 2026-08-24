@@ -21,10 +21,44 @@
 #
 # It leaves the stack down afterwards, and it prints the raw container output before it
 # prints a verdict, so the verdict can be checked against the evidence rather than trusted.
+#
+# #234: container names below are `${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-<service>`,
+# never a bare literal — PR #219/#233 (D-098/D-099/#230) established that a linked worktree
+# isolates its own finale stack under `brahmadatta-finale-<worktree-hash>`, and a script that
+# still `docker inspect`s the literal `brahmadatta-finale-control-api` against an isolated
+# worktree's stack does not fail, it silently finds nothing — `docker inspect` on a
+# nonexistent name errors, but this script never checked that error, so the SEC-R3 evidence
+# it produces would be no evidence at all. Same worktree-detection block as finale-up.sh
+# (and dev-up.sh's own matching copy), duplicated here rather than pulled into a shared file
+# — see finale-up.sh's header comment for why duplication was already chosen over a new
+# shared mechanism for this exact block.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/infrastructure/compose/docker-compose.finale.yml"
+
+if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
+  git_dir="$(git -C "${REPO_ROOT}" rev-parse --git-dir)"
+  common_dir="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir)"
+  if [[ "${git_dir}" != "${common_dir}" ]]; then
+    worktree_hash="$(printf '%s' "${REPO_ROOT}" | shasum | cut -c1-8)"
+    export COMPOSE_PROJECT_NAME="brahmadatta-finale-${worktree_hash}"
+    echo "  linked worktree detected — isolated compose project: ${COMPOSE_PROJECT_NAME}"
+    worktree_hash_dec="$((16#${worktree_hash}))"
+    if [[ -z "${NGINX_FINALE_HTTP_PORT:-}" ]]; then
+      export NGINX_FINALE_HTTP_PORT=$(( 40000 + (worktree_hash_dec % 10000) ))
+    fi
+    if [[ -z "${UVICORN_FORWARDED_ALLOW_IPS:-}" ]]; then
+      export UVICORN_FORWARDED_ALLOW_IPS="10.91.$(( (worktree_hash_dec % 250) + 1 )).0/24"
+    fi
+  fi
+fi
+
+# The one name every container below is derived from — matches
+# docker-compose.finale.yml's own `container_name: ${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-<service>`
+# on every service exactly, not a separately-maintained copy of the same default.
+CONTROL_API_CONTAINER="${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-control-api"
+
 COMPOSE=(docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}")
 
 rc=0
@@ -54,18 +88,18 @@ echo "== starting the FINALE profile"
 
 echo
 echo "== container identity and network attachments (from Docker, not from the compose file)"
-docker inspect brahmadatta-finale-control-api \
+docker inspect "${CONTROL_API_CONTAINER}" \
   --format '  networks: {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
-docker inspect brahmadatta-finale-control-api \
+docker inspect "${CONTROL_API_CONTAINER}" \
   --format '  user: {{.Config.User}}  read_only: {{.HostConfig.ReadonlyRootfs}}  privileged: {{.HostConfig.Privileged}}'
 echo "  gateway per network:"
-docker inspect brahmadatta-finale-control-api \
+docker inspect "${CONTROL_API_CONTAINER}" \
   --format '{{range $k, $v := .NetworkSettings.Networks}}    {{$k}}: gateway="{{$v.Gateway}}"{{"\n"}}{{end}}'
 echo "  routing table inside the container:"
 "${COMPOSE[@]}" exec -T control-api sh -c 'cat /proc/net/route' 2>/dev/null | sed 's/^/    /' || true
 
 echo
-echo "== attempting outbound FROM INSIDE brahmadatta-finale-control-api"
+echo "== attempting outbound FROM INSIDE ${CONTROL_API_CONTAINER}"
 echo "   (python3 from the container's own interpreter, not from the host)"
 echo
 
