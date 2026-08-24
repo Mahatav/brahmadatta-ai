@@ -15673,3 +15673,54 @@ description for the full `git bisect run` transcript and the multi-commit build/
 matrix) rather than routing through `cybersecurity` for sign-off — same class of
 decision D-144 itself already anticipated ("Normal per-PR review gates... still
 apply" for security-sensitive changes; this one isn't).
+
+---
+
+## D-147 — Correction to D-144: `#41` was wrongly cleared for build; a real technical
+prohibition existed in the issue's own comment thread that the orchestrating session
+never read before asking · 2026-08-24 · orchestrating session
+
+**What went wrong.** D-144 stated #41's "own body argues for building it with no
+stated technical objection anywhere in the issue" and recorded that this was checked
+directly with Mahatav before proceeding. That check was incomplete: only the issue's
+original body text was read, not its comment thread. A real comment exists on #41,
+posted by Mahatav (GitHub `author_association: owner`), containing a substantive,
+already-decided architectural prohibition:
+
+> Ruled against by the product-manager (D-029). Retitled as a warning, not a task...
+> The reproducer, by definition, crashes the unpatched target. `pktcfg` at baseline
+> *is* the unpatched target. So a committed CTest case would fail at baseline.
+> Architecture spec §6.2 makes any baseline failure terminal. Every mission dies at
+> step 3, before analysis, before fuzzing, before the loop... **Standing prohibition:
+> do not add a test to `demo/repositories/pktcfg/` that fails on the unpatched
+> build.**
+
+Caught by a dispatched backend-developer agent that (for an unrelated, separate reason
+— it read `.project/decisions.md` from a stale checkout in the shared primary
+directory rather than genuinely fetching `origin/main` into its own isolated worktree,
+so it also, incorrectly, believed D-144 itself didn't exist) stopped and refused to
+build #41 rather than proceeding on an instruction it couldn't verify. Its refusal was
+the right outcome, even though its stated reason (D-144 doesn't exist) was itself
+wrong — D-144 is real and merged. The REAL reason to refuse is the comment above,
+independent of any D-144 confusion.
+
+**Correction.** #41 is NOT reopened. D-144's authorization for #41 specifically is
+withdrawn — every other issue D-144 named remains authorized, this one alone is
+retracted. The reproducer stays a fixture and an export-time evidence-bundle artifact,
+per the existing, already-implemented sanctioned design the comment thread describes.
+No code was written for #41 before this correction landed (the second dispatch
+attempt refused before touching any file) — nothing to revert.
+
+**Process lesson, recorded for future dispatches.** Before asking the user (or citing
+"no objection found") about any issue, read `gh issue view <N> --comments`, not just
+the issue body — a load-bearing objection can live entirely in a comment thread,
+exactly as it did here. Separately, at least one dispatched agent this session did
+not actually work in an isolated worktree despite being instructed to and reported
+that it did not need to — this is a real, separate process gap (reading repo state
+from the shared, concurrently-mutated primary checkout instead of a real `git fetch`
+into isolation) that should be watched for in future dispatches, independent of this
+specific #41 correction.
+
+**Final approval authority** — this correction is self-evident from the issue's own
+public comment thread (Mahatav's own words); no further approval needed to retract
+what was, in retrospect, an uninformed authorization.
