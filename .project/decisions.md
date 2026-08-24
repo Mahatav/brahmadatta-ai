@@ -15452,3 +15452,142 @@ needed to begin implementation work on the named issues. Normal per-PR review ga
 (cybersecurity for security-sensitive changes, qa-engineer/cybersecurity otherwise)
 still apply before any individual PR merges — this ruling authorizes the WORK, not a
 bypass of the existing review discipline.
+
+## D-145 — `#62` risk register: owners and firing triggers materialized into
+`docs/08-management/15-risk-register.md`, all 14 rows verified against the full issue
+text and 9 real command/test executions, not glob/grep-only checks · 2026-08-24 ·
+`devops-engineer` seat, under D-144's authorization
+
+**Context.** `#62` asked the risk register to get a per-row owner and a checkable firing
+trigger. A `product-manager` agent drafted a table earlier in this session but had no
+`Bash`/`gh` access, so it (a) only read the first 500 characters of the issue body and
+missed the full "three rules applied throughout" plus the three PM-added rows (12–14)
+the CTO technical review contributed, and (b) verified its proposed trigger commands only
+by confirming the referenced files existed (`grep`/glob), never by running them. This
+entry is the real-execution pass: every non-obsolete trigger below was actually run in
+this session, in an isolated worktree (`/tmp/build-62-risk-register-v2`), against a real
+Python 3.12 venv with `requirements-dev.txt` + `apps/control-api/requirements.txt`
+installed and a real local Docker daemon (29.6.1).
+
+**What the draft got right.** Rows 3, 4 (path fix only — trigger itself correct), 5, 6,
+7, 11: owners and trigger commands verified to exist and pass exactly as drafted. Row 10's
+reworded framing and `devops-engineer` ownership were correct calls, consistent with
+D-089's precedent (the same seat already owns the finale egress audit).
+
+**What was corrected, with reasoning:**
+
+- **Row 1** (Kimi K3 capacity) — the draft's grep included a nonexistent top-level
+  `orchestrator/` path segment (orchestrator code actually lives at
+  `apps/control-api/orchestrator/`); harmless (grep warns, keeps searching the paths that
+  do exist) but fixed to avoid a confusing warning on every future run. More
+  substantively: the draft's single source-grep only checks half of what the issue's own
+  row 1 specifies. The issue converts this row to a **claim risk** under D-015 with its
+  trigger scoped to **judge-facing artifacts** (slide deck, `report.md`, narration
+  script) — not `.py` source. Restored both checks: the source grep (is there dead code
+  referencing Kimi) and the judge-facing-artifact grep (`docs/10-competition`,
+  exported evidence bundle `report.md`). Both ran clean.
+- **Row 2** (adapter tuning) — the draft assigned `cto` as owner. The issue is explicit
+  and unambiguous that this row is **retired with no owner**: "Assigning an owner to
+  watch nothing is worse than recording it as gone." Reverted to no owner, kept the
+  verification grep for completeness.
+- **Row 9** (GPU/model-host lease) — the draft marked this **RESOLVED-obsolete (D-015)**
+  with `pytest apps/control-api/contracts/tests/test_openapi_dump.py::
+  test_committed_dump_is_current` as the trigger. Both parts are wrong. The issue's own
+  text explicitly does NOT retire this row — it **restates** it for D-015 as the
+  model-host and sandbox lease risk, still owned (originally by the pipeline-owner human)
+  and still firing on a real observable (a terminal mission with an unreleased resource).
+  The openapi-dump test is topically unrelated (OpenAPI schema freshness, not resource
+  teardown) — it happened to exist and pass, which is exactly the "verified by
+  glob/grep, not by understanding what the test asserts" failure mode this whole
+  verification pass exists to catch. Replaced with
+  `apps/control-api/orchestrator/tests/test_teardown.py::
+  test_docker_sandbox_reaper_reports_a_failed_removal_as_not_released` and
+  `::test_terminal_states_are_teardown_boundaries` — both directly test the release-vs-
+  reported-released property the risk is actually about. 2 passed.
+- **Row 8** (source leaks) — the original issue's trigger
+  (`tests/security/test_single_inference_client.py`) no longer exists in this tree; the
+  draft's replacement (`finale-egress-evidence.sh` alone) only covers the network-leak
+  channel, not the issue's second sub-check (an exported bundle containing a credential
+  or absolute host path). Kept the network check and added
+  `test_poisoned_detail_is_redacted_by_assemble_evidence_bundle_itself`
+  (the SEC-50/D-071c regression test) for the bundle-content channel. Both verified live.
+- **Rows 12–14** — absent from the draft entirely; these are the three PM-added rows in
+  the full issue text (the CTO technical review's top three risks, added on the same
+  terms as the original eleven). Given owners and triggers here for the first time:
+  row 12 (patch-generation success rate) to `backend-developer`, with an explicit note
+  that the numeric "<3/10" threshold is a manual benchmark result (#61, BD-001-M), not a
+  CI-enforced number, and a separately-flagged, pre-existing, unrelated test failure in
+  the same file (`test_live_backend_built_by_this_module_gets_401_from_the_sidecar_
+  without_the_fix` — asserts `urllib.error.HTTPError`, current code wraps it in
+  `gateway.errors.LiveGenerationError`) reported to `backend-developer`, not fixed here —
+  out of a documentation task's scope and not this session's regression; row 13 (SSE
+  wedging) to `devops-engineer`, trigger `infrastructure/scripts/smoke-sse.sh`, run for
+  real, all 4 cases including both negative controls passed; row 14 (VERIFIED with no
+  verification record) to `backend-developer`, trigger updated to the current test name
+  (`test_no_verdict_state_without_a_verification_record` — the original issue's cited
+  name, `test_cannot_enter_verified_without_a_verified_record`, was renamed since the
+  issue was filed on 2026-08-07).
+- **Real prerequisite found, not previously documented**: `finale-egress-evidence.sh`
+  (rows 8 and 10) fails on a fresh clone/worktree with a Postgres image build error
+  unless `infrastructure/scripts/gen-postgres-cert.sh` is run first. Flagged in the risk
+  register row 8 entry and worth a line in
+  `docs/06-operations/73-rehearsal-checklist.md` — not added there in this PR, which is
+  scoped to the risk register; filed as a note for whoever next touches that checklist.
+
+**Execution evidence, real, this session** (all against a fresh venv / real Docker, not
+assumed): `adapters/cpp/tests/test_toolchain.py`+`test_pipeline.py` 15 passed;
+`workers/fuzzing/tests/test_real_campaign.py::…heap_overflow` 1 passed with
+`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1` against a real Docker daemon (confirmed SKIP
+without the env var, so the trigger is documented as opt-in, not a bare invocation);
+`test_verification.py::test_reproducer_eliminated_but_regression_failed_is_rejected` 1
+passed; `test_patch_policy.py` 2 named tests passed; `packages/sandbox/tests/test_jail.py`
+2 named tests passed; `finale-egress-evidence.sh` real live PASS (control-api container
+reached 0 of 4 external targets — `api.openai.com`, `api.anthropic.com`, cloud metadata
+IP, `1.1.1.1` — while Postgres stayed reachable as a positive control; stack torn down
+cleanly afterward, confirmed no stray containers/networks/volumes); `bash -n
+finale-up.sh` exit 0; `test_evidence_bundle.py::
+test_poisoned_detail_is_redacted_by_assemble_evidence_bundle_itself` 1 passed;
+`test_teardown.py` 2 named tests passed; `adapters/cpp/tests/test_detect.py` 5 passed;
+`test_patch_generate_executor.py` 3 named tests passed (1 unrelated pre-existing failure
+in the same file confirmed and reported, not fixed); `smoke-sse.sh` real PASS, all 4
+cases; `test_state_machine.py`+`test_verdict_completeness.py` 4 passed. Three grep-only
+checks (rows 1, 2, and the row-10/row-8 wording guard) confirmed 0 matches for real, not
+assumed from the trigger's plausibility.
+
+**Also corrected in the same doc, directly relevant to accuracy**: the "Fixed MVP
+competition decisions" section still said compute runs "on rented GPU infrastructure" —
+stale since D-015 (2026-08-06); corrected to CPU-only `codellama:7b-instruct` via Ollama
+(D-121), per `CLAUDE.md`'s explicit correction. Two "Open decisions" bullets
+(three-person team roles, rented GPU provider) struck as superseded by the agentic
+company structure and D-015 respectively.
+
+**Decision.** Materialize the verified table into `docs/08-management/15-risk-register.md`
+(superseding the original issue's own "leave the doc unedited, this issue is the record"
+choice — that precedent predates D-144's instruction to build out the remaining `CUT`
+milestone for real, and a table that only exists inside a closed issue is not what
+"tracked with owners and mitigations," the doc's own stated purpose, means in practice).
+
+**Options considered.** (a) Trust the product-manager's draft as-is and paste it in
+unverified — rejected, three of its eleven rows had a materially wrong trigger or a
+contradicted status, which is exactly the failure mode `#62` exists to prevent. (b)
+Re-derive owners and triggers from scratch, ignoring the draft — rejected, the draft's
+analysis of the eight correct rows was sound work and re-deriving it would waste it. (c)
+Verify and correct in place, documenting every disagreement with reasoning — done.
+
+**Cost implications.** None — documentation-only change, no infrastructure or CI cost.
+
+**Security implications.** None negative; row 8's corrected trigger is a strictly better
+security check (adds the bundle-content leak channel the draft's single trigger missed).
+Row 7's `cybersecurity`-owned trigger unchanged and reconfirmed passing.
+
+**Scalability implications.** None — this is a process document.
+
+**Recommendation.** Merge. Every trigger command is real, runs today, and was executed in
+this session with output shown above; the two remaining "no code trigger" gaps (row 2's
+retirement, row 11's external-announcement half) are honest limits already present in the
+original issue text, not gaps introduced by this pass.
+
+**Final approval authority** — CTO (technical, process-documentation change with no
+code/infra risk); self-merge authority per `CLAUDE.md`'s standing PR-merge grant, since
+this is documentation-only and every claim in it is backed by real command output shown
+above, not asserted.
