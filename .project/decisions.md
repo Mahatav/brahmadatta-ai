@@ -14200,3 +14200,158 @@ later also picked up an HTTP client import).
 
 **Final approval authority** — `cybersecurity`, since this touches a security-
 classified isolation-boundary test (D-036/D-073-adjacent L3 check); not self-merged.
+
+---
+
+## D-133 — #239/#234: `finale-up.sh` now starts `worker` by default (inverted from
+dev-up.sh's opt-in), and `finale-egress-evidence.sh` derives its container name from
+`COMPOSE_PROJECT_NAME` instead of a hardcoded literal · 2026-08-24 · devops-engineer
+
+**Context.** Both filed against the same root cause class: a finale-profile script that
+silently does the wrong thing under the real deployment topology, discovered only
+because nobody had actually run it end to end. #239 (P0, found during D-122's own PR):
+`finale-up.sh` never passed `--profile worker`, so `orchestrator` (D-122) would advance
+a real finale mission past `VALIDATING` with nothing running to claim the job-backed
+stage behind it — a live #57 rehearsal would stall, unattended, on stage. #234 (P1,
+found during cybersecurity's PR #233 review): `finale-egress-evidence.sh` still
+`docker inspect`s the literal `brahmadatta-finale-control-api`, ignoring the
+`COMPOSE_PROJECT_NAME` worktree-isolation convention PR #219/#233 (D-098/D-099/#230)
+established for every other finale-profile script — against an isolated worktree's
+stack this targets the wrong container (or none), producing SEC-R3 egress evidence
+that proves nothing about the stack that was actually meant to be audited.
+
+**Decision — #239.** `finale-up.sh` now builds a `finale_profiles=(--profile worker)`
+array (same shape as `dev-up.sh`'s own `${profiles[@]}`, placed before the `config`/`up`/
+`ps` subcommand in every invocation — confirmed live that `--profile` is a top-level
+`docker compose` flag, not a subcommand option: `docker compose ... config --images
+--profile worker` fails `unknown flag: --profile`; `docker compose --profile worker ...
+config --images` works). Unlike `dev-up.sh`'s `DEV_UP_WORKER` (opt-in, default off —
+D-031, because no queue framework existed yet when that default was chosen), the
+default here is **inverted: worker is on unless explicitly opted out**
+(`FINALE_UP_WORKER=0`). The image-presence preflight (`config --images`) and the
+`docker compose up`/`ps` invocations all now carry the same profile flag, so the
+existing "every image this run needs is already local, before this host goes offline"
+check actually covers `worker`'s image too, not just the always-on services.
+`docker-compose.finale.yml`'s `worker` service comment (previously "NOT independently
+verified end to end... finale-up.sh never passes `--profile worker`") is updated to
+match — that comment was accurate before this fix and would have gone stale otherwise.
+
+Also added: a soft, non-blocking `pgrep`-based check at the end of `finale-up.sh`'s run
+noting whether `fuzz-worker` (D-073's bare-metal-only FUZZ/MINIMIZE worker,
+`infrastructure/scripts/run-fuzz-worker.sh`, deliberately not a compose service —
+no `docker` CLI in any container, D-036 forbids mounting the socket) looks like it is
+running, with the exact command to start it if not. This script does not and should not
+start `fuzz-worker` itself — D-073's bare-metal Postgres-reachability question for a
+real finale host is still open — but it should no longer be silent about the fact that
+nothing anywhere mentions it.
+
+**Decision — #234.** `finale-egress-evidence.sh` gets the same worktree-detection block
+`finale-up.sh`/`dev-up.sh` already each carry (duplicated, not factored into a shared
+file — matches the existing convention; see `finale-up.sh`'s own header comment for why
+duplication was already chosen there over introducing a new shared mechanism). Every
+`docker inspect`/message that named the container literally now reads
+`CONTROL_API_CONTAINER="${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-control-api"`,
+matching `docker-compose.finale.yml`'s own `container_name:` line for that service
+exactly. A side effect worth recording: before this fix, this script's own `up`/`down`
+calls (via `"${COMPOSE[@]}"`, no `-p`/`COMPOSE_PROJECT_NAME` of its own) resolved to the
+compose file's pinned `name: brahmadatta-finale` regardless of which worktree ran it —
+so its `trap cleanup EXIT` → `down -v` could tear down a DIFFERENT worktree's (or the
+primary checkout's) live finale stack sharing that same default project name. This fix
+closes that too, as a consequence of the same change, not as a separate patch.
+
+**Options considered (#239)** — (a) as implemented, worker on by default; (b) match
+dev-up.sh exactly, worker opt-in via `FINALE_UP_WORKER=1`; (c) leave `finale-up.sh`
+untouched and document the missing flag as an operator runbook step instead.
+
+**Pros and cons.** (b) is the more literal reading of "match dev-up.sh's pattern," and
+has the virtue of being the smallest possible diff from that precedent. But dev's
+opt-in default exists for a reason specific to dev (D-031: avoid a crash-looping
+container from a queue framework that did not exist yet) that no longer applies even to
+dev — `run_worker` is a real, working command since D-062/D-122 — and never applied to
+finale at all. Finale's entire purpose is an unattended, timed, once-through rehearsal
+(#57); requiring a human to remember an extra flag on the one run that cannot be
+quietly retried is the exact failure mode #239 exists to close, and it is also
+precisely how #239 happened in the first place (T5/T7's executors were merged and
+reviewed without anyone noticing `finale-up.sh` never exercised `worker` at all). (c)
+converts a P0 code gap into a runbook step nobody is guaranteed to read under stage
+pressure — rejected outright.
+
+**Cost implications** — none. One more container brought up on every ordinary
+`finale-up.sh` run, at a compute cost already budgeted (`worker`'s image, sizing, and
+resource limits were already defined and reviewed as part of D-122/#168's `docker-
+compose.finale.yml` `worker` service block; this fix only starts it, it does not
+redefine it).
+
+**Security implications** — none widened. `worker`'s hardening (`read_only`,
+`cap_drop: ["ALL"]`, `backend`-network-only, no route off host) is unchanged from
+before this fix; this fix only affects whether the already-reviewed service definition
+is exercised. `finale-egress-evidence.sh`'s fix has a small positive security
+implication: it now inspects the container the audit actually intended to inspect,
+where before it could silently inspect the wrong one (or none) and still print a PASS
+banner if the wrong container happened to also have no external route — a false
+positive on exactly the Critical-severity claim this script exists to falsify.
+
+**Scalability implications** — none; single-operator, single-stack finale profile.
+
+**Verification — live, not just `docker compose config`.**
+- `bash -n` on both scripts: clean. `shellcheck` on both: zero warnings.
+- `docker compose --profile worker -f docker-compose.finale.yml config --services`:
+  includes `worker`; without the flag: excludes it. `--profile worker --profile model`:
+  includes `worker`, `model-host`, `model-host-auth` together — profiles compose
+  additively, confirmed live, not assumed.
+- **Full live run, isolated worktree** (`/tmp/fix-239-234`, derived project
+  `brahmadatta-finale-15cea0b3`, matching this session's own worktree-hash derivation):
+  built all four of this repo's own finale images (`control-api`/`worker`/
+  `orchestrator`/`db`; `db` needed `gen-postgres-cert.sh` run once first, unrelated to
+  this fix), then ran the actual fixed `finale-up.sh` unmodified end to end. Result:
+  `worker` container created and started with zero extra flags, alongside every other
+  service; every existing preflight/postflight assertion (`.env` checks, `nginx -t`,
+  image-presence check, `/admin/` 404, HSTS absent, `/healthz` 200) passed; the new
+  fuzz-worker `pgrep` note printed correctly (fuzz-worker was not running, as expected —
+  nothing in this task started it). After pointing the throwaway `.env`'s `DATABASE_URL`
+  at `sslmode=require` (this repo's own `brahmadatta.E005` startup check, unrelated to
+  this fix) and running `manage.py migrate` once against the fresh database, `worker`'s
+  own log printed `claiming kinds {BASELINE, CORRELATE, EXPORT, PATCH_GENERATE,
+  SANITIZER_BUILD, TEARDOWN, VERIFY}` and `polling every 1.0s` — the actual #239 gap,
+  closed and directly observed, not inferred from `docker compose config` alone.
+  `orchestrator`'s tick loop degraded gracefully on the pre-migration schema exactly as
+  D-122 documented (`RestartCount` stayed `0` throughout). Torn down cleanly afterward
+  (`docker compose ... down -v`), confirmed via `docker ps`/`docker images` that no
+  container, network, volume, or image belonging to the concurrently-running sibling
+  worktree's own stack (`brahmadatta-bfe5a38c-*`) was touched at any point.
+- **#234, read-only.** Did not run `finale-egress-evidence.sh` against the live
+  `brahmadatta-bfe5a38c-*` stack — that stack is a DEV-profile stack (has
+  `command-center`, which the finale profile never does), and the script's own
+  `docker compose ... down -v` in its cleanup trap would tear down whichever project
+  its derived `COMPOSE_PROJECT_NAME` resolves to; running it against a live stack this
+  task was told not to modify was the wrong risk to take for this check. Instead,
+  confirmed read-only: this repo's worktree-hash derivation
+  (`shasum` of the repo root path, first 8 hex chars) applied to that worktree's own
+  path produces `bfe5a38c` — exactly the project name the running containers already
+  use (`docker inspect brahmadatta-bfe5a38c-control-api` succeeds, matching the fixed
+  script's `${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-control-api` pattern exactly).
+
+**New finding, filed separately, not fixed here (out of this fix's scope).** The
+`runtime` image's own `HEALTHCHECK` (`control-api.Dockerfile`, probes TCP 8000) is
+unconditionally inherited by `worker` and `orchestrator`, neither of which serves
+anything on 8000 (both override `command:` to a management command, not `uvicorn`).
+Both report Docker-level `unhealthy` although functionally correct and stable (`worker`
+confirmed polling and claiming kinds; `orchestrator`'s `RestartCount` stayed `0`) — first
+directly observed in this session because this is the first time `worker`/`orchestrator`
+have run together under the finale profile at all. Nothing in either compose file
+`depends_on`s their health today, so this does not block #239/#234, but it is a real gap
+in what "healthy" means for these two services in both compose files (dev has the
+identical unconditional inheritance) — filed as a follow-up issue rather than patched
+here, since fixing a Dockerfile-level `HEALTHCHECK`/service-level override is outside
+what either #239 or #234 asked for and is the kind of unrequested scope creep
+`CLAUDE.md`'s review chain exists to catch.
+
+**Final approval authority** — CTO (technical, both scripts, and the default-inversion
+call in particular, since it is the one non-mechanical judgment call in this fix).
+Self-merged after full local verification (live end-to-end run for #239, read-only
+container-name confirmation for #234, `shellcheck` clean, `bash -n` clean) — judged
+low-risk: mechanical, scoped exactly to what both issues described, matches the
+established worktree-isolation convention rather than inventing a new one, and the one
+real judgment call (worker's default flipping from dev's opt-in) is stated here with its
+reasoning rather than made silently. Flagged for a CTO/engineering-manager sanity pass
+on the default-inversion call specifically, post-merge, given the finale path's stakes.

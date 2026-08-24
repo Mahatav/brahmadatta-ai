@@ -310,16 +310,17 @@ services:
       REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for the finale stack}
       # Mirrors control-api's ARTIFACT_ROOT fix above, for parity if this profile is
       # ever activated. D-062/D-122: the command default below now names the real
-      # management command (`run_worker`, not `rqworker` — see that line's own comment),
-      # but this service is still NOT independently verified end to end under the
-      # finale profile: finale-up.sh never passes `--profile worker`, so no rehearsal has
-      # actually exercised this container yet. Flagged, not fixed here — a larger,
-      # separate gap than the stale command default this fix closes.
+      # management command (`run_worker`, not `rqworker` — see that line's own comment).
+      # #239 (fixed): finale-up.sh used to never pass `--profile worker` at all, so this
+      # container went unexercised by every rehearsal to date — `orchestrator` alone
+      # advanced missions past VALIDATING with nothing running to claim the job-backed
+      # stage behind it. finale-up.sh now includes `--profile worker` by default (see its
+      # own header comment for why the default there is inverted from dev-up.sh's opt-in
+      # DEV_UP_WORKER) — this service is exercised on every ordinary finale-up.sh run.
       ARTIFACT_ROOT: /var/lib/brahmadatta/artifacts
       # D-100: same fix and reasoning as control-api's own MODEL_GATEWAY_ROOT above —
       # this is the process that actually runs JobKind.PATCH_GENERATE, so it needs
-      # `gateway.*` importable at least as much as control-api does, in principle,
-      # once this profile is activated (see the NOT independently verified note above).
+      # `gateway.*` importable at least as much as control-api does.
       MODEL_GATEWAY_ROOT: /app/services/model-gateway
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
     command: ${CONTROL_API_WORKER_CMD:-python manage.py run_worker}

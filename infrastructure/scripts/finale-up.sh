@@ -10,6 +10,13 @@
 # The finale profile differs from development in ways that are all security-relevant, and
 # the preflight below checks each one rather than trusting that the right file got mounted.
 # Full list in docs/06-operations/71-ingress-and-proxy-contract.md §5.
+#
+# #239: this script brings up `orchestrator` and (as of this fix) `worker`, both compose
+# services. It does NOT start `fuzz-worker` — D-073's bare-metal-only FUZZ/MINIMIZE worker,
+# deliberately not a compose service at all (no `docker` CLI in any container, D-036) — and
+# it is not this script's job to. See the reminder printed at the end of this run, and
+# infrastructure/scripts/run-fuzz-worker.sh's own header for the full reasoning and for
+# `fuzz-worker`'s still-open Postgres-reachability question on a real finale host.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,6 +24,24 @@ COMPOSE_FILE="${REPO_ROOT}/infrastructure/compose/docker-compose.finale.yml"
 
 fail() { printf '\033[31mblocked:\033[0m %s\n' "$1" >&2; exit 1; }
 note() { printf '  %s\n' "$1"; }
+
+# #239: `worker` claims every job-backed mission stage EXCEPT FUZZ/MINIMIZE (see
+# docker-compose.finale.yml's own `worker` service comment for the D-073 reasoning). It is
+# `profiles: ["worker"]`-gated in the compose file, same idiom as dev-up.sh's DEV_UP_WORKER
+# — but unlike dev (D-031: opt-in there because no queue framework existed yet), the finale
+# profile's whole point is a real, unattended, timed rehearsal (#57): a demo host that comes
+# up with `orchestrator` advancing missions past VALIDATING but no `worker` to claim the job
+# behind that stage is not a smaller version of a working demo, it is a stalled one — this
+# is exactly the D-122 gap #239 filed. So the default here is inverted from dev-up.sh's:
+# worker is ON unless explicitly opted out, not off unless explicitly opted in.
+# `FINALE_UP_WORKER=0` is the escape hatch for the rare case an operator wants nginx/API up
+# without a worker (e.g. isolating a control-api-only issue) — not for routine use.
+finale_profiles=(--profile worker)
+if [[ "${FINALE_UP_WORKER:-1}" == "0" ]]; then
+  finale_profiles=()
+  echo "  FINALE_UP_WORKER=0 — worker profile intentionally excluded. Missions will stall" >&2
+  echo "  past VALIDATING with nothing claiming job-backed stages. Debugging use only." >&2
+fi
 
 # See dev-up.sh's matching comment: docker-compose.finale.yml pins
 # `name: brahmadatta-finale`, so a worktree checkout bringing this up
@@ -73,7 +98,14 @@ note "stage origin is http://localhost:${NGINX_FINALE_HTTP_PORT:-8080} — no TL
 
 echo
 echo "== validating the finale configuration before anything starts"
-docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" config --quiet
+# `--profile` is a top-level `docker compose` flag (see `docker compose --help`), not a
+# subcommand option — it MUST precede `config`/`up`/`ps`, not follow them. Confirmed live:
+# `docker compose ... config --images --profile worker` fails "unknown flag: --profile";
+# `docker compose --profile worker ... config --images` works. Every invocation below
+# places `${finale_profiles[@]}` accordingly, same placement dev-up.sh already uses for
+# its own `${profiles[@]}` ahead of `up`.
+docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" \
+  ${finale_profiles[@]+"${finale_profiles[@]}"} config --quiet
 note "compose config valid"
 "${REPO_ROOT}/infrastructure/scripts/nginx-validate.sh" finale >/dev/null
 note "nginx -t (finale profile) passed"
@@ -95,7 +127,8 @@ while IFS= read -r image_ref; do
     printf '  \033[31mmissing locally:\033[0m %s\n' "${image_ref}" >&2
     missing_images=1
   fi
-done < <(docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" config --images "$@")
+done < <(docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" \
+  ${finale_profiles[@]+"${finale_profiles[@]}"} config --images "$@")
 if [[ "${missing_images}" -eq 1 ]]; then
   fail "one or more images above are not in the local Docker image store. Pull/build them all WHILE ONLINE, before this host goes offline: 'docker compose --env-file .env -f ${COMPOSE_FILE} build' for this repo's own images (control-api/worker/db), plus a normal 'docker compose ... up -d' once (or 'docker compose ... pull') for the pinned upstream images (nginx, redis, ollama). This check only looks; it never pulls or builds."
 fi
@@ -103,10 +136,12 @@ note "every image this run needs is already present locally"
 
 echo
 echo "== docker compose up"
-docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" up -d --remove-orphans "$@"
+docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" \
+  ${finale_profiles[@]+"${finale_profiles[@]}"} up -d --remove-orphans "$@"
 
 echo
-docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" ps
+docker compose --env-file "${REPO_ROOT}/.env" -f "${COMPOSE_FILE}" \
+  ${finale_profiles[@]+"${finale_profiles[@]}"} ps
 
 echo
 echo "== post-start assertions"
@@ -130,6 +165,24 @@ note "HSTS absent — localhost will not be forced back to HTTPS"
 health_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${finale_http_port}/healthz" || echo 000)"
 [[ "${health_code}" == "200" ]] || fail "/healthz returned ${health_code}, expected 200"
 note "http://localhost:${finale_http_port}/healthz is reachable"
+
+# #239: fuzz-worker (D-073) is bare-metal, not a compose service — nothing docker-compose-
+# side ever starts it, and this script cannot reliably supervise a process outside its own
+# tree, so this is a soft, informational check only, never a `fail`. `pgrep` is present on
+# both the macOS and Linux hosts this repo targets; if it is missing for some other reason,
+# skip the check rather than block the whole run over it.
+if command -v pgrep >/dev/null 2>&1; then
+  if pgrep -f 'manage\.py run_worker --kinds FUZZ' >/dev/null 2>&1; then
+    note "fuzz-worker (bare-metal, D-073) appears to be running"
+  else
+    echo "  note: fuzz-worker (bare-metal, D-073) does not appear to be running." >&2
+    echo "        FUZZ/MINIMIZE jobs will never be claimed without it. Start it separately:" >&2
+    echo "        FUZZ_WORKER_PROFILE=finale infrastructure/scripts/run-fuzz-worker.sh" >&2
+    echo "        (see that script's own header for its still-open Postgres-reachability" >&2
+    echo "        question on a real finale host, tracked in .project/decisions.md's D-073" >&2
+    echo "        follow-up entry — not resolved by this script.)" >&2
+  fi
+fi
 
 echo
 echo "  Rollback:  docs/06-operations/71-ingress-and-proxy-contract.md §7"
