@@ -208,10 +208,16 @@ def sanitize_detail(detail: str) -> str:
 #: that grammar.
 _ENV_ASSIGNMENT_LINE_RE = re.compile(r"(?im)^.*\b(?:export\s+)?[A-Z_][A-Z0-9_]{2,}\s*=\s*\S.*$")
 
+#: The secret-keyword vocabulary itself, factored out of `_SECRET_LINE_RE` below so a
+#: *bare* string (no `key:`/`key=` shape required — e.g. a dict key name, not a whole
+#: log line) can be checked against the same vocabulary. See `looks_secret_shaped` and
+#: #258.
+_SECRET_KEYWORD_RE = re.compile(r"api[_-]?key|token|secret|password", re.IGNORECASE)
+
 #: Mirrors `gateway/context.py::_SECRET_LINE`: a named-secret assignment
 #: (`api_key=...`, `token: ...`) regardless of casing, which `_ENV_ASSIGNMENT_LINE_RE`
 #: alone would miss for a lowercase key.
-_SECRET_LINE_RE = re.compile(r"(?im)^.*\b(?:api[_-]?key|token|secret|password)\s*[:=].*$")
+_SECRET_LINE_RE = re.compile(rf"(?im)^.*\b(?:{_SECRET_KEYWORD_RE.pattern})\s*[:=].*$")
 
 #: Mirrors `gateway/context.py::_ABSOLUTE_PATH`: a Unix absolute path or a Windows
 #: drive path. Substituted in place (not a whole-line drop) so a stack frame line
@@ -245,3 +251,52 @@ def redact_sanitizer_report(report: str) -> str:
     redacted = _ENV_ASSIGNMENT_LINE_RE.sub(REDACTED_LINE, redacted)
     redacted = _ABSOLUTE_PATH_RE.sub(REDACTED_PATH, redacted)
     return redacted
+
+
+# ---------------------------------------------------------------------------------------
+# `looks_secret_shaped` / `redact_loc` — #258, a narrower follow-up to #229 (D-130/D-131).
+#
+# #229 fixed `api/sse.py::safe_to_schema` to log a pydantic `ValidationError`'s `loc`/
+# `type` only — never `input`/`msg`/`ctx`, which is where a failing field's *value*
+# lives. That left one channel open: when the forbidden-extra-field failure itself is
+# what's firing (`StrictSchema`'s `extra="forbid"`), the extra field's *key name* is
+# not a value at all — it is a segment of `loc` itself, e.g. `loc=("payload", "log",
+# "sk-live-...")` for a payload shaped like `{"sk-live-...": "y"}`. #229's fix logs
+# `loc` verbatim, so a secret-shaped key name still reaches the log line #229 was
+# written to close.
+#
+# `looks_secret_shaped` reuses `_SECRET_KEYWORD_RE` above — the same vocabulary
+# `_SECRET_LINE_RE` already uses to recognise a `key: value`-shaped log line — rather
+# than inventing a new detector, per this fix's own instructions. It drops
+# `_SECRET_LINE_RE`'s `\s*[:=]` requirement because a `loc` segment is a bare string
+# (a dict key or list index), never a `key: value`-shaped line.
+# ---------------------------------------------------------------------------------------
+
+
+def looks_secret_shaped(value: object) -> bool:
+    """True if `value` is a string containing the same secret-keyword vocabulary
+    (`api[_-]?key`, `token`, `secret`, `password`, case-insensitive) `_SECRET_LINE_RE`
+    already uses — applied here to a single bare string rather than a whole line.
+
+    Non-string values (an int list-index segment of `loc`, for instance) are never
+    secret-shaped by construction and always return `False`.
+    """
+    return isinstance(value, str) and bool(_SECRET_KEYWORD_RE.search(value))
+
+
+#: What a secret-shaped `loc` segment is replaced with. Keeps the segment's *position*
+#: in the tuple (still visible to whoever reads the log line) and, structurally, that
+#: it was a string — since either of those can be diagnostically useful — without the
+#: one thing that cannot be: the literal key name.
+REDACTED_LOC_SEGMENT = "<redacted secret-shaped segment>"
+
+
+def redact_loc(loc: tuple[object, ...]) -> tuple[object, ...]:
+    """`loc` (a pydantic error's field-path tuple), with any secret-shaped segment
+    replaced by `REDACTED_LOC_SEGMENT`. Every other segment — including non-secret-
+    shaped strings and int list-indices — passes through unchanged, since those are
+    exactly the diagnostic detail #229's fix was designed to keep.
+    """
+    return tuple(
+        REDACTED_LOC_SEGMENT if looks_secret_shaped(segment) else segment for segment in loc
+    )

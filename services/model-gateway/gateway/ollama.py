@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from gateway.client import post_json
 from gateway.errors import LiveGenerationError
 from gateway.schemas import GenerationRequest, PatchCandidate
+from gateway.validation_errors import safe_validation_error_shape
 
 DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api"
 DEFAULT_CODELLAMA_MODEL = "codellama:7b-instruct"
@@ -158,9 +159,16 @@ def patch_candidate_from_model_text(text: str) -> PatchCandidate:
     try:
         return PatchCandidate.model_validate(raw)
     except ValidationError as exc:
+        # #258: `exc.errors()` unfiltered carries each failing field's actual value
+        # under "input" (and the model's raw response text is exactly the kind of
+        # thing that ends up in a failing field here). `details` is not logged or
+        # consumed anywhere today (confirmed at #258's fix time), but that is a
+        # property of today's callers, not a guarantee — apply the same #229
+        # discipline `api/sse.py::safe_to_schema` uses so this stays true if a future
+        # caller logs `LiveGenerationError.details`.
         raise LiveGenerationError(
             "Ollama CodeLlama response did not match PatchCandidate.",
-            details={"errors": exc.errors()},
+            details={"errors": safe_validation_error_shape(exc)},
         ) from exc
 
 

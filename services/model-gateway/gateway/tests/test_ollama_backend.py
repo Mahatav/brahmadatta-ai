@@ -164,3 +164,44 @@ def test_ollama_candidate_parser_accepts_json_inside_text() -> None:
 def test_ollama_candidate_parser_rejects_unstructured_text() -> None:
     with pytest.raises(LiveGenerationError, match="JSON patch candidate"):
         patch_candidate_from_model_text("I would probably edit parse.c.")
+
+
+def test_ollama_candidate_parser_schema_mismatch_details_never_carry_raw_secrets() -> None:
+    """#258: `PatchCandidate.model_validate` failing on a model response used to store
+    `exc.errors()` unfiltered in `LiveGenerationError.details` — including each failing
+    field's actual value (`errors()["input"]`) and, for a forbidden-extra-field
+    rejection, the extra field's own key name verbatim in `loc`. `details` is not
+    logged anywhere today, but the same #229 discipline `api/sse.py::safe_to_schema`
+    applies should hold here too, latent or not.
+
+    A secret-shaped model response is exactly the realistic trigger: CodeLlama
+    hallucinating or echoing something that looks like a credential into a field this
+    schema forbids.
+    """
+    secret_value = "sk-live-SUPER-SECRET-should-never-reach-details-abc123"
+    secret_key = "sk-live-SOME-SECRET-999"
+
+    with pytest.raises(LiveGenerationError) as excinfo:
+        patch_candidate_from_model_text(
+            json.dumps(
+                {
+                    "diff": "--- a/x.c\n+++ b/x.c\n",
+                    "rationale": "ok",
+                    "touched_files": [],
+                    # wrong type -> a real ValidationError entry whose "input" is the
+                    # secret-shaped value itself.
+                    "confidence": secret_value,
+                    # forbidden extra field whose *key name* is secret-shaped.
+                    secret_key: "y",
+                }
+            )
+        )
+
+    details_text = repr(excinfo.value.details)
+    assert secret_value not in details_text
+    assert secret_key not in details_text
+
+    # still diagnostically useful: which field, which kind of mismatch.
+    errors = excinfo.value.details["errors"]
+    assert any(e["loc"] == ("confidence",) for e in errors)
+    assert any("<redacted secret-shaped segment>" in e["loc"] for e in errors)

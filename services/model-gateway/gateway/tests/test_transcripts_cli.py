@@ -154,3 +154,37 @@ def test_list_marks_a_synthetic_fixture_as_what_it_is(
 def test_list_on_an_empty_store_says_so(store: TranscriptStore, capsys) -> None:
     assert main(["--root", str(store.root), "list"]) == EXIT_ABSENT
     assert "no transcripts" in capsys.readouterr().out
+
+
+def test_verify_never_prints_a_raw_validation_value_or_a_secret_shaped_loc_key(
+    store: TranscriptStore, capsys
+) -> None:
+    """#258: `verify` prints `TranscriptError`'s message straight to stdout
+    (`_cmd_verify`'s `except TranscriptError as exc: print(f"[UNUSABLE] {digest}\\n
+    {exc}")`) — an operator running this dev tool over a directory of transcripts
+    must never see a failing field's raw value or a secret-shaped forbidden-field key
+    name on their screen, even though this never touches a server log.
+    """
+    secret_value = "sk-live-SUPER-SECRET-should-never-print-to-stdout-abc123"
+    secret_key = "sk-live-SOME-SECRET-999"
+
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / ("d" * 64 + ".json")).write_text(
+        '{"envelope_version": "transcript/1", "capture_kind": "LIVE_GENERATION", '
+        '"captured_at": "2026-08-06T21:45:00Z", "request_fingerprint": "' + "a" * 64 + '", '
+        '"prompt_sha256": "' + "a" * 64 + '", "prompt_version": "patch-prompt/3", '
+        '"response_schema_version": "patch-candidate/1", "model_name": "x", '
+        '"model_revision": "", "model_artifact_sha256": "' + "b" * 64 + '", '
+        '"served_from": "", "response": {"diff": "ok", "rationale": "", '
+        '"touched_files": [], "confidence": "' + secret_value + '", '
+        '"' + secret_key + '": "y"}, "wall_time_ms": 0, '
+        '"output_tokens": null, "note": ""}',
+        encoding="utf-8",
+    )
+
+    assert main(["--root", str(store.root), "verify"]) == EXIT_UNUSABLE
+    out = capsys.readouterr().out
+    assert secret_value not in out
+    assert secret_key not in out
+    assert "[UNUSABLE]" in out
+    assert "confidence" in out

@@ -44,6 +44,7 @@ from pydantic import ValidationError
 from contracts.errors import TooManyConcurrentStreamsError
 from contracts.schemas.envelope import MissionEvent as MissionEventSchema
 from missions.models import Mission, MissionEvent
+from orchestrator.redaction import redact_loc
 
 logger = logging.getLogger("api.sse")
 
@@ -186,12 +187,23 @@ def safe_to_schema(row: MissionEvent) -> MissionEventSchema | None:
     False)`'s `"loc"`/`"type"` keys are the shape of the failure — which field, which
     kind of mismatch — with no value in them, which is what "no payload contents"
     was always supposed to mean.
+
+    #258: `loc` itself can still leak. A forbidden-extra-field failure's `loc` ends in
+    the extra field's own *key name* (`StrictSchema`'s `extra="forbid"`), and a payload
+    can make that key name secret-shaped (`{"sk-live-...": "y"}` → `loc=("payload",
+    "log", "sk-live-...")`) without needing a secret-shaped *value* at all — a narrower
+    channel than #229 closed (attacker-controlled key vs. value). `orchestrator.
+    redaction.redact_loc` — the same secret-keyword vocabulary `_SECRET_LINE_RE`
+    already uses for `GateResult.detail`/sanitizer-report redaction, applied to a bare
+    `loc` segment rather than a whole line — replaces just the secret-shaped segment(s),
+    keeping the rest of `loc` (which field, which position) as useful as before.
     """
     try:
         return to_schema(row)
     except ValidationError as exc:
         error_shape = [
-            {"loc": e["loc"], "type": e["type"]} for e in exc.errors(include_url=False)
+            {"loc": redact_loc(e["loc"]), "type": e["type"]}
+            for e in exc.errors(include_url=False)
         ]
         logger.error(
             "Skipping malformed MissionEvent id=%s mission_id=%s sequence=%s "

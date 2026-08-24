@@ -15285,3 +15285,114 @@ both compose files, implemented.
 assigning task, not security-sensitive on its own (no credential, network, or
 privilege change) — self-merged by devops-engineer after live verification above; see
 the PR for the explicit self-merge reasoning.
+## D-143 — #258: `loc`-segment secret-key redaction in `api/sse.py::safe_to_schema`, and extending the same whitelist discipline to `gateway/ollama.py`/`gateway/transcripts.py` · 2026-08-24 · `backend-developer` seat
+
+**Decision** — Two related, independent follow-ups from #229's fix (D-130/D-131, PR
+#252's cybersecurity review), both about a pydantic `ValidationError`'s `errors()`
+carrying more than a caller intends once it reaches a log line, an exception message,
+or a dev CLI's stdout.
+
+### 1. `loc`-segment secret-key redaction (`api/sse.py::safe_to_schema`)
+
+#229 stripped `input`/`msg`/`ctx` from the logged `ValidationError` — where a failing
+field's *value* lives — but left `loc` (the field-path tuple) logged verbatim. For a
+forbidden-extra-field rejection (`StrictSchema`'s `extra="forbid"`), `loc` ends in the
+extra field's own *key name*, and a payload can make that key secret-shaped
+(`{"sk-live-...": "y"}` → `loc=("payload", "log", "sk-live-...")`) without the
+*value* being secret-shaped at all — a narrower channel than #229 closed
+(attacker-controlled key vs. value).
+
+Added `orchestrator.redaction.looks_secret_shaped`/`redact_loc`: reuses the same
+secret-keyword vocabulary (`api[_-]?key|token|secret|password`, case-insensitive)
+`_SECRET_LINE_RE` already uses for `redact_sanitizer_report` (NOT `sanitize_detail`, which is a pure character-allowlist function that never references this regex -- corrected here per cybersecurity review of PR #265), factored
+out into `_SECRET_KEYWORD_RE` so `_SECRET_LINE_RE` itself is unchanged in behavior
+(same compiled pattern, single source). `redact_loc` replaces only a secret-shaped `loc`
+segment with a fixed placeholder (`REDACTED_LOC_SEGMENT`); every other segment — which
+field, which discriminated variant, an int list-index — passes through, since that is
+exactly the diagnostic detail #229's own fix was written to keep. `api/sse.py::
+safe_to_schema` now calls `redact_loc` on every error's `loc` before logging.
+
+### 2. Same discipline extended to `gateway/ollama.py` and `gateway/transcripts.py`
+
+`services/model-gateway/gateway/ollama.py::patch_candidate_from_model_text` stored
+`exc.errors()` unfiltered in `LiveGenerationError.details` (confirmed at fix time: never
+logged or read by any caller today — latent, not live). `gateway/transcripts.py::
+TranscriptStore._read`'s `ValidationError` branch embedded raw `str(exc)` — which
+carries `input_value=...` for every failing field — in a new `TranscriptError` message,
+which reaches `transcripts_cli.py`'s stdout (`list`/`verify`/`resolve`, an
+operator-facing dev tool over local transcript files, and `main`'s own top-level
+`except GatewayError as exc: print(f"error: {exc}")`).
+
+`services/model-gateway` is a deliberately separate dependency closure from
+`apps/control-api` (`tests/architecture/test_import_direction.py`;
+`orchestrator/redaction.py`'s own module docstring states this boundary for the
+structurally identical `gateway/context.py::_redact` case) — `orchestrator.redaction`
+could not be imported directly. Added `services/model-gateway/gateway/
+validation_errors.py`: mirrors `orchestrator.redaction`'s
+`looks_secret_shaped`/`redact_loc` shape and `gateway/context.py::_SECRET_LINE`'s
+vocabulary (documented as an intentional mirror, same convention as `redact_sanitizer_
+report`'s own relationship to `gateway/context.py::_redact`), exposing
+`safe_validation_error_shape(exc) -> list[{"loc": ..., "type": ...}]` with the same
+`input`/`msg`/`ctx`-stripped, secret-shaped-`loc`-segment-redacted shape. Both call
+sites now build their message/`details` from this helper instead of `exc.errors()`/
+`str(exc)`.
+
+`gateway/transcripts.py:221`'s adjacent `except (OSError, json.JSONDecodeError)`
+branch (also named in the originating issue by line number) was deliberately left
+unchanged: neither exception type carries a pydantic `errors()`/`loc`-shaped payload or
+an `input_value=...` rendering — `JSONDecodeError.__str__` reports a parse position
+("Expecting value: line 1 column 1 (char 0)"), never the document's content — so the
+#229/#258 whitelist discipline (built specifically for pydantic's error shape) does not
+apply there; flagged here rather than silently skipped.
+
+**Options considered** — (a) factor the secret-keyword vocabulary + `loc`-redaction
+helper once in `orchestrator/redaction.py` (control-api) and mirror it once in a new
+`gateway/validation_errors.py` (model-gateway), reusing each package's own existing
+detector rather than inventing a third shape (chosen). (b) Add a third shared package
+importable by both `apps/control-api` and `services/model-gateway` and put the helper
+there once. (c) Leave `loc` untouched in `api/sse.py` (accept the residual leak) and/or
+leave `ollama.py`/`transcripts.py` unfixed (accept the latent/dev-tool-only leak) as
+"low severity, non-blocking" per the issue's own P2 label.
+
+**Pros/cons** — (a): matches this repository's own existing convention exactly (the
+`redact_sanitizer_report`/`gateway/context.py::_redact` mirror is the precedent, with
+its own documented rationale for why a byte-for-byte shared import was rejected there);
+no new cross-package coupling; each package keeps testing its own copy independently.
+Costs a small, accepted duplication risk (the two vocabularies can drift) — mitigated
+the same way the existing precedent mitigates it: each file's docstring points at the
+other and says a reviewer touching one should check the other. (b): would remove the
+duplication, but is a real architecture decision (a new dependency-graph edge, or a new
+package neither `apps/control-api` nor `services/model-gateway` currently depends on)
+disproportionate to a P2, non-blocking follow-up fix — not this seat's call, and not
+this PR's scope. (c): leaves two real (if narrow/latent) channels open that the
+project's own #229 precedent and this issue's explicit instructions call for closing;
+the issue itself frames both as worth closing "for completeness" despite low severity.
+
+**Cost implications** — none; no new dependency, no new service, no runtime behavior
+change on any success path — only what a failure path logs/raises differs.
+
+**Security implications** — closes both channels: a secret-shaped forbidden-field *key*
+name no longer reaches `api/sse.py`'s log line (narrowing #229's residual gap to zero
+for this specific class); `LiveGenerationError.details` and `TranscriptError`'s message
+(the latter operator-visible via `transcripts_cli.py` stdout) can no longer carry a raw
+pydantic error value or a secret-shaped key, closing the latent path before any future
+caller starts logging/displaying either. `gateway/transcripts.py:221`'s
+non-pydantic branch is explicitly out of scope, reasoned rather than assumed.
+
+**Scalability implications** — none; pure string-processing on an already-in-hand error
+object, no new I/O.
+
+**Recommendation** — (a), implemented, with tests: `apps/control-api/orchestrator/
+tests/test_redact_loc.py` and `api/tests/test_event_stream.py::
+test_safe_to_schema_redacts_a_secret_shaped_forbidden_field_key_from_loc` (secret-shaped
+KEY, not #229's already-covered secret-shaped value); `services/model-gateway/gateway/
+tests/test_validation_errors.py`, `test_ollama_backend.py::
+test_ollama_candidate_parser_schema_mismatch_details_never_carry_raw_secrets`,
+`test_replay_mode.py::
+test_a_malformed_transcript_error_never_carries_a_raw_value_or_a_secret_shaped_key`, and
+`test_transcripts_cli.py::
+test_verify_never_prints_a_raw_validation_value_or_a_secret_shaped_loc_key` (CLI stdout,
+the actual operator-facing surface named in the issue).
+
+**Final approval authority** — CTO (technical). `cybersecurity` review required before
+merge (same data-handling/privacy class as #229/D-130/D-131) — not self-merged.
