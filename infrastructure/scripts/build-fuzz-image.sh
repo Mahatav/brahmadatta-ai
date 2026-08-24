@@ -60,6 +60,19 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# #193/SEC-52: state the storage-driver requirement up front, on every run, rather than
+# only in a comment an operator has to go find — the free (no-registry) digest path below
+# only works on a containerd-image-store daemon; a classic overlay2 graphdriver host (most
+# CI runner images as of this writing) needs FUZZ_IMAGE_REGISTRY set. This is a diagnostic
+# print, not a gate: it does not change which path is taken, just makes the eventual
+# fallback (or its absence) unsurprising in the log.
+image_store="$(docker info --format '{{.DriverStatus}}' 2>/dev/null | grep -o 'driver-type[^]]*' || true)"
+if [[ "${image_store}" == *io.containerd.snapshotter.v1* ]]; then
+  echo "docker image store: containerd snapshotter detected — a local build should resolve a usable digest with no registry push" >&2
+else
+  echo "docker image store: containerd snapshotter NOT detected (classic overlay2 graphdriver, or undetermined) — expect this script to need FUZZ_IMAGE_REGISTRY; see below" >&2
+fi
+
 echo "building ${LOCAL_TAG} from ${DOCKERFILE}" >&2
 docker build -f "${DOCKERFILE}" -t "${LOCAL_TAG}" "${BUILD_CONTEXT}" >&2
 

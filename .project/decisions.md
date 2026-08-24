@@ -15036,3 +15036,129 @@ stated scope.
 **Final approval authority** — `cybersecurity`, to concur with (or override) this
 accepted-risk call on a finding it filed; escalates to CTO only if `cybersecurity`
 disagrees with treating it as accepted-risk rather than a required fix.
+## D-141 — #194/SEC-53 (apt package pins) and #193/SEC-52 (registry-push fallback, re-verified not rebuilt) on `fuzz-toolchain.Dockerfile` · 2026-08-24 · `devops-engineer` seat
+
+**Decision** — Two related, independent findings from PR #192's cybersecurity review of
+D-072's fuzzing-toolchain image (renumbered SEC-44→SEC-52 for #193, SEC-45→SEC-53 for
+#194), both against `infrastructure/compose/images/fuzz-toolchain.Dockerfile`.
+
+### 1. #194/SEC-53 — apt package versions pinned
+
+Pinned every `apt-get install` package (`clang`, `clang-18`, `cmake`, `make`,
+`libclang-rt-18-dev`, `ca-certificates`) to the exact version `apt-cache policy` resolved
+against the pinned `ubuntu@sha256:...` base in this session, using `pkg=version` syntax
+plus Dockerfile `ARG`s per package so a future bump is a reviewable one-line diff — the
+same discipline every other pin in this repository already follows.
+
+**Options considered** — (a) `pkg=<exact-version>` directly in the Dockerfile (chosen).
+(b) A separate pinned-package lockfile read by a script at build time. (c) Pin only the
+`clang` metapackage named in the issue's own wording, leave `clang-18` (its actual
+dependency) floating.
+
+**Pros/cons** — (a): matches this repo's existing pin style, no new tooling, `apt-get`
+fails loudly (not silently) if an exact pin is ever unavailable. (b): more
+machine-checkable in principle, but a new mechanism with no precedent anywhere in this
+repository, disproportionate for six packages in one file. (c): rejected once checked —
+`apt-cache depends clang` shows `clang` depends on `clang-18 (>= 18~)` with no upper
+bound, and `clang`'s own package version (`1:18.0-59~exp2`) is unrelated to `clang-18`'s
+(`1:18.1.3-1ubuntu1`, confirmed via `apt-cache policy` in this session); pinning only the
+metapackage leaves the actual compiler binary free to float, defeating the finding's own
+point. `ca-certificates` was pinned too even though the issue names only the first four
+packages — it is apt-installed in the same `RUN` line, and leaving one package unpinned
+in an otherwise-pinned install list would be an inconsistency with no upside.
+
+**Cost implications** — none; same packages, same apt run, no build-time change.
+
+**Security implications** — closes the finding directly: a rebuild now installs
+byte-identical package versions until an `ARG` is deliberately bumped, and a mirror
+serving anything else (compromised or otherwise) fails the build instead of silently
+substituting it in.
+
+**Scalability implications** — none.
+
+**Recommendation** — (a), implemented.
+
+**Final approval authority** — CTO (technical).
+
+### 2. #193/SEC-52 — verified, not rebuilt: D-072's registry-push fallback already is the real fix
+
+**Finding, re-examined against what D-072 actually scaffolded** — #193 states the
+self-built image's digest is reproducible with no push only on a containerd-image-store
+host, and a classic-overlay2 host (most CI runner images) needs a registry push via
+`FUZZ_IMAGE_REGISTRY`, "already scaffolded per D-072." Re-reading D-072 §2 and
+`build-fuzz-image.sh` line by line in this session confirms that scaffolding is not a
+partial stub — it is a complete, working fallback: the script tries `docker inspect
+--format='{{index .RepoDigests 0}}'` on the local build first, and if that's empty,
+tags, pushes to `${FUZZ_IMAGE_REGISTRY}/${IMAGE_NAME}:local`, and resolves the digest
+from the post-push `RepoDigest`, erroring loudly (not silently) if `FUZZ_IMAGE_REGISTRY`
+is unset when needed. Also confirmed by grepping `.github/workflows/ci.yml` in this
+session: no CI job builds this image today, so #193's own stated trigger ("this will
+block any CI-automated rebuild... until a registry is in place") is a real but *future*
+gap, not a live break — nothing in CI currently attempts this path and fails.
+
+**What was actually missing** — not a new mechanism, but operator-facing clarity: the
+storage-driver requirement lived only in a comment block an operator would have to go
+find, not in the script's own output when it runs. Added a proactive diagnostic
+(`docker info --format '{{.DriverStatus}}'`, checked for `io.containerd.snapshotter.v1`)
+printed on every invocation, before the build starts, stating plainly which path this
+host is expected to need. Confirmed working in this session: on this containerd-backed
+host it printed "containerd snapshotter detected — a local build should resolve a usable
+digest with no registry push," which matched the outcome that followed.
+
+**Verification performed, and one piece that could not be completed this session** —
+Rebuilt the image for real twice (the unpinned baseline and the #194-pinned version,
+`docker build -f infrastructure/compose/images/fuzz-toolchain.Dockerfile`) and confirmed
+the free local-`RepoDigest` path still resolves a real, `docker run`-able
+`name@sha256:...` reference on this containerd-backed host — consistent with D-072's
+original finding, re-confirmed rather than assumed. `dpkg -l` inside the pinned image
+matches all six pinned versions exactly; `clang --version` / `cmake --version` still run.
+
+Attempted to independently exercise the `FUZZ_IMAGE_REGISTRY` push branch itself by
+starting a local `registry:3` container to push to (this host always takes the free
+path, so the script's own fallback branch is not naturally reachable here — the only way
+to test the push mechanism on this machine is to drive it directly). This is the one
+piece this session could not complete: the shared build host was saturated by concurrent
+sessions' own Docker Hub pulls — confirmed independently, a plain `docker pull
+alpine:3.19` also did not finish inside a 60s window on this same host, and `registry:3`
+did not finish pulling inside a bounded ~9-minute wait. **Flagged, not hidden**: the push
+branch's individual primitives (`docker tag`, `docker push`, `docker inspect` reading a
+`RepoDigest` back after a push) are standard, well-documented Docker CLI behavior with no
+repository-specific logic to get wrong, and D-072's own session already exercised this
+identical three-command sequence once before recording this same fallback — but this
+session did not obtain a fresh, independent re-confirmation of it. Left as an explicit
+open item for whoever next builds this image on an actual overlay2/CI host, where the
+free path is unavailable by construction and the fallback branch runs for real rather
+than merely getting re-inspected.
+
+**Options considered** — (a) proactive diagnostic print + honest
+verification-attempted/partial record (chosen). (b) Build a new CI job that exercises
+the fuzz-image build and push, giving continuous automated coverage of the fallback
+path. (c) Treat D-072 as fully sufficient as already written and change nothing.
+
+**Pros/cons** — (a): matches the smallest-real-fix framing this finding actually calls
+for, and is honest about the one real gap (fallback branch not independently
+re-exercised this session) instead of either overclaiming or overbuilding. (b): real
+value eventually — this is the CI-automation gap #193 actually names — but it requires a
+registry CI can reach, which is a real infrastructure/cost decision (which registry, who
+pays, credentials) out of scope for a P2 pin-clarity finding, and premature since no CI
+job builds this image at all yet. (c): leaves #193's actual operator-facing gap (no
+proactive statement of the storage-driver requirement) unaddressed.
+
+**Cost implications** — $0; no registry stood up, no new CI job added. A registry (even
+a self-hosted `registry:3`) becomes a real line item only once a CI-automated rebuild of
+this image is actually wired up — not yet, and not decided here.
+
+**Security implications** — none beyond D-072's own recorded tradeoff (a locally-only
+digest is not independently fetchable by a second host without a registry) — unchanged,
+restated rather than re-litigated.
+
+**Scalability implications** — none at this project's current scale; no CI-automated
+rebuild exists yet for a registry to unblock.
+
+**Recommendation** — (a), implemented; (b) deferred until a CI job that actually needs
+to rebuild this image exists, at which point the registry-push path gets exercised for
+real, by construction, rather than needing a synthetic test on a host that can't
+naturally reach that branch.
+
+**Final approval authority** — CTO (technical). `cybersecurity` review required before
+merge (Docker image supply-chain hardening) — not self-merged.

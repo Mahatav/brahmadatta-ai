@@ -104,6 +104,12 @@ FROM ubuntu@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c53
 ENV DEBIAN_FRONTEND=noninteractive
 
 # clang            LLVM C/C++ compiler driver (resolves to clang-18 on noble).
+# clang-18         The actual compiler package `clang` depends on (`clang-18 (>= 18~)`,
+#                  no upper bound) — pinned explicitly, not just transitively, because the
+#                  `clang` metapackage's OWN version (e.g. `1:18.0-59~exp2`) is unrelated
+#                  to `clang-18`'s version (e.g. `1:18.1.3-1ubuntu1`): pinning `clang=`
+#                  alone would still let `clang-18` float. Confirmed via `apt-cache
+#                  depends clang` in this session.
 # cmake            demo/repositories/pktcfg's build system (CMakeLists.txt, PKTCFG_FUZZ).
 # make             CMake's default generator on this image is "Unix Makefiles"; without
 #                  this package `cmake --build` fails at configure time with "CMake was
@@ -114,13 +120,45 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                  for every real invocation) — kept only so `apt-get install` itself and
 #                  any future TLS-touching tool inside the image resolve certs the same
 #                  way every other image in this repository does. Harmless, standard.
+#
+# Version pins — #194/SEC-53: without these, a rebuild months from now silently pulls
+# whatever noble/noble-updates/noble-security happen to carry that day (in the worst
+# case, a compromised package build) — the image would still build "successfully," the
+# drift would just be invisible. Every version below is the exact `apt-cache policy`
+# candidate resolved against this same pinned `ubuntu@sha256:...` base in this session,
+# confirmed by a real `docker build` of this file (see build-fuzz-image.sh's log / the
+# PR that introduced these pins for the actual command output).
+#
+# Architecture caveat, stated rather than assumed: this session resolved these versions
+# on an arm64 host (Debian/Ubuntu version strings are not architecture-qualified by
+# design — a source upload produces one version number shared by every architecture the
+# buildd builds for, so the same pins are EXPECTED to resolve on amd64 too, e.g. CI's
+# `ubuntu-24.04` runners), but an independent amd64 resolution could not be completed in
+# this session (attempted via `docker run --platform linux/amd64`; the shared build host
+# was saturated by concurrent sessions' own Docker builds and the command did not return
+# in a reasonable window — UNVERIFIED, not confirmed working). `apt-get install
+# pkg=version` fails loudly, at build time, if a pin is ever wrong for a given
+# architecture or a mirror stops carrying it — the same fail-closed behavior
+# `require_pinned` gives the image-digest side of this pipeline, so the failure mode of
+# an unverified amd64 pin is a loud CI break, not a silent divergence. Confirm on amd64
+# the first time this Dockerfile is built in CI or on an amd64 host; bumping a pin is a
+# deliberate, reviewable one-line diff, same discipline as every other digest pin in this
+# repository.
+ARG CLANG_META_VERSION=1:18.0-59~exp2
+ARG CLANG_VERSION=1:18.1.3-1ubuntu1
+ARG CMAKE_VERSION=3.28.3-1build7
+ARG MAKE_VERSION=4.3-4.1build2
+ARG LIBCLANG_RT_VERSION=1:18.1.3-1ubuntu1
+ARG CA_CERTIFICATES_VERSION=20260601~24.04.1
+
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends \
-      clang \
-      cmake \
-      make \
-      libclang-rt-18-dev \
-      ca-certificates \
+      clang=${CLANG_META_VERSION} \
+      clang-18=${CLANG_VERSION} \
+      cmake=${CMAKE_VERSION} \
+      make=${MAKE_VERSION} \
+      libclang-rt-18-dev=${LIBCLANG_RT_VERSION} \
+      ca-certificates=${CA_CERTIFICATES_VERSION} \
  && rm -rf /var/lib/apt/lists/*
 
 # Fixed uid/gid 10001, matching `ContainerJailPolicy`'s own default (`uid: int = 10001`,
