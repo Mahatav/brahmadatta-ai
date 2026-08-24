@@ -601,6 +601,29 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # #255: this service builds control-api.Dockerfile's `target: dev`, which as of this
+    # writing has NO baked-in HEALTHCHECK (only the `runtime` target does, at TCP 8000 —
+    # see that target's own HEALTHCHECK line and docker-compose.finale.yml's matching
+    # `worker`/`orchestrator` comment, where this bug actually manifests: "reuses the
+    # same image" there means `runtime`, which control-api's own uvicorn listens on but
+    # `run_worker`/`run_orchestrator` never do). Verified empirically: `docker inspect
+    # <the dev-target image> --format '{{json .Config.Healthcheck}}'` returns `null`.
+    # `disable: true` is therefore a no-op against today's `dev` target — added anyway,
+    # for two reasons: (1) parity with docker-compose.finale.yml's identical override, so
+    # the two files do not silently diverge on a property that is supposed to be the
+    # same story for the same service; (2) forward-safety — if `dev` ever gains its own
+    # HEALTHCHECK (e.g. for local-dev observability parity with `runtime`), this override
+    # already prevents the identical false-unhealthy regression from resurfacing here
+    # without anyone having to remember to add it then. See the `disable: true` vs.
+    # process-presence-check reasoning in docker-compose.finale.yml's `worker` comment —
+    # same tradeoff, same choice, just currently inert on this file's `dev` target.
+    # Crash-restart is `restart: unless-stopped` below regardless, independent of any
+    # healthcheck; nothing in this stack `depends_on: {condition: service_healthy}` a
+    # worker or orchestrator today (verified: grep across infrastructure/ and tests/ for
+    # any such dependency turned up none), so disabling costs nothing structurally either
+    # way.
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -681,6 +704,22 @@ services:
       db:
         condition: service_healthy
       # No `redis` dependency: see the environment block's comment above.
+    # #255: same fix and reasoning as `worker`'s own `healthcheck: disable: true` above,
+    # a few lines up in this same file — this service also builds `target: dev`, which
+    # has no baked-in HEALTHCHECK today (only `runtime` does — see
+    # docker-compose.finale.yml's matching `orchestrator` comment, where this bug
+    # actually manifests), so this override is currently a no-op, added for parity with
+    # the finale file and forward-safety against `dev` ever gaining its own
+    # HEALTHCHECK. A meaningful liveness signal DOES exist for this specific process —
+    # SEC-43's Postgres advisory lock (orchestrator/singleton_lock.py) is held for the
+    # process's entire life — but querying it from a HEALTHCHECK would mean spinning a
+    # second Django/psycopg process every interval just to read `pg_locks`, for a value
+    # Docker's own `.State.Status` (running/exited) already proxies just as well for a
+    # single-process container with no init/supervisor (PID 1 IS run_orchestrator). Not
+    # worth the added moving part for the marginal signal. See `worker`'s comment above
+    # for the fuller reasoning against a process-presence check too.
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
 networks:

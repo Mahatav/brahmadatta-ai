@@ -336,6 +336,27 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # #255: this service reuses control-api.Dockerfile's `runtime` image, whose
+    # baked-in HEALTHCHECK probes TCP 8000 — meaningful for control-api's own uvicorn
+    # listener, meaningless here: `command:` above overrides the image CMD with a Django
+    # management command (`run_worker`) that never listens on any port. Without this
+    # override the inherited probe always fails and `docker inspect`/`docker compose ps`
+    # permanently reports `unhealthy` on a worker that is running correctly — confirmed
+    # live during a real finale rehearsal (worker was actively claiming job kinds,
+    # RestartCount stayed 0, yet Health.Status read `unhealthy` throughout). See
+    # docker-compose.yml's identical `worker` comment for the full reasoning against a
+    # `pgrep`-style process-presence check (no additional signal over Docker's own
+    # `.State.Status` for a single-process, no-init container; worse than no
+    # healthcheck, since it would report "healthy" for a hung poll loop too).
+    # `disable: true` (Docker's `HEALTHCHECK NONE`, via Compose) is the honest choice —
+    # `docker compose ps`/`docker inspect` show no health status at all rather than a
+    # false "unhealthy". Crash-restart is `restart: unless-stopped` below, independent
+    # of this healthcheck; nothing in this stack `depends_on: {condition:
+    # service_healthy}` a worker or orchestrator today (verified: grep across
+    # infrastructure/ and tests/ turned up none), so disabling costs nothing
+    # structurally.
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   # Orchestrator — `manage.py run_orchestrator`, the tick loop that owns `Mission.state`.
@@ -383,6 +404,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # #255: same fix and reasoning as `worker`'s own `healthcheck: disable: true`
+    # above, and docker-compose.yml's identical `orchestrator` comment — this service
+    # reuses the same image and its baked-in TCP-8000 HEALTHCHECK, overrides the CMD
+    # with `run_orchestrator` (also never listens on a port), and inherited the same
+    # permanent false "unhealthy". SEC-43's Postgres advisory lock
+    # (orchestrator/singleton_lock.py) IS a meaningful liveness signal for this
+    # specific process, but querying it from a HEALTHCHECK would mean spinning a
+    # second Django/psycopg process every interval for a value Docker's own
+    # `.State.Status` already proxies just as well for a single-process, no-init
+    # container. Not worth the added moving part for the marginal signal.
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   model-host:

@@ -15162,3 +15162,126 @@ naturally reach that branch.
 
 **Final approval authority** — CTO (technical). `cybersecurity` review required before
 merge (Docker image supply-chain hardening) — not self-merged.
+
+## D-142 — #255: `worker`/`orchestrator` inherit control-api's TCP HEALTHCHECK, always report unhealthy · 2026-08-24 · `devops-engineer` seat
+
+**Decision** — Override `healthcheck: { disable: true }` on the `worker` and
+`orchestrator` services in both `infrastructure/compose/docker-compose.yml` and
+`infrastructure/compose/docker-compose.finale.yml`, rather than substituting a
+synthetic liveness probe.
+
+**Context** — `control-api.Dockerfile`'s `runtime` target bakes in `HEALTHCHECK
+--interval=15s --timeout=5s --start-period=30s --retries=3 CMD python -c "...
+socket.create_connection(('127.0.0.1',8000),3)..."`, meaningful for control-api's own
+uvicorn listener. `worker`/`orchestrator` build the identical image (`runtime` target
+in the finale compose file; `dev` target in the dev compose file) but override
+`command:` to a Django management command (`run_worker`/`run_orchestrator`) that never
+listens on any port — so the inherited probe always fails. Confirmed live during a
+real finale rehearsal (#255's own report): `worker` was actively claiming job kinds,
+`orchestrator`'s `RestartCount` stayed 0, yet `Health.Status` read `unhealthy`
+throughout.
+
+One correction to the issue's own framing, found while implementing: the `dev` target
+(used by `docker-compose.yml`) has **no** baked-in `HEALTHCHECK` at all — only
+`runtime` does (verified: `docker inspect <dev-target image>
+--format '{{json .Config.Healthcheck}}'` returns `null`; `--format
+'{{json .Config.Healthcheck}}'` on the `runtime`-target image returns the real probe).
+So this bug, as filed, is finale-profile-only — consistent with the issue's own note
+that it was "found live... the first time `worker` and `orchestrator` have actually
+run together under the finale profile." The `disable: true` override was still added
+to `docker-compose.yml`'s `worker`/`orchestrator` for parity with the finale file and
+forward-safety (if `dev` ever gains its own `HEALTHCHECK`, this override already
+prevents the identical regression there without anyone having to remember it), but it
+is currently inert on that file — documented as such in both services' own compose
+comments rather than overstated.
+
+**Options considered**
+1. `healthcheck: { disable: true }` (chosen) — Compose's spelling of Docker's
+   `HEALTHCHECK NONE`. `docker compose ps`/`docker inspect` show no health status at
+   all for these two services, rather than a false `unhealthy`.
+2. A process-presence check (`pgrep -f 'manage.py run_(worker|orchestrator)'` or
+   equivalent). Rejected: both containers are single-process, no-init/no-supervisor
+   (PID 1 IS the management command) — "is the process present" is exactly the signal
+   `docker inspect .State.Status` (running/exited) already gives for free. Worse, a
+   pgrep-based check would report "healthy" for a hung or deadlocked poll loop just as
+   readily as a working one, since the process is still technically present — false
+   confidence dressed up as a real liveness check, which is a worse failure mode than
+   no signal at all for something that could hide a real incident during a live
+   rehearsal.
+3. A real application-level liveness probe for `orchestrator` specifically, querying
+   SEC-43's Postgres advisory lock (`orchestrator/singleton_lock.py`, held for the
+   process's entire life) via `pg_locks`. Rejected as disproportionate: this would mean
+   spinning a second Django/psycopg process every 15s interval, for a value Docker's
+   own `.State.Status` already proxies just as well for this single-process container,
+   for a marginal signal (the lock being held tells you the process started
+   successfully and hasn't crashed — again, no more than `.State.Status` already says).
+   No equivalent lock or resource exists for `worker` at all, so this path would also
+   have left the two services on different, inconsistent mechanisms.
+4. Installing `procps` (for `pgrep`) into the shared `control-api.Dockerfile` image so
+   option 2 becomes available. Rejected independent of option 2's own rejection: this
+   is a security-hardened image (`cap_drop: ["ALL"]`, `read_only: true`,
+   `no-new-privileges:true` in both compose files) that control-api itself has no need
+   for `pgrep` — adding a package to a shared image purely to support a synthetic
+   healthcheck on two OTHER services widens every container built from this image's
+   installed-package surface for no functional gain.
+
+**Pros and cons of each** — covered inline under Options above.
+
+**Cost implications** — none. No new dependency, no new process, no additional compute.
+
+**Security implications** — none negative; if anything, avoids widening the shared
+image's installed-package surface (option 4, rejected). Verified no downstream
+mechanism relies on these two services reporting `healthy` to proceed: grepped
+`infrastructure/scripts/dev-up.sh`, `infrastructure/scripts/finale-up.sh`, and both
+compose files for any `depends_on: { condition: service_healthy }` naming `worker` or
+`orchestrator` — none exists today, and both scripts' own health-gated assertions
+target nginx's `/healthz` HTTP endpoint only, never a container `Health.Status`.
+Crash-restart remains `restart: unless-stopped` on both services, entirely independent
+of the healthcheck mechanism this change touches.
+
+**Scalability implications** — none.
+
+**Verification performed** — Live, against the real mechanism, not just `docker compose
+config`:
+- `docker compose -f docker-compose.yml --profile worker --profile model config` and
+  the finale file's equivalent both validate clean; rendered YAML confirms `worker`/
+  `orchestrator` resolve to `healthcheck: {disable: true}` and `control-api` is
+  untouched (no `healthcheck:` key — its image-inherited probe is unaffected).
+- Built `control-api.Dockerfile`'s `runtime` target directly (`docker build --target
+  runtime`, all five `additional_contexts` supplied) and confirmed via `docker inspect
+  --format '{{json .Config.Healthcheck}}'` that the TCP-8000 probe is baked in.
+- **Reproduced the bug directly**: ran that `runtime` image with a non-listening
+  command override (`docker run --entrypoint sh ... "while true; do sleep 1; done"`,
+  standing in for `run_worker`/`run_orchestrator`'s own non-listening loop) with no
+  healthcheck override. Polled every 10s for 100s: `health=starting` through the 30s
+  `start_period`, then `health=unhealthy` from t=+70s onward — reproducing #255's exact
+  symptom on a container that never crashed (`.State.Status` stayed `running`
+  throughout).
+- **Confirmed the fix against the identical scenario**: same image, same non-listening
+  command, run with `--no-healthcheck` (the `docker run` equivalent of Compose's
+  `disable: true`). Polled every 10s for 100s: `health=none` the entire time, `.State.
+  Status=running`, `RestartCount=0` throughout — never a false `unhealthy`.
+- **End-to-end through real `docker compose`**, not just `docker run`: built and
+  brought up the `worker` service from `docker-compose.finale.yml` itself (via
+  `CONTROL_API_WORKER_CMD` overriding the command to the same non-listening loop, to
+  isolate the Compose/Docker healthcheck mechanism this fix touches from the
+  Django/Postgres-TLS app-level wiring `run_worker` needs to fully boot, which is a
+  separate, out-of-scope concern). `docker compose ps` showed `Up About a minute` with
+  no health annotation at all; `docker inspect` confirmed `health=none`,
+  `RestartCount=0` across 100s spanning multiple would-be 15s probe intervals.
+- Separately brought up the real `worker`/`orchestrator` services end to end against
+  `docker-compose.yml` (dev, `target: dev`) with a live Postgres/Redis and applied
+  migrations: both ran genuinely (`orchestrator` logged acquiring SEC-43's singleton
+  advisory lock and ticking; `worker` logged polling and its claimed-kinds set) with
+  `Health=<none>`, `RestartCount=0` — consistent with the `dev`-target-has-no-baked-in-
+  HEALTHCHECK finding above.
+- All verification containers, networks, volumes, and images removed after each run;
+  confirmed no `fix255*`-named Docker resources remain.
+
+**Recommendation** — `healthcheck: { disable: true }` on `worker`/`orchestrator` in
+both compose files, implemented.
+
+**Final approval authority** — CTO (technical). Infra/observability-scoped per the
+assigning task, not security-sensitive on its own (no credential, network, or
+privilege change) — self-merged by devops-engineer after live verification above; see
+the PR for the explicit self-merge reasoning.
