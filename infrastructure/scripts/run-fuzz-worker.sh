@@ -11,11 +11,20 @@
 # mounting the host's Docker socket into it — so it structurally cannot run
 # `packages.sandbox.container.ContainerJail`, which every FUZZ/MINIMIZE job needs.
 # D-073's ruling: split the worker FLEET by JobKind, not by transport. This script
-# starts the second fleet member — `fuzz-worker` — as
+# starts the second fleet member — `fuzz-worker` — as, in effect,
 #
 #     python manage.py run_worker --kinds FUZZ,MINIMIZE
 #
-# directly on this host, exactly as `infrastructure/scripts/build-fuzz-image.sh` and
+# directly on this host — "in effect", because the `FUZZ,MINIMIZE` above is
+# illustrative, not literally what runs: this script derives its real `--kinds` value
+# from `orchestrator.queue.FUZZ_ONLY_KINDS` at invocation time (step 5 below, via
+# `manage.py print_fuzz_kinds`) instead of restating it as a second, hand-synced bash
+# literal that could silently drift out of sync (#203), and it flatly refuses a
+# caller-supplied `--kinds` on the command line (step 0 below, #199) — this is the one
+# entrypoint in the system whose kind set must never be anything else. Both guards
+# protect the same D-073 isolation property: this script pins `fuzz-worker`'s kind
+# set, and nothing — not a stale literal, not a caller flag — gets to quietly change
+# it. This is exactly as `infrastructure/scripts/build-fuzz-image.sh` and
 # CI's own `packages/sandbox`/`cpp-adapter` jobs already run bare-metal — this is not a
 # new execution shape for this repository. It is the ONLY process anywhere in this
 # system ever given container-runtime access, and it is deliberately given NO
@@ -41,6 +50,25 @@ PROFILE="${FUZZ_WORKER_PROFILE:-dev}"
 fail() { printf '\033[31mblocked:\033[0m %s\n' "$1" >&2; exit 1; }
 note() { printf '  %s\n' "$1"; }
 warn() { printf '  \033[33mwarning:\033[0m %s\n' "$1" >&2; }
+
+# --- 0. --kinds is not overridable here (#199) ---------------------------------------
+#
+# This script exists to pin fuzz-worker to exactly FUZZ_ONLY_KINDS (D-073; the actual
+# value is derived in step 5 below, not hardcoded here — see #203). `manage.py
+# run_worker`'s argparse is last-flag-wins (confirmed by direct test in #199), so a
+# caller-supplied `--kinds` passed through "$@" would silently override the one this
+# script sets, defeating the entire point of this dedicated, isolation-critical
+# entrypoint (D-073: the only process anywhere in this system given real Docker
+# access). Reject it outright — not silently drop it, not silently accept it — before
+# anything else runs, so this check's outcome does not depend on whether Docker or
+# Postgres happen to be reachable on this host.
+for arg in "$@"; do
+  case "${arg}" in
+    --kinds|--kinds=*)
+      fail "run-fuzz-worker.sh pins --kinds to FUZZ_ONLY_KINDS (D-073) and does not accept a caller-supplied --kinds (#199) -- got '${arg}'. This entrypoint exists precisely so fuzz-worker can never be started claiming a kind set other than FUZZ/MINIMIZE; remove --kinds from the arguments. Need a different kind set for some other purpose? Run 'python manage.py run_worker --kinds ...' directly -- not through this script."
+      ;;
+  esac
+done
 
 echo "== fuzz-worker preflight (profile: ${PROFILE})"
 
@@ -97,9 +125,22 @@ if [[ -n "${SMALL_MODEL_BASE_URL:-}" || -n "${TIER3_BASE_URL:-}" ]]; then
   warn "SMALL_MODEL_BASE_URL/TIER3_BASE_URL are set in this shell's environment. fuzz-worker never reads them (it has no model-gateway client — see tests/architecture/test_fuzz_worker_isolation.py) but their presence here is worth a second look before this runs on the finale host."
 fi
 
+# --- 5. Derive --kinds from FUZZ_ONLY_KINDS itself, at invocation time (#203) --------
+#
+# Not a bash string literal: `orchestrator.queue.FUZZ_ONLY_KINDS` is the single source
+# of truth (see that module's own docstring), and `manage.py print_fuzz_kinds` is the
+# one-line command that reads it back out fresh on every call — so this script cannot
+# drift from it the way a hardcoded "FUZZ,MINIMIZE" literal historically could (#203):
+# if `FUZZ_ONLY_KINDS` ever gains or loses a member, this line picks that up with no
+# edit here. See orchestrator/tests/test_fuzz_only_kinds_shell_drift.py and
+# missions/tests/test_print_fuzz_kinds_command.py for the regression tests.
+FUZZ_KINDS="$(cd "${CONTROL_API}" && "${PYTHON}" manage.py print_fuzz_kinds)"
+[[ -n "${FUZZ_KINDS}" ]] || fail "'python manage.py print_fuzz_kinds' printed nothing -- orchestrator.queue.FUZZ_ONLY_KINDS may be empty, or the command failed silently. Refusing to start fuzz-worker with no kind filter (that would mean 'claim everything', not 'claim nothing')."
+note "kinds (derived from orchestrator.queue.FUZZ_ONLY_KINDS): ${FUZZ_KINDS}"
+
 echo
 echo "== starting fuzz-worker"
-echo "    python manage.py run_worker --kinds FUZZ,MINIMIZE $*"
+echo "    python manage.py run_worker --kinds ${FUZZ_KINDS} $*"
 echo
 cd "${CONTROL_API}"
-exec "${PYTHON}" manage.py run_worker --kinds FUZZ,MINIMIZE "$@"
+exec "${PYTHON}" manage.py run_worker --kinds "${FUZZ_KINDS}" "$@"

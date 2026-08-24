@@ -14355,3 +14355,123 @@ established worktree-isolation convention rather than inventing a new one, and t
 real judgment call (worker's default flipping from dev's opt-in) is stated here with its
 reasoning rather than made silently. Flagged for a CTO/engineering-manager sanity pass
 on the default-inversion call specifically, post-merge, given the finale path's stakes.
+
+## D-134 — #199/#203: `run-fuzz-worker.sh` rejects a caller-supplied `--kinds` and
+derives its real `--kinds` from `orchestrator.queue.FUZZ_ONLY_KINDS` at invocation
+time, via a new `manage.py print_fuzz_kinds` command · 2026-08-24 · `devops-engineer`
+seat
+
+**Decision.** `infrastructure/scripts/run-fuzz-worker.sh` — the D-073 bare-metal
+entrypoint and the only process anywhere in this system given real Docker access —
+now (1) refuses to start if the caller passes `--kinds`/`--kinds=...` on its own
+command line, before any other preflight check runs, and (2) no longer hardcodes
+`--kinds FUZZ,MINIMIZE` as a bash literal; it computes the value at invocation time by
+calling a new `manage.py print_fuzz_kinds` command, which prints
+`orchestrator.queue.FUZZ_ONLY_KINDS` (the real Python source of truth) back out fresh
+on every call.
+
+**Context.** Two findings from the same PR #197 review pass (D-073 topology),
+reinforcing each other:
+
+- **#199 (SEC-55).** `manage.py run_worker`'s `--kinds` argparse is last-flag-wins
+  (confirmed by direct test). Because `run-fuzz-worker.sh` passed the caller's `"$@"`
+  through *after* its own hardcoded `--kinds FUZZ,MINIMIZE`, a caller-supplied
+  `--kinds` silently won, meaning an operator (or a copy-pasted command, or a stray
+  flag in a wrapper) could start fuzz-worker claiming a kind set other than
+  FUZZ/MINIMIZE with no error — defeating the entire point of this dedicated,
+  isolation-critical entrypoint. Severity: medium, an operator-error footgun, not
+  remotely exploitable — but this is D-073/D-036's isolation boundary, the one process
+  with real Docker access, so it gets treated as boundary-critical rather than a minor
+  polish item.
+- **#203 (QA-01).** The hardcoded `"FUZZ,MINIMIZE"` bash literal was a second,
+  independent copy of the same fact `orchestrator.queue.FUZZ_ONLY_KINDS` already holds.
+  `DEFAULT_WORKER_KINDS` (`frozenset(JobKind) - FUZZ_ONLY_KINDS`, used by the
+  containerized `worker` service) recomputes itself automatically whenever `JobKind`
+  grows, proven by `test_default_worker_kinds_is_every_other_kind_with_nothing_
+  forgotten` — the shell literal had no equivalent guarantee. Concrete failure mode: a
+  future `JobKind` needing `ContainerJail` gets added to `FUZZ_ONLY_KINDS` in
+  `queue.py`, but the shell literal isn't updated (nothing forces both edits
+  together) — the new kind is then claimed by **neither** fleet: no error, no `FAILED`
+  job, sits `QUEUED` forever.
+
+**Options considered.**
+1. **Reject/ignore the caller's `--kinds`, and derive the real value from
+   `FUZZ_ONLY_KINDS` via a new `manage.py print_fuzz_kinds` command (chosen).** Both
+   issues' own suggested fixes, applied together as one coherent change since they're
+   the same underlying fragility (this script's `--kinds` value not being trustworthy).
+   `print_fuzz_kinds` reads `queue.FUZZ_ONLY_KINDS` live inside `handle()` (not via
+   `from orchestrator.queue import FUZZ_ONLY_KINDS` at module import time, which would
+   bind a stale alias) — a fresh process invocation always reflects the current value,
+   with no bash-side literal left to drift.
+2. **Reject the caller's `--kinds`, but keep the bash literal for #203 as "the
+   regression test is the tripwire" (defer the derivation fix).** Rejected: half of a
+   fix that's explicitly one fragility per both issues' own text ("reinforce each
+   other... fix them together"); leaves the literal-drift risk live indefinitely with
+   no forcing function to ever land the second half.
+3. **Silently drop/strip a caller-supplied `--kinds` instead of rejecting with a hard
+   failure.** Rejected: an operator who typed `--kinds` clearly meant something by it;
+   silently discarding it is itself a silent-behavior-change footgun of the same shape
+   #199 is about. Reject-loud matches `manage.py run_worker`'s own `parse_kinds`
+   philosophy in this codebase ("an empty or unparseable value is a startup error,
+   never a silent fall-through").
+4. **Move the whole preflight/derivation logic into a Python management command
+   instead of bash, so there's one language throughout.** Rejected as out of scope for
+   this fix: the script's non-`--kinds` preflight (Docker reachability, `.env`
+   sourcing, model-gateway env warnings) is unrelated to either finding, and rewriting
+   it risks touching working, reviewed D-073 preflight logic no one asked to change.
+   `print_fuzz_kinds` is the minimal Python surface needed to fix #203 without that
+   rewrite.
+
+**Pros and cons.**
+- Chosen option: closes both findings with one mechanism, matches both issues'
+  suggested fixes exactly, adds a live-derivation guarantee equivalent in spirit to
+  `DEFAULT_WORKER_KINDS`'s own (frozenset subtraction, not a hand list). Cost: one
+  extra subprocess call (`manage.py print_fuzz_kinds`) on every fuzz-worker start —
+  negligible against a process that already shells out to `docker` and polls a
+  database in a loop.
+- Reject-loud (option 3's alternative) over silent-drop: slightly less convenient for
+  an operator who fat-fingered `--kinds` and expected it silently ignored, but that
+  convenience is exactly the failure mode #199 exists to close.
+
+**Cost implications.** None — no new infrastructure, no new dependency; one new
+one-line Django management command in an app that already exists.
+
+**Security implications.** Directly closes #199 (SEC-55): fuzz-worker can no longer be
+started claiming a kind set other than FUZZ/MINIMIZE via a caller-supplied flag, which
+is the whole point of keeping `ContainerJail`/Docker access scoped to exactly those two
+`JobKind`s (D-073, D-036). Also closes the #203 drift risk, which is a silent-stall
+availability concern rather than a confidentiality/integrity one, but sits on the same
+isolation-critical entrypoint. This entrypoint is boundary-critical (D-073/D-036: the
+only process anywhere in this system with real Docker access) — **cybersecurity review
+is required before merge, and this seat does not self-merge.**
+
+**Scalability implications.** None — no change to throughput, concurrency, or the
+worker fleet's claim semantics; only to how `--kinds` is computed and locked down.
+
+**Verification (this session).** `shellcheck` clean (one pre-existing SC1091 info
+notice, unrelated, present before this change). Ran the full script end-to-end against
+an in-memory sqlite Django test profile (no shared infrastructure touched): derivation
+resolved to `FUZZ,MINIMIZE` and reached the real `run_worker` claim loop
+(`worker ...: claiming kinds {FUZZ, MINIMIZE}`). Confirmed both `--kinds FUZZ` and
+`--kinds=BASELINE` are rejected before the Docker/Postgres preflight checks run.
+Confirmed the rewritten drift-tripwire test (`orchestrator/tests/
+test_fuzz_only_kinds_shell_drift.py`) actually fires: temporarily reintroduced the old
+`--kinds FUZZ,MINIMIZE` literal, watched `test_run_fuzz_worker_sh_does_not_hardcode_a_
+kinds_literal` fail with a clear message, then reverted and reconfirmed all tests
+green — same verification method QA used originally for #203's first regression test.
+Adversarial derivation proof: `missions/tests/test_print_fuzz_kinds_command.py`
+monkeypatches `orchestrator.queue.FUZZ_ONLY_KINDS` to add `JobKind.SANITIZER_BUILD`
+(not in it today) and confirms `print_fuzz_kinds`'s output tracks the change — proving
+it is a live read, not a coincidentally-matching second hardcoded value. Full
+`orchestrator/tests` + `missions/tests` suite run: one unrelated pre-existing failure
+(`test_patch_generate_executor.py::test_live_backend_built_by_this_module_gets_401_
+from_the_sidecar_without_the_fix`, a model-gateway sidecar auth test untouched by this
+change, confirmed to fail identically on `origin/main` before this branch's commit via
+`git stash`) — not caused by, and not fixed by, this change.
+
+**Recommendation.** Merge once `cybersecurity` clears the isolation-boundary review
+this D-073/D-036-critical script requires.
+
+**Final approval authority** — CTO (technical, isolation-boundary-critical
+infrastructure change); `cybersecurity` holds the review gate before merge per this
+role's own standing instruction not to self-merge D-073/D-036-critical work.
