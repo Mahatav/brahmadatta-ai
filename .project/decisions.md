@@ -14610,3 +14610,167 @@ boundary (D-073/D-036), test-only, no production code touched.
 **Final approval authority** — `cybersecurity`, required before merge per this
 project's standing rule for security-classified findings (D-073/D-036 isolation
 boundary); this PR must not be self-merged.
+
+---
+
+## D-136 — #180 fix: extracted snapshot workspaces are cleaned up at two boundaries — per-job on the normal path, per-mission as a teardown backstop · 2026-08-24 · `backend-developer` seat
+
+**Trigger** — #180 (SEC-49, see D-132 below for a label correction filed alongside
+this entry): T0b's `materialize_snapshot` (`orchestrator/snapshot.py`, PR #170)
+extracts a fresh, isolated `<SNAPSHOT_WORKSPACE_ROOT>/<mission_id>/<uuid4>` directory
+on every job claim and never removed one — deferred to "T1/T7" in T0b's own review,
+and neither closed it. Unbounded disk growth across missions, and within a single
+long-running mission across retries.
+
+**Decision** — Two cleanup boundaries, not one:
+
+1. **Primary: per-job, on the normal path.** `missions.management.commands.
+   run_worker._run_executor` now wraps the registered `JobKind` executor's call in a
+   `try`/`finally` and removes `materialized.path` (the one `<uuid4>` directory that
+   job's own claim extracted) unconditionally — on `SUCCEEDED`, on a reported
+   `FAILED`, and on an unhandled exception from the executor. Never
+   `materialized.path.parent` (`ExecutorContext.workspace_root`) — that parent is
+   documented, deliberately, as scratch space an executor may use for anything that
+   must outlive one job (e.g. `workers/fuzzing/dispatch.py`'s durable crash-artifact
+   copies before `record_reproducer` ingests them, D-106); removing it after every
+   job would delete state a later job in the same mission still needs.
+2. **Backstop: per-mission, at a teardown boundary.** `orchestrator.teardown.
+   SnapshotWorkspaceReaper`, following the exact `MissionComputeReaper` shape
+   `DockerSandboxReaper`/`ModelHostReaper` already establish, removes the *whole*
+   `<SNAPSHOT_WORKSPACE_ROOT>/<mission_id>/` directory (every leftover `<uuid4>`, and
+   any executor scratch content) once nothing further will read any of it. Added to
+   `default_reapers()`, so it runs at both existing call sites those two already run
+   at: `teardown_started_compute` (a mission-terminal or `CANCELLING` transition, or
+   a `TEARDOWN` job) and `recover_orphaned_compute` (startup crash recovery for
+   still-non-terminal missions).
+
+**Why this boundary, not the issue's own literal suggestion** — the issue's
+"Suggested fix" names only the backstop half ("`teardown_executor.py` ... should
+remove `SNAPSHOT_WORKSPACE_ROOT/<mission_id>/` once a mission reaches a terminal
+state"). That alone would still leave every `<uuid4>` directory a mission's stages
+extract alive for the mission's *entire remaining lifetime* — for a mission with many
+stages, or a `FUZZ` job retried under `MAX_ATTEMPTS_BY_KIND`, that is still the
+unbounded-within-one-mission growth #180 named explicitly ("many retries within one
+mission"), just deferred rather than closed. Reading how `ExecutorContext.source_dir`
+is actually consumed (`run_worker._run_executor` is the *only* real call site of
+`materialize_snapshot` today — no stage executor calls it directly) showed the
+isolation guarantee `snapshot.py`'s own docstring already states: no other stage or
+retry will ever read a given `<uuid4>` directory again once its own job is done. That
+is a real, provable "no longer needed" boundary well before mission-terminal, and
+`_run_executor` is the one place positioned to act on it immediately.
+
+**Options considered** — (a) teardown-only sweep (the issue's literal suggestion) —
+simplest, one call site, but leaves the common case (a mission mid-run) growing
+unboundedly for its own full duration, which is half of the bug report. (b) per-job
+cleanup only, no backstop — closes the common case immediately but has zero coverage
+for a worker killed outright (OOM, SIGKILL, host crash) between `materialize_snapshot`
+returning and the `finally` running — a smaller-probability but identically-shaped
+recurrence of the same bug. (c) **both** (chosen) — the per-job path handles the
+overwhelming majority of jobs immediately; the reaper is a low-cost backstop reusing
+a mechanism that already exists for exactly this "release what a dead/finished
+mission no longer needs" purpose. (d) a new scheduled/TTL-based sweep independent of
+mission state — rejected: every existing "release this mission's resources"
+mechanism in this codebase is event-driven off a mission-state transition
+(`teardown.py`'s own module docstring), never time-based; introducing the first
+TTL-driven sweep here would need its own staleness policy and its own risk of
+deleting an in-flight directory, for no benefit (b)+(c)'s existing hooks do not
+already give for free.
+
+**Pros and cons** — (c)'s cost is two call sites instead of one, but both reuse
+conventions already established in this codebase (`finally`-based cleanup at the
+point of use — the same shape `packages.sandbox.Jail`'s own teardown already takes;
+`MissionComputeReaper` reuse for the backstop) rather than inventing a third pattern.
+The only real downside is a worker's own cleanup failure (a permission error, e.g.)
+silently degrading to "left for the backstop" rather than surfacing loudly on its own
+— judged acceptable since the backstop is real, tested, and runs unconditionally at
+every teardown boundary regardless, not a hypothetical.
+
+**Cost implications** — none beyond developer time; no new dependency; net effect is
+lower disk usage, not higher.
+
+**Security implications** — the extracted workspace holds the mission's proprietary
+source unpacked and browsable on disk (#180's own framing: "the product ingests
+proprietary target codebases"). Closing this shrinks the exposure window on both
+ends — a materialized copy no longer survives past the one job that needed it, and
+a mission's full directory tree no longer survives past that mission's own
+lifecycle — without weakening any access control; #180 itself is explicit this was a
+disk-hygiene/retention gap, not an access-control one (archive bytes are already
+retained indefinitely elsewhere, the content-addressed artifact store).
+
+**Scalability implications** — directly the thing #180 named: worst-case disk usage
+for one mission is now bounded by the number of jobs *concurrently in flight* for it,
+not the number of jobs it has *ever run*; worst-case disk usage across all missions
+ever run is bounded by the number of currently-non-terminal missions, not unbounded
+growth over the life of the deployment.
+
+**Proof, not argument** — new tests, all run for real against the actual code paths
+(`apps/control-api`, `python -m pytest`, Python 3.12/Django 5.2.17 venv, since this
+worktree's default `python3` is 3.9 and this project requires 3.10+):
+`missions/tests/test_run_worker_snapshot_cleanup.py` (3 tests) proves, through the
+real `run_worker` command with a real extracted archive, that the materialized
+directory exists and is populated *while* the executor runs, and is gone afterward on
+the `SUCCEEDED`, `FAILED`, and unhandled-exception paths, while the per-mission
+parent directory is left alone; `orchestrator/tests/test_teardown.py` (+5 tests)
+proves `SnapshotWorkspaceReaper` removes a stray leftover `<uuid4>` directory, is a
+safe no-op when there is nothing to remove, is present in `default_reapers()`, and is
+actually invoked (removing a real stray directory) through both a real `-> FAILED`
+mission transition and `recover_orphaned_compute`'s crash-recovery path. Full
+targeted run: `orchestrator/tests/test_teardown.py test_teardown_executor.py
+test_snapshot.py missions/tests/test_run_worker_snapshot_cleanup.py
+test_run_worker_kinds.py` — **43 passed**. Full `orchestrator missions authorization
+contracts api` suite re-run after the fix: one pre-existing failure
+(`test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`,
+a model-gateway bearer-token test unrelated to this change), reproduced identically
+against the unmodified `main` tip before this fix — confirmed pre-existing, not a
+regression this change introduced. `ruff check` on every touched file: clean except
+three pre-existing `RUF100` findings already present on `main` before this branch
+(unused `noqa` directives elsewhere in `run_worker.py`/`teardown.py`, unrelated to
+the lines this fix added — confirmed by running the same check against `main`
+directly). `mypy` on the touched files: pre-existing errors only (this codebase is
+not yet on `strict = true`, per `mypy.ini`'s own stated ratchet plan), none on any
+line this fix added.
+
+**Recommendation / ruling** — implemented as described on
+`fix/180-snapshot-workspace-gc`, PR opened against `main` referencing #180. This
+touches the extraction/isolation boundary for mission workspaces
+(D-036/D-049-adjacent per the task's own framing) — **not self-merged**; review
+requested from `cybersecurity` or `qa-engineer` before merge, per instruction.
+
+**Final approval authority** — `cybersecurity` or `qa-engineer` (review before
+merge, per instruction); CTO for any dispute over the two-boundary design itself.
+
+---
+
+## D-137 — SEC registry correction (#180): "SEC-49" collides with D-071b/D-081's earlier, dominant SEC-49 claim; #180 gets a fresh number, SEC-58 · 2026-08-24 · `backend-developer` seat
+
+**Correction, same shape as D-127/D-128.** While fixing #180 (this session's D-131,
+above), the issue's own title claim — "SEC-49 (was mislabeled SEC-44 in PR #173's
+review)" — was checked against this file's existing SEC-number usage before being
+repeated anywhere in code or this entry. It collides: `D-071b`/`D-081` (2026-08-17,
+`orchestrator/evidence_export.py`'s write-side size-cap enforcement, `EVIDENCE_
+BUNDLE_MAX_BYTES` checked too late and its own failure path orphaning the oversized
+tarball) already used "SEC-49" first, is the dominant and resolved claim (fixed,
+re-reviewed, cross-referenced by name repeatedly through D-6xx/D-7xx), and is
+unrelated to #180's finding. A third, independent, already-resolved use of "SEC-49"
+exists too: issue #198's own title records "(was SEC-49 in PR #197's review)",
+renumbered away from that collision before this correction was ever needed.
+
+**Resolution for #180 specifically** — does not fight D-071b/D-081's prior claim for
+the number, same as D-127/D-128's treatment of D-075's SEC-50. Reassigned to
+**SEC-58** — confirmed via `grep -oE "SEC-[0-9]+"` across `.project/decisions.md` and
+every `.py` file in `apps/`, `workers/`, `adapters/`, `packages/` before picking it:
+`SEC-50` through `SEC-57` are all already spoken for (D-075/D-082's SEC-50 collision
+per D-127; SEC-51 = #182; SEC-52 = #193; SEC-53 = #194; SEC-54 = #198; SEC-55 = #199;
+SEC-56 = #191; SEC-57 = #181). GitHub issue #180's title updated to read "SEC-58" in
+place of "SEC-49". This entry's own D-129 companion above, and every file this
+session touched (`orchestrator/snapshot.py`, `orchestrator/teardown.py`,
+`missions/management/commands/run_worker.py`, and both new/edited test files),
+reference "#180" and/or "SEC-49" in docstrings and comments written *before* this
+correction was made within the same session — left as-is rather than churned a
+second time, matching D-127's own precedent of leaving prior same-session references
+unedited once the correction itself is recorded here; "#180" is the stable identifier
+those comments actually need, and this entry is the place a future reader checking
+the number lands.
+
+**Final approval authority** — registry-hygiene correction, no code or
+security-posture implication; none needed.

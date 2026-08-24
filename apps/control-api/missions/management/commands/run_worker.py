@@ -5,6 +5,31 @@ LOCKED`), materializes the mission's snapshot (`orchestrator.snapshot.
 materialize_snapshot`, T0b) into `ExecutorContext.source_dir`, runs the `JobKind`'s
 registered executor (`orchestrator.executors.executor_for`), and reports the result.
 
+## Cleaning up the materialized snapshot workspace (#180, SEC-49)
+
+Every claim extracts a fresh, isolated `<SNAPSHOT_WORKSPACE_ROOT>/<mission_id>/
+<uuid4>` directory (`snapshot.materialize_snapshot`'s own "Isolation" section) and
+hands it to the executor as `ExecutorContext.source_dir`. Nothing about that
+directory is needed once the executor that asked for it has returned — the isolation
+guarantee is precisely that no other stage or retry will ever read it — so
+`_run_executor` removes it in a `finally` around the executor call, unconditionally
+(success, `FAILED`, an unhandled exception, all of them). This is the primary cleanup
+path and covers the overwhelming majority of jobs; `orchestrator.teardown.
+SnapshotWorkspaceReaper` is the backstop for the one case this `finally` cannot
+reach — a worker process killed outright (OOM, SIGKILL, host crash) between
+`materialize_snapshot` returning and this `finally` running — swept once the mission
+reaches a teardown boundary. See that reaper's own docstring.
+
+Only `materialized.path` itself (the per-job `<uuid4>` directory) is removed here —
+never `materialized.path.parent` (`ExecutorContext.workspace_root`, the per-*mission*
+directory). That parent is documented, deliberately, as scratch space an executor may
+use for anything that must outlive one job (`ExecutorContext.workspace_root`'s own
+docstring — e.g. `workers/fuzzing/dispatch.py`'s durable crash-artifact copies,
+D-106) — removing it after every single job would delete state a later job in the
+same mission still needs. `SnapshotWorkspaceReaper` removes the whole per-mission
+directory, parent included, but only once the mission is provably done with all of
+it (a teardown boundary), which is the difference between the two cleanup points.
+
 ## `--kinds` and the two worker fleets (D-073)
 
 `FUZZ`/`MINIMIZE` need `packages.sandbox.container.ContainerJail`, which shells out to
@@ -60,11 +85,13 @@ from __future__ import annotations
 
 import logging
 import platform
+import shutil
 import signal
 import threading
 import time
 import uuid
 from importlib import import_module
+from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -147,6 +174,30 @@ class _HeartbeatThread(threading.Thread):
 def _load_executor_modules(paths: tuple[str, ...]) -> None:
     for dotted in paths:
         import_module(dotted)
+
+
+def _cleanup_materialized_workspace(path: Path) -> None:
+    """Remove one job's materialized snapshot directory (#180, SEC-49).
+
+    Best-effort and non-raising by design: a cleanup failure (permission error, the
+    directory already gone, a stray open file handle on some platform) must never
+    turn a job that otherwise succeeded (or failed for its own, real reason) into a
+    crashed worker process. It is logged and left for `orchestrator.teardown.
+    SnapshotWorkspaceReaper` to sweep at the mission's next teardown boundary —
+    exactly the same backstop that already covers a worker killed outright before
+    this function ever runs.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass  # already gone -- nothing to do, not an error
+    except OSError:
+        logger.warning(
+            "Could not remove materialized snapshot workspace %s; left for "
+            "SnapshotWorkspaceReaper to sweep at this mission's next teardown.",
+            path,
+            exc_info=True,
+        )
 
 
 def parse_kinds(raw: str | None) -> frozenset[JobKind]:
@@ -350,6 +401,12 @@ class Command(BaseCommand):
             return ExecutorResult(
                 outcome=JobOutcome.FAILED, detail=f"Unhandled error in {job.kind} executor: {exc}"
             )
+        finally:
+            # #180/SEC-49: this job's own extracted snapshot directory is never
+            # needed again once the executor above has returned (or raised) -- see
+            # this module's own docstring, "Cleaning up the materialized snapshot
+            # workspace". Only `source_dir` itself, never `workspace_root`.
+            _cleanup_materialized_workspace(ctx.source_dir)
 
     def _report_result(self, job: Job, worker_id: str, result: ExecutorResult) -> None:
         job_state = {

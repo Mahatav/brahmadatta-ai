@@ -137,6 +137,100 @@ def test_terminal_states_are_teardown_boundaries():
     assert transitions._requires_teardown(MissionState.BASELINE) is False
 
 
+# --------------------------------------------------------------------------------
+# SnapshotWorkspaceReaper (#180, SEC-49): the backstop for a worker killed outright
+# before run_worker._run_executor's own `finally` could remove its own directory.
+# --------------------------------------------------------------------------------
+
+
+def test_snapshot_workspace_reaper_removes_a_stray_extraction_directory(tmp_path, mission, settings):
+    """Simulates the exact orphan #180 named: a worker process killed (OOM, SIGKILL,
+    host crash) between `materialize_snapshot` returning and `run_worker`'s own
+    cleanup running, leaving a `<uuid4>` directory nobody ever removed."""
+    workspace_root = tmp_path / "workspaces"
+    settings.SNAPSHOT_WORKSPACE_ROOT = str(workspace_root)
+    mission_root = workspace_root / str(mission.id)
+    stray = mission_root / "deadbeefdeadbeefdeadbeefdeadbeef"
+    stray.mkdir(parents=True)
+    (stray / "src.c").write_text("int x;\n")
+
+    outcomes = teardown.SnapshotWorkspaceReaper().teardown_mission(mission.id)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].resource_kind == "snapshot-workspace"
+    assert outcomes[0].released is True
+    assert not mission_root.exists()
+
+
+def test_snapshot_workspace_reaper_is_a_safe_no_op_when_nothing_is_there(tmp_path, mission, settings):
+    settings.SNAPSHOT_WORKSPACE_ROOT = str(tmp_path / "workspaces")
+    assert teardown.SnapshotWorkspaceReaper().teardown_mission(mission.id) == ()
+
+
+def test_default_reapers_includes_the_snapshot_workspace_reaper():
+    assert any(
+        isinstance(reaper, teardown.SnapshotWorkspaceReaper)
+        for reaper in teardown.default_reapers()
+    )
+
+
+def test_terminal_transition_sweeps_a_stray_snapshot_workspace(monkeypatch, tmp_path, mission, settings):
+    """End to end, through the real teardown path a `-> FAILED` transition already
+    triggers (`transitions._requires_teardown`) -- not the isolated reaper unit test
+    above."""
+    workspace_root = tmp_path / "workspaces"
+    settings.SNAPSHOT_WORKSPACE_ROOT = str(workspace_root)
+    mission_root = workspace_root / str(mission.id)
+    stray = mission_root / "leftover-uuid"
+    stray.mkdir(parents=True)
+    (stray / "src.c").write_text("int x;\n")
+
+    monkeypatch.setattr(teardown, "default_reapers", lambda: (teardown.SnapshotWorkspaceReaper(),))
+
+    walk_to(mission, MissionState.BASELINE)
+    transitions.transition(
+        mission.id, MissionState.FAILED, trace_id=TRACE, reason="stage failed", now=NOW
+    )
+
+    assert not mission_root.exists()
+    assert MissionEvent.objects.filter(
+        mission=mission,
+        type=EventType.TEARDOWN_CONFIRMED,
+        payload__resource_kind="snapshot-workspace",
+        payload__released=True,
+    ).exists()
+
+
+def test_crash_recovery_sweeps_a_stray_snapshot_workspace_for_an_active_mission(tmp_path, settings):
+    """`recover_orphaned_compute` (startup crash recovery) applies the same reaper
+    set to every non-terminal mission -- the same assumption `DockerSandboxReaper`
+    already relies on there (nothing legitimate is still using this mission's
+    resources once the orchestrator is recovering from a crash)."""
+    workspace_root = tmp_path / "workspaces"
+    settings.SNAPSHOT_WORKSPACE_ROOT = str(workspace_root)
+    active = Mission.objects.create(
+        name="active-with-orphan",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    mission_root = workspace_root / str(active.id)
+    stray = mission_root / "leftover-uuid"
+    stray.mkdir(parents=True)
+    (stray / "src.c").write_text("int x;\n")
+
+    outcomes = teardown.recover_orphaned_compute(
+        trace_id=TRACE,
+        reapers=[teardown.SnapshotWorkspaceReaper()],
+        now=NOW,
+    )
+
+    assert not mission_root.exists()
+    assert len(outcomes) == 1
+    assert outcomes[0].resource_kind == "snapshot-workspace"
+    assert outcomes[0].released is True
+
+
 def test_crash_recovery_reaps_only_non_terminal_missions():
     active = Mission.objects.create(
         name="active",

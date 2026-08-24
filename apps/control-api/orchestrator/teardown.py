@@ -86,6 +86,68 @@ class DockerSandboxReaper:
         )
 
 
+class SnapshotWorkspaceReaper:
+    """Remove this mission's extracted-snapshot workspace directory, whole (#180,
+    SEC-49).
+
+    The primary cleanup path lives elsewhere: `run_worker._run_executor` removes
+    each `<SNAPSHOT_WORKSPACE_ROOT>/<mission_id>/<uuid4>` directory itself, in a
+    `finally`, the moment the executor that requested it (`orchestrator.snapshot.
+    materialize_snapshot`) returns. This reaper is the backstop for what that
+    `finally` cannot reach — a worker process killed outright (OOM, SIGKILL, host
+    crash) between `materialize_snapshot` returning and that `finally` running,
+    which leaves an orphaned `<uuid4>` directory with no code left running that
+    still intends to clean it up.
+
+    Reused here rather than duplicated: this class follows the same
+    `MissionComputeReaper` shape as `DockerSandboxReaper`/`ModelHostReaper` above,
+    so it participates in the same two call sites those do —
+    `teardown_started_compute` (a mission-terminal or `CANCELLING` transition, or a
+    `TEARDOWN` job) and `recover_orphaned_compute` (startup crash recovery). Both are
+    already the established convention this project uses for "nothing legitimate can
+    still need this mission's resources" — `DockerSandboxReaper` already tears down
+    *every* sandbox container tagged for a mission on that same assumption, not just
+    ones it can prove are orphaned. A workspace directory is no more likely to be in
+    active use at either of those two points than a sandbox container already is.
+
+    Removes the **whole** per-mission directory (`<uuid4>` extraction directories
+    the primary path missed, *and* `ExecutorContext.workspace_root`'s own scratch
+    content — e.g. `workers/fuzzing/dispatch.py`'s durable crash-artifact copies,
+    D-106) rather than hunting for individual stray `<uuid4>` directories: unlike
+    `run_worker`'s per-job cleanup, this only ever runs once the mission has reached
+    a point where nothing further will read *any* of it, so there is no narrower
+    "safe to remove" boundary to respect here the way there is mid-mission.
+    """
+
+    resource_kind = "snapshot-workspace"
+
+    def teardown_mission(self, mission_id: UUID) -> Sequence[TeardownOutcome]:
+        from orchestrator import snapshot as snapshot_module
+
+        mission_root = snapshot_module.default_workspace_root() / str(mission_id)
+        if not mission_root.exists():
+            return ()
+        try:
+            shutil.rmtree(mission_root)
+        except OSError as exc:
+            return (
+                TeardownOutcome(
+                    resource_kind=self.resource_kind,
+                    resource_id=str(mission_root),
+                    released=False,
+                    detail=f"{type(exc).__name__}: {exc}",
+                ),
+            )
+        return (
+            TeardownOutcome(
+                resource_kind=self.resource_kind,
+                resource_id=str(mission_root),
+                released=True,
+                detail="extracted snapshot workspace directory removed",
+            ),
+        )
+
+
 class ModelHostReaper:
     """Stop a mission-scoped model-host lease if PATCH started one."""
 
@@ -110,7 +172,11 @@ class ModelHostReaper:
 
 def default_reapers() -> tuple[MissionComputeReaper, ...]:
     runtime = getattr(settings, "SANDBOX_POLICY", {}).get("runtime", "docker")
-    return (DockerSandboxReaper(runtime=runtime), ModelHostReaper())
+    return (
+        DockerSandboxReaper(runtime=runtime),
+        ModelHostReaper(),
+        SnapshotWorkspaceReaper(),
+    )
 
 
 def teardown_started_compute(
