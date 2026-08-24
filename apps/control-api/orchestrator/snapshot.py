@@ -46,6 +46,18 @@ neither can observe or corrupt what the other wrote. `authorization.archive.
 extract_archive` itself already refuses to extract into a directory that exists, which
 is the second, independent enforcement of the same property at the one function that
 actually writes to disk.
+
+## Cleanup (#180, SEC-49)
+
+This module only ever creates directories under `workspace_root` — it never removes
+one, and callers must not assume it will. Two other places own that:
+`missions.management.commands.run_worker`'s `_run_executor` removes the one directory
+this function just returned, in a `finally`, the moment the caller's executor is done
+with it (the normal path, for every job); `orchestrator.teardown.
+SnapshotWorkspaceReaper` removes a mission's entire directory tree here, backstop-style,
+once that mission reaches a teardown boundary (a worker killed outright before the
+first path could run, or simply "this mission is done and nothing here is needed
+again"). See either one's own docstring for why the boundary sits where it does.
 """
 
 from __future__ import annotations
