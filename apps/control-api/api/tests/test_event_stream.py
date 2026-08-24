@@ -616,6 +616,66 @@ def test_safe_to_schema_logs_row_metadata_but_never_the_payload_value(caplog):
     assert row.trace_id in log_text
 
 
+@pytest.mark.django_db
+def test_safe_to_schema_redacts_a_secret_shaped_forbidden_field_key_from_loc(caplog):
+    """#258: #229 stripped `input`/`msg`/`ctx` from the logged error, but a payload
+    where the *forbidden extra field's key name itself* is secret-shaped still leaked
+    that key name through `loc`, which #229's fix logs verbatim
+    (`loc=('payload', 'log', 'sk-live-...')`). Narrower channel than #229's own test
+    above: an attacker-controlled *key*, not just a secret-shaped *value*.
+
+    Confirms the secret-shaped key never reaches the log output, while the
+    non-secret-shaped `loc` segments (which field, which discriminated variant) and
+    the error `type` still do — the fix must redact the one unsafe segment, not blind
+    the whole diagnostic.
+    """
+    import logging
+
+    from api import sse
+
+    secret_key = "sk-live-SOME-SECRET-999"
+
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    row = MissionEvent.objects.create(
+        mission=mission,
+        sequence=9,
+        timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        type=EventType.LOG.value,
+        stage=MissionStage.BASELINE.value,
+        state=MissionState.BASELINE.value,
+        status=EventStatus.RUNNING.value,
+        severity=Severity.INFO.value,
+        message="forbidden field key is itself secret-shaped",
+        payload={
+            "kind": "log",
+            "text": "safe, sanitized line",
+            secret_key: "y",
+        },
+        evidence_refs=[],
+        metrics={},
+        trace_id=TRACE,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="api.sse"):
+        result = sse.safe_to_schema(row)
+
+    assert result is None
+
+    log_text = caplog.text
+    assert secret_key not in log_text
+
+    # #258's fix must redact, not blind: the non-secret-shaped loc segments and the
+    # error type are still useful diagnostic detail and must still reach the log.
+    assert "'payload'" in log_text
+    assert "'log'" in log_text
+    assert "extra_forbidden" in log_text
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_sse_stream_skips_one_malformed_row_and_keeps_serving_the_rest():
     """Defense in depth (D-116 recommendation (b)/(c)): a single malformed row must

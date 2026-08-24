@@ -103,6 +103,48 @@ def test_replay_goes_through_the_same_validation(
         build_gateway(replay_settings).generate(request_)
 
 
+def test_a_malformed_transcript_error_never_carries_a_raw_value_or_a_secret_shaped_key(
+    store: TranscriptStore, replay_settings: GatewaySettings, request_: GenerationRequest
+) -> None:
+    """#258: `TranscriptStore._read`'s `ValidationError` branch used to embed
+    `str(exc)` verbatim in the raised `TranscriptError` message — which carries every
+    failing field's actual value (pydantic's own `input_value=...` rendering) and,
+    for a forbidden-extra-field rejection, the extra field's own key name. That
+    message reaches `transcripts_cli.py`'s stdout (an operator-facing dev tool).
+
+    Written straight to the file, same as `test_replay_goes_through_the_same_
+    validation` above, so the store's own writer cannot launder it: a secret-shaped
+    `confidence` value (wrong type — triggers a real `ValidationError` whose `input`
+    is that value) and a forbidden extra field whose *key name* is secret-shaped.
+    """
+    secret_value = "sk-live-SUPER-SECRET-should-never-reach-an-exception-message-abc123"
+    secret_key = "sk-live-SOME-SECRET-999"
+
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / ("c" * 64 + ".json")).write_text(
+        '{"envelope_version": "transcript/1", "capture_kind": "LIVE_GENERATION", '
+        '"captured_at": "2026-08-06T21:45:00Z", "request_fingerprint": "' + "a" * 64 + '", '
+        '"prompt_sha256": "' + "a" * 64 + '", "prompt_version": "patch-prompt/3", '
+        '"response_schema_version": "patch-candidate/1", "model_name": "x", '
+        '"model_revision": "", "model_artifact_sha256": "' + "b" * 64 + '", '
+        '"served_from": "", "response": {"diff": "ok", "rationale": "", '
+        '"touched_files": [], "confidence": "' + secret_value + '", '
+        '"' + secret_key + '": "y"}, "wall_time_ms": 0, '
+        '"output_tokens": null, "note": ""}',
+        encoding="utf-8",
+    )
+    with pytest.raises(TranscriptError) as excinfo:
+        build_gateway(replay_settings).generate(request_)
+
+    message = str(excinfo.value)
+    assert secret_value not in message
+    assert secret_key not in message
+
+    # still diagnostically useful: which field, which kind of mismatch.
+    assert "confidence" in message
+    assert "<redacted secret-shaped segment>" in message
+
+
 # --------------------------------------------------------------------------------------
 # Storage: everything issue #82 names, by name
 # --------------------------------------------------------------------------------------

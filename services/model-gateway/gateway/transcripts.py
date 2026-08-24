@@ -48,6 +48,7 @@ from gateway.schemas import (
     canonical_bytes,
     sha256_of,
 )
+from gateway.validation_errors import safe_validation_error_shape
 
 __all__ = [
     "TRANSCRIPT_ENVELOPE_VERSION",
@@ -222,7 +223,16 @@ class TranscriptStore:
         try:
             transcript = Transcript.model_validate(raw)
         except ValidationError as exc:
-            raise TranscriptError(f"{path.name} is not a valid transcript: {exc}") from exc
+            # #258: `str(exc)` embeds every failing field's actual value
+            # (`input_value=...`), and this message reaches `transcripts_cli.py`'s
+            # stdout — an operator-facing dev tool over local files, but the same
+            # "malformed input, do not trust it for a rendered message" reasoning
+            # #229 applied to `api/sse.py::safe_to_schema` applies here too. Reduced
+            # to the same `loc`/`type`-only, secret-shaped-key-redacted shape.
+            raise TranscriptError(
+                f"{path.name} is not a valid transcript "
+                f"(schema mismatch: {safe_validation_error_shape(exc)})"
+            ) from exc
 
         if transcript.envelope_version != TRANSCRIPT_ENVELOPE_VERSION:
             raise TranscriptError(
