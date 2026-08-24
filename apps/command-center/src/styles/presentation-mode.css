@@ -1,0 +1,70 @@
+/* ==========================================================================
+   Presentation mode — #52 / D-058 (docs/09-company/13-cut-pullback-design-spec.md §2).
+   Only ever imported by `src/presentation/presentation.astro`; the finale/production build
+   (`src/pages/index.astro`) never loads this file, directly or transitively. Disclosure
+   chrome only — the five P0 panels this sits on top of (`command-center-frame.css`,
+   `mission-control-panel.css`) are completely unchanged, per the task brief's "zero
+   duplicated UI code."
+   ========================================================================== */
+
+/* ---- Primary disclosure — top-strip chip, §2.3 --------------------------- */
+.bd-presentation-strip {
+  position: sticky;
+  top: 0;
+  z-index: var(--bd-z-presentation);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 28px = 24 + 4 — fits the existing --bd-space-5/--bd-space-6 rhythm without a new token,
+     exactly as D-058 §2.3 specifies. */
+  min-height: 28px;
+  padding-inline: var(--bd-space-4);
+  border-bottom: var(--bd-rule-hair) solid var(--bd-rule);
+  background: var(--bd-surface);
+}
+
+.bd-presentation-strip .bd-chip {
+  font-size: var(--bd-type-mono-md);
+  letter-spacing: 0;
+}
+
+.bd-presentation-strip--idle { background: var(--bd-surface); }
+.bd-presentation-strip--warning { background: color-mix(in srgb, var(--bd-c-warning) 12%, var(--bd-surface)); }
+.bd-presentation-strip--critical { background: color-mix(in srgb, var(--bd-c-critical) 14%, var(--bd-surface)); }
+
+/* ---- Secondary disclosure — full-bleed diagonal watermark, §2.3 ---------- */
+.bd-mock-watermark {
+  position: fixed;
+  inset: 0;
+  z-index: var(--bd-z-presentation);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Oversized (220vw/vh) and centred so the rotated field still covers every corner of any
+   viewport at or above the 1280px floor (§3) with margin to spare — cropping a screenshot to
+   any single panel never lands on a gap. */
+.bd-mock-watermark__field {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 220vw;
+  height: 220vh;
+  transform: translate(-50%, -50%) rotate(-35deg);
+  display: grid;
+  gap: 56px 0;
+  color: var(--bd-c-warning);
+  opacity: 0.16;
+  font-family: var(--bd-font-mono);
+  font-size: var(--bd-type-mono-3xs);
+  font-weight: 600;
+  letter-spacing: var(--bd-type-mono-3xs-ls);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.bd-mock-watermark__row {
+  display: flex;
+  justify-content: space-between;
+  padding-inline: 24px;
+}

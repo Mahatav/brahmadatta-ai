@@ -31,13 +31,61 @@ const repositoryRoot = path.resolve(process.cwd(), '../..');
 const ollamaEndpoint = process.env.OLLAMA_ENDPOINT || 'http://127.0.0.1:11434/api';
 const codellamaModel = process.env.CODELLAMA_MODEL || 'codellama:7b-instruct';
 
+// #52 / D-058 §2.2 — "a build-time flag, not a runtime toggle... read once, at Astro build
+// time." `process.env`, not `import.meta.env`: this has to be evaluated here, in Node, while
+// `astro.config.mjs` itself decides what to build, not inside client code that could read a
+// flag at runtime. Defaults unset/false, per D-049's standing rule that a default points at the
+// humbler claim — plain `npm run build`/`npm run dev` never sees this branch taken at all.
+const presentationBuild = process.env.BD_PRESENTATION_BUILD === 'true';
+const fixtureReplayUrl = process.env.BD_PRESENTATION_FIXTURE_URL || 'http://127.0.0.1:8971';
+
 export default defineConfig({
-  integrations: [react()],
+  integrations: [react(), presentationBuild ? presentationModeIntegration() : undefined].filter(Boolean),
   output: 'static',
   vite: {
     plugins: [localRepositoryPlugin()],
+    // Dev/preview convenience only — irrelevant to the finale/production artifact, which never
+    // runs `astro dev`/`astro preview` and gets its `/api/v1` routing from nginx instead
+    // (`infrastructure/compose/nginx/templates.*`). Only ever configured when
+    // `BD_PRESENTATION_BUILD=true`, so an ordinary `npm run dev` against the real control API
+    // is completely unaffected.
+    ...(presentationBuild
+      ? {
+          server: { proxy: { '/api/v1': { target: fixtureReplayUrl, changeOrigin: true } } },
+          preview: { proxy: { '/api/v1': { target: fixtureReplayUrl, changeOrigin: true } } },
+        }
+      : {}),
   },
 });
+
+/**
+ * #52 / D-058 §2.2 — the build-time exclusion mechanism. `src/presentation/presentation.astro`
+ * lives outside `src/pages/`, so Astro's file-based router never discovers it on its own; this
+ * integration is the ONLY thing that ever turns it into a real route, and it only runs at all
+ * when `presentationBuild` is true. A plain `npm run build`/`npm run dev` never calls
+ * `injectRoute`, so the finale/production artifact contains no HTML, no JS chunk, and no route
+ * table entry for `/presentation` — not "present but disabled," genuinely absent, which is what
+ * #52's acceptance criterion 1 (grep the built bundle) checks for. See
+ * `scripts/check-presentation-build-exclusion.sh`.
+ */
+function presentationModeIntegration() {
+  return {
+    name: 'brahmadatta-presentation-mode',
+    hooks: {
+      'astro:config:setup': ({ injectRoute, logger }) => {
+        injectRoute({
+          pattern: '/presentation',
+          entrypoint: './src/presentation/presentation.astro',
+        });
+        logger.warn(
+          'BD_PRESENTATION_BUILD=true — this build includes the rehearsal-only presentation-mode ' +
+            'route (/presentation). Never build the finale/production artifact this way ' +
+            '(docs/09-company/10-fallback-ladder.md §2.5, D-058).',
+        );
+      },
+    },
+  };
+}
 
 function localRepositoryPlugin() {
   return {

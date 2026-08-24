@@ -1,0 +1,16 @@
+---
+// #52 / D-058 — the presentation-mode entry point. Deliberately NOT under `src/pages/`: Astro's
+// file-based router only discovers pages there, so this file is invisible to the default
+// `astro build`/`astro dev` no matter what — it becomes a real route only when
+// `astro.config.mjs`'s `injectRoute` call adds it, which itself only happens when
+// `BD_PRESENTATION_BUILD=true` was set for that build/dev invocation. That is the whole
+// build-time exclusion #52's acceptance criterion 1 asks for: grep the finale/production
+// `dist/` for this page's output and find nothing, because Astro never rendered it in the
+// first place, not because something else deleted it afterward.
+import { PresentationMissionCommandCenter } from '../components/PresentationMissionCommandCenter';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import '../styles/presentation-mode.css';
+---
+<BaseLayout title="Brahmadatta Command Center — PRESENTATION MODE (rehearsal build, not live)">
+  <PresentationMissionCommandCenter client:load />
+</BaseLayout>

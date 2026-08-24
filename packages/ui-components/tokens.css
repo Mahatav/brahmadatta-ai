@@ -296,6 +296,12 @@
   --bd-z-overlay:   30;   /* diff overlay                                    */
   --bd-z-dialog:    40;   /* destructive-action confirmation                 */
   --bd-z-alert:     50;
+  --bd-z-presentation: 60;   /* #52/D-058 presentation-mode disclosure chrome — must sit above
+                                every other layer, including an open dialog/alert, since the
+                                disclosure has to be visible in ANY screenshot taken while
+                                presentation mode is active. Rehearsal-only: never referenced
+                                outside `src/styles/presentation-mode.css`, which the
+                                finale/production build never imports. */
 
   /* ========================================================================
      9. GLYPH TOKENS — state is never colour-only, so each state owns a glyph

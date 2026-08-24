@@ -15724,3 +15724,111 @@ specific #41 correction.
 **Final approval authority** — this correction is self-evident from the issue's own
 public comment thread (Mahatav's own words); no further approval needed to retract
 what was, in retrospect, an uninformed authorization.
+---
+
+## D-148 · #52 Presentation mode built: build-time route injection + fixture-header runtime lock, reusing the committed #71 fixture as real recorded telemetry · 2026-08-24 · `frontend-developer`
+
+Built under D-144's blanket CUT-reopen authorization (`#52` is named explicitly in its scope
+list), which independently confirms D-058's own earlier, narrower authorization for this
+specific issue — no per-issue ruling was needed to begin, per D-144's own text.
+
+**Decision** — #52 is implemented exactly per D-058's framing (re-confirmed here rather than
+re-litigated): a rehearsal-only, build-time-gated surface that reuses the committed
+`packages/test-fixtures/mission-pktcfg-001.events.jsonl` fixture as-is. Three mechanisms, all
+independently checkable:
+
+1. **Build-time exclusion.** `src/presentation/presentation.astro` lives outside `src/pages/`
+   (Astro's file-based router never discovers it on its own). `astro.config.mjs` only calls
+   `injectRoute()` to create the `/presentation` route when `BD_PRESENTATION_BUILD=true` (a
+   Node-side `process.env` read inside `astro.config.mjs` itself, not a client-readable
+   `import.meta.env`/`PUBLIC_*` flag — so there is no runtime toggle anywhere in the shipped
+   JS for a browser to find). `npm run build`/`npm run dev` (no env var) never take this branch.
+   Verified with a new named test, `scripts/check-presentation-build-exclusion.sh`: builds both
+   artifacts for real and greps `dist/` — the finale build has exactly one HTML page and zero
+   of seven presentation-mode markers (`MOCK DATA`, component names, CSS classes, the fixture
+   header name); `dist-presentation/` has the second page and does contain them, proving the
+   negative check isn't vacuous.
+2. **Disclosure driven by a real HTTP response header, not the build flag.** `MissionSnapshot.
+   mockSource` (`store.ts`) is set only when `getMissionDetailWithProvenance` (new,
+   `client.ts`) observes `X-Brahmadatta-Fixture: replay` on the actual response —
+   `sse_replay.py` already sets this on every response it serves (`ReplayHandler._json`),
+   unrelated to and predating this task. `deriveMockSource` is the one pure function that maps
+   header value to `MockSource`, unit-tested directly (`scripts/check-presentation-mode.mjs`).
+   **Disclosed deviation from D-058's literal text**: D-058 §2.4 says "the SSE connection's
+   response" specifically; a native `EventSource` never exposes response headers to JS (a real
+   browser platform limitation, not an oversight), so this reads the header off the
+   mission-detail fetch instead — the same backend, the same header, on every response that
+   backend serves, so the trustworthiness of the signal is unchanged, only which endpoint it's
+   read from. Flagged to `ui-ux-designer` in the PR for confirmation.
+3. **Runtime refusal to bind a real mission — the second independent lock.**
+   `PresentationMissionCommandCenter` (new) checks provenance on every mission it ever binds
+   to. A mission that resolves successfully but without the header renders
+   `[ × PRESENTATION MODE BUILD — REAL MISSION DETECTED, MOCK DISABLED ]` in
+   `--bd-state-critical` instead of the mock chip/watermark, and the underlying
+   `<MissionCommandCenter />` (reused unmodified — zero duplicated panel code, per the task
+   brief) falls through to ordinary live rendering, exactly as D-058 §2.5's state table
+   specifies. Verified live: a stub HTTP server simulating a real control-api response (same
+   shape, no fixture header) was pointed at by a presentation build, and the critical banner
+   rendered with zero mock chrome, in a real headless-Chromium run (Playwright, screenshot
+   evidence in the PR).
+
+**Real recorded telemetry, not hand-authored.** No new fixture was built. The existing
+`mission-pktcfg-001.events.jsonl` (#71, D-058's own named reuse target) already meets "a real,
+previously-recorded mission's real event stream, replayed identically every time": its own
+`provenance.json` lists the exact command that produced every numeric measurement in it (ctest
+counts/timings, ASan crash frames, gate results for both patch candidates) against a real run
+of `demo/repositories/pktcfg` on real hardware, and discloses exactly what is constructed
+(timestamps, ids, model-provenance fields — no model was run) rather than measured. Regenerating
+this fixture from a live-mission-run event log (as the task brief's "read first" section
+suggested as one option) was considered and rejected: it would produce a *second*, undisclosed
+fixture with no equivalent provenance trail, duplicating a fixture D-058 already named as the
+one to reuse, for no accuracy gain — the existing fixture's numbers are already real.
+
+**A pre-existing, disclosed contract gap found in the course of this work, not fixed here**:
+`sse_replay.py`'s `GET /missions` list response keys the id as `mission_id`, but the real
+contract (`schema.d.ts`'s `MissionSummary`) names it `id`. `discoverFixtureMission` (new,
+`src/lib/presentation/discoverFixtureMission.ts`) does its own untyped fetch and accepts either
+key rather than asserting a contract the fixture tool's README never claimed to keep (only its
+*events* are validated against `openapi.json`). Flagged to whoever owns `test-fixtures` next
+(`backend-developer`/`security-research-engineer`) rather than edited here — not this task's
+surface, and the fixture tool predates and is independent of #52.
+
+**Options considered** — (a) implement per D-058/the cut-pullback spec §2, as built; (b) a
+runtime query-param/localStorage toggle reachable from the running app (P1-7's original,
+explicitly rejected shape — D-058 already ruled this out, re-litigating it here would be
+reopening a decision this task didn't ask to reopen); (c) a fully separate app/deployment
+(new Astro project) rather than a route injected into the existing one.
+
+**Pros and cons** — (b) is the version D-058 itself calls "genuinely dangerous" (reachable from
+the running app = reachable by accident) and was not reconsidered. (c) would give the strongest
+possible build-time isolation but at real duplication cost (a second `package.json`, a second
+dependency tree, a second place every future panel change has to be mirrored into) for a
+rehearsal-only tool — the `injectRoute`-gated single-project approach gets the same "genuinely
+absent from the finale bundle" property (proven by the grep test, not just argued) without that
+duplication, and is what lets `<MissionCommandCenter />` be reused byte-for-byte rather than
+forked.
+
+**Cost implications** — one new npm script pair (`dev:presentation`/`build:presentation`), a
+handful of new small files, one new design token (`--bd-z-presentation`). No runtime cost in the
+finale build — confirmed by the build-exclusion test, not just asserted.
+
+**Security implications** — this is the load-bearing part D-058 flagged for `cybersecurity`
+review before merge (its own §2.7 acceptance criteria, restated in the PR). The property this
+review needs to confirm is exactly the one `check-presentation-build-exclusion.sh` checks
+mechanically: the finale/production build contains no reference to this code at all, not merely
+a disabled code path. Also worth an adversarial pass: the `X-Brahmadatta-Fixture` header is
+attacker-controllable if a presentation build's proxy target were ever pointed at something
+untrusted (it never is, in the documented workflow — `sse_replay.py` binds loopback-only and the
+proxy target is a build-time env var a human sets), but the header is a *disclosure* signal
+only; it never grants elevated trust or skips validation on the data it labels — worth
+`cybersecurity` explicitly confirming that framing rather than assuming it.
+
+**Scalability implications** — none; rehearsal-only, not part of any deployed/scaled surface.
+
+**Recommendation** — ship as built. Get `cybersecurity` or `qa-engineer` review of the
+build-time exclusion (D-086's own instruction) before merge — not self-merged despite standing
+merge authority, per that instruction.
+
+**Final approval authority** — `product-manager`/CEO already exercised via D-058 (and reconfirmed
+via D-144) for the user-facing-scope question; this record is the technical implementation
+report, reviewed by `cybersecurity`/`qa-engineer` per D-086's instruction before merge.

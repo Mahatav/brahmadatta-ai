@@ -14,6 +14,7 @@ venv/
 # Node
 node_modules/
 dist/
+dist-presentation/
 build/
 .vite/
 *.tsbuildinfo
