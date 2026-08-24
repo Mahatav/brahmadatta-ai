@@ -90,11 +90,23 @@ HTTP_CLIENT_ROOTS = frozenset(
     }
 )
 
-#: Repository-relative paths permitted to import one of the above. **Empty on purpose.**
-#: There is no live model backend in the tree — `gateway.backends.UnavailableLiveBackend`
-#: raises rather than connecting — so nothing outside a test needs an HTTP client today.
-#: #35/#36 will add exactly one entry here, and that addition is the review.
-INFERENCE_CLIENT_ALLOWLIST: frozenset[str] = frozenset()
+#: Repository-relative paths permitted to import one of the above. A single reviewed
+#: line per module, per this test's own point: exactly one place may hold the client
+#: that talks to a model.
+#:
+#: `services/model-gateway/gateway/client.py` is that one place (D-121, #35/#36's live
+#: backend) — it already used `urllib.request.urlopen`/`Request` (not itself tracked by
+#: `HTTP_CLIENT_ROOTS`, since `urllib` is stdlib, not a third-party client) without
+#: needing an entry here. Found live 2026-08-24 (D-132): PR #250/D-130 added
+#: `import http.client` to the same file, solely to reference `http.client.
+#: IncompleteRead` as an exception type to catch — no new client construction, but
+#: `_imports_http_client_connection` correctly can't distinguish "importing http.client
+#: for its exception class" from "importing it to build a raw HTTPConnection," so it
+#: fired. Allowlisting the file this test already intended to be the one inference
+#: client is the correct fix, not narrowing the check.
+INFERENCE_CLIENT_ALLOWLIST: frozenset[str] = frozenset(
+    {"services/model-gateway/gateway/client.py"}
+)
 
 _control_api_only = pytest.mark.skipif(
     not CONTROL_API.is_dir(),

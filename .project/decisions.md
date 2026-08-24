@@ -14160,3 +14160,43 @@ suite run green after the change: 146 passed, 3 skipped (pre-existing, unrelated
 explicit cybersecurity read given [the repository-content restriction] rule") and this
 task's own instruction not to self-merge a data-handling-adjacent fix; CTO for the
 technical approach if `cybersecurity` has no objection beyond sign-off.
+
+---
+
+## D-132 — Regression fix: `INFERENCE_CLIENT_ALLOWLIST` didn't cover `gateway/client.py`'s
+new `import http.client` (PR #250/D-130), breaking `test_import_direction.py`'s L3
+isolation check on `main` · 2026-08-24 · orchestrating session
+
+**Context.** `#237`'s fix (PR #250, merged) added `import http.client` to
+`services/model-gateway/gateway/client.py` solely to reference
+`http.client.IncompleteRead` as an exception type to catch in
+`_TRANSPORT_EXCEPTIONS` — no new client construction. `tests/architecture/
+test_import_direction.py::test_only_declared_modules_may_construct_an_inference_client`
+correctly cannot distinguish "importing `http.client` for its exception class" from
+"importing it to build a raw `HTTPConnection`," so it fired, and the merge landed with
+this test failing on `main`. Found live by a concurrent agent working #198 (SEC-54),
+who rebased onto `main` and hit it; flagged rather than fixed, correctly out of that
+task's own scope.
+
+**Decision.** `gateway/client.py` is genuinely the one module `INFERENCE_CLIENT_
+ALLOWLIST` was always meant to hold — it already legitimately constructs the live
+model's HTTP client (`urllib.request.urlopen`/`Request`, since D-121) without ever
+needing an entry here, because `urllib` is stdlib and not tracked by `HTTP_CLIENT_
+ROOTS`. Adding `"services/model-gateway/gateway/client.py"` to the (previously empty,
+by design) allowlist is the correct fix — exactly the remediation path the test's own
+docstring already describes ("Add the path here in a diff somebody reviews") — not a
+narrowing of the check itself. Also updated the allowlist's own comment, which was
+stale (claimed "there is no live model backend in the tree," no longer true since
+D-121).
+
+**Verification.** `pytest tests/architecture/test_import_direction.py -q` → 8 passed
+(was 1 failed, 7 passed). Full `tests/architecture/` suite → 73 passed, no regression.
+
+**Security implications.** None beyond restoring the control to its intended state:
+exactly one module (`gateway/client.py`) may hold an HTTP client that talks to a
+model, and that fact is now correctly declared and enforced again, rather than the
+test being left broken (which would have meant nobody noticing if a SECOND module
+later also picked up an HTTP client import).
+
+**Final approval authority** — `cybersecurity`, since this touches a security-
+classified isolation-boundary test (D-036/D-073-adjacent L3 check); not self-merged.
