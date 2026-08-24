@@ -15396,3 +15396,59 @@ the actual operator-facing surface named in the issue).
 
 **Final approval authority** — CTO (technical). `cybersecurity` review required before
 merge (same data-handling/privacy class as #229/D-130/D-131) — not self-merged.
+
+---
+
+## D-144 — CEO ruling: the full `CUT` milestone is reopened and built out now,
+superseding D-086's "gated behind #57" sequencing and the CTO's earlier "stays cut,
+default position" delegation on `#5`/`#22`/`#23`/`#24`/`#30`/`#62` · 2026-08-24 ·
+Mahatav (real user, direct instruction — not a simulated CEO seat)
+
+**Decision.** Build out the entire remaining `CUT` milestone now, in this session,
+rather than continuing to hold it behind `#57`'s timed rehearsals as D-086 (2026-08-19)
+originally ordered. This is a direct instruction from the project's actual human
+principal, given live in conversation on 2026-08-24 ("resolve all the things from the
+CUT / use the company skill") — the highest-authority decision this repository
+recognizes, and it explicitly supersedes both:
+
+- D-086's own priority order, which put "reopened CUT items" fourth, staffed "only
+  once 1–3 show real signs of landing" (items 1–3 being `#207`, the Command Center
+  phase-5 verification pass, and `#50`+`#57`). `#207` and the Command Center pass are
+  both done (PR #210/D-088; PR #231/D-113-D-119, independently QA-verified against a
+  real live mission). `#57` itself remains blocked on a separate, still-open resource
+  question (D-123: `model-host`'s memory ceiling) — this ruling does not wait for that
+  to resolve, per the direct instruction.
+- The CTO's 2026-08-19 CUT-reopen review (`.project/decisions.md`, search "Items
+  evaluated and left in `CUT`"), which explicitly left `#5`, `#22`, `#23`, `#24`, `#30`,
+  `#62` at "default position: stay in `CUT`," delegated to product-manager/
+  engineering-manager to triage and bring back anything "clearly cheap and clearly
+  serves items 1–3" — explicitly NOT a blanket authorization to build them, and
+  correctly enforced as such by at least one dispatched agent this session (`#22`'s
+  builder refused to proceed without exactly this kind of recorded ruling — correct
+  behavior, this entry is that ruling).
+
+**Scope.** Every open `CUT`-milestone issue as of this ruling, except the four already
+independently closed as superseded by D-015 (`#44`, `#46`, `#47`, `#48` — rented-GPU
+provisioning; D-015 itself is NOT reopened by this ruling, only the non-GPU CUT items
+are). That leaves: `#5`, `#22`, `#23`, `#24`, `#25`, `#26`, `#30`, `#31`, `#40`, `#41`,
+`#52`, `#56`. (`#62`, the risk-register owners task, and `#63`, the git-bisect
+meta-decision, are process/documentation items already resolved directly rather than
+needing this ruling, but are covered by it too for the avoidance of doubt.)
+
+**#41 specifically** ("DO NOT DO THIS: converting the reproducer to a committed CTest
+case") — its own body argues for building it with no stated technical objection
+anywhere in the issue; the title's warning was checked directly with Mahatav rather
+than assumed, and the explicit answer was to build it. Not a unilateral override.
+
+**Not reopened by this ruling**: D-015 (rented GPU, cost/schedule reasons — untouched,
+still cut) and anything not currently in the `CUT` milestone.
+
+**Any agent dispatched to build a `CUT`-milestone issue may treat this entry as the
+"explicit decision" CLAUDE.md's standing rule requires, for the specific issue numbers
+named above, without needing a further per-issue ruling.**
+
+**Final approval authority** — this entry IS the final approval; no further sign-off
+needed to begin implementation work on the named issues. Normal per-PR review gates
+(cybersecurity for security-sensitive changes, qa-engineer/cybersecurity otherwise)
+still apply before any individual PR merges — this ruling authorizes the WORK, not a
+bypass of the existing review discipline.
