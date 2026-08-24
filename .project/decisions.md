@@ -14048,3 +14048,115 @@ changing what the chokepoint does with caught exceptions or what reaches it. Not
 about the verified class hierarchy was surprising (confirmed stable across the two
 Python versions checked, matching what the issue predicted), so no second opinion was
 sought per the assignment's own condition for requiring one.
+## D-131 — `api/sse.py::safe_to_schema`'s malformed-row log line no longer echoes
+payload contents via `ValidationError`'s own traceback string (#229) · 2026-08-24 ·
+`backend-developer` seat
+
+**Decision.** Replace `safe_to_schema`'s `logger.exception(...)` (D-113's
+defense-in-depth skip-and-log path, added on `fix/triage-stub-event-schema` before
+this repo's own numbering caught up to it) with `logger.error(..., exc_info=False)`,
+where the message is built entirely from data already known safe — `row.id`,
+`row.mission_id`, `row.sequence`, `row.trace_id` — plus a `loc`/`type`-only summary of
+each `pydantic.ValidationError.errors(include_url=False)` entry, with the `"input"`
+key (and hence the offending value) stripped from every entry before it is logged.
+
+**Confirmed pydantic behavior first (2.13.4, this repo's pinned version), rather than
+assuming a logging-method swap alone is clean.** Both `str(ValidationError)` and
+`repr(ValidationError)` embed each failing field's *actual value* inline, e.g.:
+
+```
+1 validation error for Envelope
+payload.a.value
+  Input should be a valid string [type=string_type, input_value=12345, input_type=int]
+```
+
+`logger.exception` renders exactly this string as part of the traceback it writes —
+there is no pydantic-side flag to suppress `input_value=` from `__str__`/`__repr__`.
+`ValidationError.errors()` (the structured alternative) carries the identical value
+under each entry's `"input"` key: `{'type': 'string_type', 'loc': (...), 'msg': ...,
+'input': 12345}`. `include_url=False` removes the "For further information" link but
+does **not** remove `"input"` — that key has to be stripped explicitly, which is what
+the fix does (`{"loc": e["loc"], "type": e["type"]}` per entry, dropping `"input"` and
+`"msg"` — `"msg"` was also excluded since pydantic's generated messages can themselves
+restate the value for some error types, e.g. literal-mismatch messages).
+
+Tested against the specific shape most likely to carry something worth protecting: a
+row whose `kind` matches a real, recognized `EventPayload` variant (`"log"`) but
+carries one additional field `StrictSchema`'s `extra="forbid"` rejects — pydantic's
+`extra_forbidden` error puts the *extra field's own value* under `"input"`, i.e. this
+is not a hypothetical, it is the most direct route from "one field in an otherwise
+normal-looking payload" to "that field's value ends up in the log line" this
+repository has.
+
+**Options considered.**
+1. `logger.error(..., exc_info=False)` with a hand-built, value-free message (chosen).
+2. Keep `logger.exception` but pre-format a redacted string (e.g. regex-strip
+   `input_value=.*?[,\]]` from `str(exc)`) and pass that as the message instead of the
+   exception object.
+3. Catch `ValidationError`, re-raise a new, minimal exception carrying only
+   `loc`/`type`, and log *that* with `logger.exception`.
+4. Leave `logger.exception` as-is; downgrade the severity claim in the docstring
+   instead ("logs may include payload fragments") rather than fixing the leak.
+
+**Pros and cons.**
+1. No exception object or its string form ever reaches the log call — nothing to
+   regex around, nothing that breaks silently if pydantic's error-string format
+   changes in a future version bump. `exc_info=False` is also explicit, not relying on
+   `logger.error`'s default (readers do not have to know the default to trust the
+   guarantee). Con: loses the Python traceback (file/line of the `raise`) that
+   `logger.exception` normally provides — judged an acceptable trade here because the
+   traceback in this specific case is always the same handful of lines inside
+   `to_schema`/`safe_to_schema` itself, not diagnostic signal about *where* the bug is;
+   the useful diagnostic signal (row identity + failure shape) is preserved explicitly.
+2. Would keep a traceback, but string-matching a library's exception-formatting output
+   is exactly the kind of fragile, silently-broken-on-upgrade fix the task brief
+   warned against ("don't just switch logging methods without confirming the new one
+   is actually clean") — a pydantic point release reformatting `input_value=` to
+   `input=` or similar would silently reopen the leak with no test failure to catch it
+   (the regex would just stop matching, not error). Rejected.
+3. Cleanest in principle (a genuinely new, minimal type by construction cannot carry
+   more than it is given), but pure overhead for one call site with no other consumer
+   of the intermediate exception — over-engineered relative to the actual blast radius
+   (a single `except` block). Would revisit if a second, unrelated call site needed the
+   same guarantee (this diff scoped a repo-wide grep for `logger.exception`/
+   `logger.error` on a caught `pydantic.ValidationError` and confirmed `api/sse.py` is
+   the only such site — `orchestrator/queue.py`, `orchestrator/transitions.py`,
+   `missions/management/commands/run_orchestrator.py`/`run_worker.py`, and
+   `api/errors.py`'s unhandled-exception handler all use `logger.exception` on
+   *unexpected* exceptions where a full traceback is the intended, correct behavior,
+   not a caught-and-classified `ValidationError` with a "no payload contents"
+   promise — none is a duplicate of this specific pattern).
+4. Does not fix anything a downstream log-shipping/retention pipeline would care
+   about; a docstring caveat does not stop the value from landing in logs. Rejected —
+   the whole point of #229 is that the code's claim must become true, not better
+   hedged.
+
+**Cost implications.** None — one file, one existing call site, no new dependency.
+
+**Security/privacy implications.** This is the fix: closes a server-log-only leak
+path (never reached an HTTP response body even before this fix, per #229's own text
+and QA's confirmation) for a malformed `MissionEvent.payload`, which this project's
+own `docs/03-technical/24-privacy-and-data-handling-plan.md` treats target/repository
+content as restricted regardless of which code path it travels through. Residual risk
+carried forward, not fixed here: `row.trace_id` and `row.message` (a `max_length=1000`
+field the schema itself describes as "sanitized at the source") are still logged
+as before — both were already true before D-113/#229 and are out of this fix's scope,
+which is specifically the `ValidationError` string/`errors()` echo.
+
+**Scalability implications.** None — same call frequency (one malformed row = one log
+line), marginally cheaper (no traceback capture/formatting).
+
+**Test.** `api/tests/test_event_stream.py::
+test_safe_to_schema_logs_row_metadata_but_never_the_payload_value` — constructs a real
+`MissionEvent` row with `payload={"kind": "log", "text": "...", "leaked_repo_field":
+"sk-live-SUPER-SECRET-repo-content-should-never-be-logged-abc123"}` (a recognized
+`kind` plus one `extra="forbid"`-rejected field, matching the confirmed-worst-case
+shape above), calls `safe_to_schema` directly under `caplog.at_level(logging.ERROR,
+logger="api.sse")`, and asserts the secret value is absent from `caplog.text` while
+`row.id`/`row.mission_id`/`row.sequence`/`row.trace_id` are all present. Full `api/`
+suite run green after the change: 146 passed, 3 skipped (pre-existing, unrelated).
+
+**Final approval authority** — `cybersecurity`, per #229's own filing ("worth an
+explicit cybersecurity read given [the repository-content restriction] rule") and this
+task's own instruction not to self-merge a data-handling-adjacent fix; CTO for the
+technical approach if `cybersecurity` has no objection beyond sign-off.
