@@ -264,3 +264,42 @@ def test_crash_recovery_reaps_only_non_terminal_missions():
         payload__resource_id="recovered-sandbox",
     ).exists()
     assert not MissionEvent.objects.filter(mission=terminal).exists()
+
+
+def test_docker_sandbox_reaper_reports_a_failed_removal_as_not_released(monkeypatch):
+    """SEC-51 (#182): `DockerSandboxReaper.teardown_mission` used to report
+    `released=True` for every container `reap_orphans` merely *found*, regardless of
+    whether `docker rm -f` actually succeeded — this reproduces the exact scenario
+    from the issue: one container's removal succeeds and another's fails, and the
+    reaper must tell them apart rather than reporting both as clean.
+
+    Consequential since PR #179's `teardown_transition_policy` routes
+    `CANCELLING` -> `CANCELLED`/`FAILED` off exactly this `released` flag: a wedged
+    container that fails to be removed must now correctly fail teardown instead of
+    being reported as released.
+    """
+    import shutil
+
+    from packages.sandbox.container import ContainerRemoval
+
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/docker")
+
+    def fake_reap_orphans(*, runtime, mission_ref, **_kwargs):
+        return [
+            ContainerRemoval(container_id="good123", removed=True),
+            ContainerRemoval(
+                container_id="wedged456",
+                removed=False,
+                error="Error response from daemon: removal in progress",
+            ),
+        ]
+
+    monkeypatch.setattr("packages.sandbox.container.reap_orphans", fake_reap_orphans)
+
+    reaper = teardown.DockerSandboxReaper()
+    outcomes = reaper.teardown_mission(UUID(int=0))
+
+    by_id = {outcome.resource_id: outcome for outcome in outcomes}
+    assert by_id["good123"].released is True
+    assert by_id["wedged456"].released is False
+    assert "removal in progress" in by_id["wedged456"].detail

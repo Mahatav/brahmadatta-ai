@@ -14883,3 +14883,156 @@ session's own live confirmation that trust only narrows).
 **Final approval authority** — CTO for the technical mechanism (informational; no
 review blocked on it per #235's own non-security framing). No CEO/PM business-scope
 call involved.
+## D-139 — SEC-39/SEC-40 (#163/#164) sandbox `FILE_SIZE` evidence-accuracy fixes, and
+SEC-51 (#182) `reap_orphans` exit-code fix · 2026-08-24 · backend-developer
+
+**Context.** Four residual, low/medium-severity findings from `cybersecurity`'s binding
+D-056 independent re-attack of PR #162 (SEC-38/SEC-35), plus one from PR #179's review
+(SEC-51/#182), all touching `packages/sandbox/`. Assigned as a batch; three fixed here,
+one (#165) proposed as accepted-risk rather than fixed — see the separate entry below.
+
+**Decision (#163, SEC-39).** `_classify`'s SEC-35 on-disk fallback for `FILE_SIZE` only
+looked at the workdir *after* the command exited, so a target that hit `RLIMIT_FSIZE`
+and then deleted or truncated its own oversized file before `_classify` ran (a caught-
+signal handler, an `atexit`-style cleanup path) left no evidence at all — misclassified
+as a plain crash. Fixed with `_FileSizePeakTracker`: a background thread samples the
+workdir's max file size on a 100ms interval *while the process is still alive*, keeping
+the peak in this process's own memory, which the target cannot reach or erase.
+`_classify` now takes `max(peak, on-disk-now)`.
+
+**Options considered (#163).**
+- **Periodic polling of the workdir (chosen).** Cheap, no new dependencies, fits the
+  existing `_classify`/`_max_file_size` shape exactly. Con, disclosed in the code: a
+  target that deletes faster than the 100ms interval still slips through one sample
+  window — narrows the race, does not close it outright.
+- **inotify-based real-time watch.** Would close the race far tighter (event-driven,
+  not interval-sampled). Rejected for now: no stdlib inotify binding, meaningfully more
+  code in the exact freeze-before-kill-adjacent territory that has already needed two
+  hardening passes (SEC-33, SEC-38) to get right, for a finding independent testing
+  logged as evidence-accuracy-only, not an isolation escape. Left as the documented
+  next step if this is ever revisited, not built speculatively.
+- **Do nothing, rely on stderr markers only.** Rejected — that is exactly the gap #163
+  reports; a target that also suppresses its own traceback defeats it completely.
+
+**Decision (#164, SEC-40).** The same on-disk fallback scanned the *entire* workdir for
+any file `>= max_file_bytes`, with no age check — reachable in this codebase because
+`workers/baseline/run.py` reuses one workdir across an entire build sequence's steps
+rather than a fresh one per `Jail`, so a leftover large file from an earlier step could
+get a *later*, unrelated failure misclassified as `FILE_SIZE`. Fixed by scoping both the
+peak tracker and the final on-disk check to `st_mtime >= run_started_wall` (with a 1s
+buffer for coarse-mtime filesystems) — this was the issue's own suggested fix direction.
+
+**Decision (#182, SEC-51).** `reap_orphans` ran `docker rm -f <id>` for every container
+it found on the daemon and returned the bare list of ids as "removed," never inspecting
+the subprocess's exit code — so `DockerSandboxReaper.teardown_mission` always reported
+`released=True`, even for a container whose removal genuinely failed. Consequential
+since PR #179's `teardown_transition_policy` routes `CANCELLING` ->
+`CANCELLED`/`FAILED` off exactly that flag. Fixed by introducing `ContainerRemoval`
+(`container_id`, `removed`, `error`) as `reap_orphans`'s return type, checking each
+`rm -f` call's real exit code, and updating `DockerSandboxReaper` to propagate
+`removed`/`error` into `TeardownOutcome.released`/`.detail` honestly.
+
+**Options considered (#182).**
+- **Return `list[ContainerRemoval]`, a breaking but honest contract change (chosen).**
+  The bug is precisely that "found" and "removed" were collapsed into one claim — no
+  additive fix (e.g. a second `failed_ids` list bolted on) says that as directly. Con:
+  changes `reap_orphans`'s public return type; both `packages/sandbox`'s own tests and
+  the one caller (`DockerSandboxReaper`) needed updating in the same change — done here,
+  confirmed by `mypy` actually catching the old caller code as a real type error once
+  `container.py`'s half of the fix landed alone (see PR test evidence).
+- **Silently drop failed ids from the returned list instead.** Rejected — a caller would
+  see fewer removed containers with no way to tell "nothing to remove" apart from
+  "removal failed", which is the same silent-failure shape the issue reports, just
+  smaller.
+
+**Cost implications.** None of the three fixes add a new dependency or infrastructure
+cost. #163's poll thread adds a bounded, small per-`Jail.run()` overhead (one extra
+daemon thread, at most a few hundred `os.walk()` calls over a long-running build) —
+judged negligible against this jail's typical multi-second build/test workloads.
+
+**Security implications.** All three narrow evidence-accuracy gaps (what a mission's
+evidence bundle claims happened), not isolation-escape or privilege-boundary issues —
+consistent with how `cybersecurity` classified the originating findings (Medium,
+non-blocking). #182 specifically closes a false-positive-cleanup gap that PR #179 made
+newly consequential to mission-state routing.
+
+**Scalability implications.** None material. #163's poll interval is fixed, not
+per-mission-configurable; if a future fuzzing workload (behind #15's container jail, not
+this subprocess jail) needed tighter timing, that would be a separate, scoped follow-up.
+
+**Recommendation.** Merge once `cybersecurity` has reviewed, per this repo's standing
+rule for isolation/sandboxing-touching diffs (D-049/D-036 territory).
+
+**Final approval authority** — CTO for the technical call; `cybersecurity` review is a
+required merge gate, not optional, before this lands.
+
+---
+
+## D-140 — SEC-41 (#165, informational): declined to build a PID-reuse guard now;
+proposed accepted-risk instead of a forced fix · 2026-08-24 · backend-developer
+
+**Context.** #165 flags that the SEC-38 freeze-before-kill descendant-tracking
+(`_proc_children_map`/`_walk_descendants`/`_freeze` in `packages/sandbox/jail.py`)
+identifies a process by bare pid, with no start-time or cgroup-id cross-check against
+pid reuse. `cybersecurity`'s own binding D-056 re-attack — ~220,000 real process
+creations, including one live pid-space wraparound (98747 -> 2691) — did not turn this
+into an observed misidentification; SEC-38's actual freeze-before-kill fix held under
+that load. The issue itself says: "not reproduced as a live failure... this is a
+hardening suggestion, not a confirmed gap," and names its own owner as
+"`security-research-engineer`, only if PID-reuse-under-extreme-load hardening becomes a
+priority. Not required before closing #159."
+
+**Decision.** Not fixed in this pass. Documented as a disclosed, accepted-risk gap in
+`packages/sandbox/README.md` (new bullet under "Other limits that are weaker than they
+look"), matching this module's own existing convention for gaps that are real but
+deliberately left open (e.g. the double-fork-reparent gap already disclosed there).
+GitHub issue #165 left open rather than closed by this seat — see Final approval
+authority below.
+
+**Options considered.**
+- **Build the suggested start-time/cgroup-id cross-check (rejected for now).** Would
+  mean reworking the tracked-pid identity throughout `_proc_children_map`,
+  `_walk_descendants`, `_freeze`, and `_sweep_detached_descendants` — from bare `int`
+  to a `(pid, starttime)` pair verified at each signal — in the exact freeze-before-kill
+  machinery that both `cybersecurity` and `engineering-manager` already independently
+  verified CLEARED for SEC-38. That is real surface area to re-touch, in a
+  competition-timeline codebase, to harden a race that adversarial testing at real
+  scale (220k process creations, a live wraparound) did not manage to trigger even
+  once. The risk of introducing a subtle regression into already-hardened code is not
+  clearly smaller than the risk being defended against.
+- **Fix it anyway, since the file's own culture is "narrow every race" (SEC-33 ->
+  SEC-38).** Considered and rejected: SEC-33/SEC-38 were fixed because they were
+  *reproduced* — a detached grandchild confirmed alive after teardown (SEC-33), rapid
+  fork-and-detach chains losing descendants at the real default grace period (SEC-38).
+  #165 has no equivalent reproduction; treating "the file has a habit of closing races"
+  as a reason to build one anyway, unprompted by evidence, is scope creep against this
+  project's own 14-day budget.
+- **Skip silently, no record anywhere.** Rejected — contradicts this task's own
+  instruction and this project's standing rule that a disclosed gap belongs in the
+  README next to the properties that *are* enforced, not left to be rediscovered.
+
+**Cost implications.** Building the guard would cost real engineering time (a multi-pid
+tracking refactor plus new adversarial tests reproducing pid reuse under load, which is
+itself hard to construct deterministically) against a 14-day competition deadline, for a
+hardening improvement with no demonstrated live failure.
+
+**Security implications.** The residual gap is real: under sufficiently extreme
+scheduling pressure beyond what was reproduced, a pid could theoretically be reused
+between this jail's discovery walk and its freeze/kill step, causing an unrelated
+process to be `SIGSTOP`ped or `SIGKILL`ed. Not an isolation *escape* (nothing here lets
+a jailed process reach outside the jail) — it is a mis-signalling risk against the host,
+bounded by how narrow the freeze-before-kill window already is post-SEC-38.
+
+**Scalability implications.** None — this is orthogonal to throughput/load, only to a
+narrow timing race under adversarial conditions.
+
+**Recommendation.** Accept as a disclosed, tracked risk. Keep #165 open with this
+reasoning attached (backend-developer does not have authority to close a
+`cybersecurity`-filed finding as accepted-risk unilaterally); recommend `cybersecurity`
+or `cto` concur and close, or reassign to `security-research-engineer` if
+PID-reuse-under-load hardening becomes an actual priority later, per the issue's own
+stated scope.
+
+**Final approval authority** — `cybersecurity`, to concur with (or override) this
+accepted-risk call on a finding it filed; escalates to CTO only if `cybersecurity`
+disagrees with treating it as accepted-risk rather than a required fix.

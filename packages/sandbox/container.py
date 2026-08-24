@@ -27,7 +27,7 @@ container would. The ruling was **ACCEPTED, with eight binding conditions**
 | 4 | Docker socket never bind-mounted, anywhere | never appears in `_docker_run_args`; `tests/architecture/test_container_isolation.py` |
 | 5 | `--read-only` + sized tmpfs; the worktree is the only writable mount | `_docker_run_args`, `ContainerJailPolicy.tmpfs_mb` |
 | 6 | `--memory` / `--cpus` / `--pids-limit`, plus a wall-clock kill | `ContainerJailPolicy`, `_docker_run_args`, `ContainerJail.run` |
-| 7 | Teardown + an orphan reaper, on crash and on cancel | `ContainerJail.close`/`cancel`; module-level `reap_orphans`; `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw` |
+| 7 | Teardown + an orphan reaper, on crash and on cancel | `ContainerJail.close`/`cancel`; module-level `reap_orphans`; `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182) |
 | 8 | The deviation is recorded and never called "rootless" | `IsolationMode.CONTAINER_NO_NETWORK` [Δ #15] in `contracts.enums`, never `ROOTLESS_CONTAINER` |
 
 **Condition 8 is not decoration.** `JailResult.isolation_mode` below is the string
@@ -63,6 +63,7 @@ not need `_kill_group`'s `/proc`-walking snapshot-and-sweep at all.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -78,6 +79,8 @@ from packages.sandbox.errors import (
     JailError,
     LimitKind,
 )
+
+logger = logging.getLogger(__name__)
 
 MIB = 1024 * 1024
 
@@ -252,13 +255,29 @@ def _run_cli(
         ) from exc
 
 
+@dataclass(frozen=True)
+class ContainerRemoval:
+    """The outcome of one `docker rm -f <container_id>` attempted by `reap_orphans`.
+
+    SEC-51 (#182): `reap_orphans` used to return the bare list of container ids it
+    *found* on the daemon and call that "removed", regardless of whether the `rm -f`
+    for any one of them actually succeeded — `_run_cli`'s `CompletedProcess` was
+    discarded, exit code and all. This dataclass is what makes "found" and "actually
+    removed" two different, honestly-reported things.
+    """
+
+    container_id: str
+    removed: bool
+    error: str = ""
+
+
 def reap_orphans(
     *,
     runtime: str = "docker",
     label: str = SANDBOX_LABEL,
     mission_ref: str | None = None,
     timeout: float = 15.0,
-) -> list[str]:
+) -> list[ContainerRemoval]:
     """Remove every container carrying `label`, regardless of which process — or
     whether any live process at all — started it.
 
@@ -270,16 +289,38 @@ def reap_orphans(
     daemon is what survives that, and this function is what the *next* process boot
     calls to find and clear it.
 
-    Returns the container ids removed, so a caller can log or assert on the count.
+    SEC-51 (#182): every container found is now genuinely attempted, and its `rm -f`
+    exit code is inspected and reported rather than assumed. `docker rm -f` failing
+    (daemon busy, the container wedged in a state the runtime refuses to force-remove,
+    a permissions problem) used to be silently swallowed here, so a caller — most
+    consequentially `DockerSandboxReaper.teardown_mission`, which PR #179 made a mission
+    state transition genuinely depend on (`CANCELLING` -> `CANCELLED`/`FAILED`) — had no
+    way to learn a container it believed gone was still live. Returns one
+    `ContainerRemoval` per container this call *found*, each honestly reporting whether
+    the removal actually succeeded, so a caller can log or assert on either count.
     """
     filters = ["--filter", f"label={label}"]
     if mission_ref is not None:
         filters += ["--filter", f"label=brahmadatta.mission={mission_ref}"]
     listed = _run_cli(runtime, ["ps", "-aq", *filters], timeout=timeout)
     ids = [line for line in listed.stdout.split() if line]
+    results: list[ContainerRemoval] = []
     for container_id in ids:
-        _run_cli(runtime, ["rm", "-f", container_id], timeout=timeout)
-    return ids
+        removed_proc = _run_cli(runtime, ["rm", "-f", container_id], timeout=timeout)
+        if removed_proc.returncode == 0:
+            results.append(ContainerRemoval(container_id=container_id, removed=True))
+            continue
+        error = (removed_proc.stderr or removed_proc.stdout or "").strip() or (
+            f"`{runtime} rm -f {container_id}` exited {removed_proc.returncode}"
+        )
+        logger.error(
+            "reap_orphans: `%s rm -f %s` failed (label=%s, mission_ref=%s): %s",
+            runtime, container_id, label, mission_ref, error,
+        )
+        results.append(
+            ContainerRemoval(container_id=container_id, removed=False, error=error)
+        )
+    return results
 
 
 class ContainerJail:
