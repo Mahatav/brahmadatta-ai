@@ -14475,3 +14475,138 @@ this D-073/D-036-critical script requires.
 **Final approval authority** — CTO (technical, isolation-boundary-critical
 infrastructure change); `cybersecurity` holds the review gate before merge per this
 role's own standing instruction not to self-merge D-073/D-036-critical work.
+
+---
+
+## D-135 — #198 (SEC-54): `test_fuzz_worker_isolation.py`'s runtime check extended to
+actually dispatch a job, closing the lazy/dynamic-import blind spot a directory-scoped
+static scan can't cover · 2026-08-24 · `backend-developer` seat
+
+**Trigger.** #198 (filed during PR #197's/D-073's cybersecurity review, "SEC-54"):
+`tests/architecture/test_fuzz_worker_isolation.py`'s import-boundary enforcement only
+scanned `.py` files under `workers/fuzzing/` at module-load time. A reviewer injected a
+lazy `import gateway.client` into a function body (not module scope) inside
+`apps/control-api/orchestrator/executors.py` — outside the one directory the static
+scan covers, and never executed by `django.setup()` because a decorator's target
+function only runs when it is *called*, not when its module is imported — and it
+passed all 11 then-existing checks cleanly. Not blocking at the time (no `FUZZ`
+executor existed on `main` yet), filed as a fast-follow.
+
+**What already existed when this task started.** Between #198 being filed and this
+fix, `tests/architecture/test_worker_executor_modules_import_boundary.py` landed
+(same PR, #197) and independently closed *part* of the gap: it AST-walks every module
+named in `WORKER_EXECUTOR_MODULES` (today: `orchestrator.executors`) for a `gateway`/
+HTTP-client import **anywhere in the file**, nested or not — `ast.walk()` finds an
+`Import` node inside a function body exactly like one at module scope. Reproducing the
+reviewer's literal PoC (`import gateway.client` inside `orchestrator/executors.py`'s
+`_fuzz_transition_policy`) confirmed this test alone already catches it.
+
+**Decision.** Extend `test_fuzz_worker_isolation.py`'s existing runtime check (the
+`django.setup()` subprocess belt) rather than build a third, parallel mechanism, per
+this task's own instruction — added
+`test_running_a_fuzz_or_minimize_dispatch_never_touches_the_gateway`, a new runtime
+test in the same file/subprocess pattern that:
+
+1. Resolves the `JobKind`s a `--kinds FUZZ,MINIMIZE` fuzz-worker actually claims via
+   the real `parse_kinds("FUZZ,MINIMIZE")` (not a hardcoded duplicate list), after
+   `django.setup()` + `_load_executor_modules(WORKER_EXECUTOR_MODULES)` — identical
+   process-start sequence to the existing check.
+2. **Actually calls** `executor_for(kind)(ctx)` and `transition_policy_for(kind)(job,
+   mission)` for each of those kinds, with a minimal in-memory (never-saved) `Job`/
+   `Mission`/`ExecutorContext` — the same call `manage.py run_worker`'s claim loop
+   makes once a job is dispatched (`missions/management/commands/run_worker.py::
+   Command._run_executor`). This is the one thing neither the existing runtime check
+   nor the AST-based sibling test does: run the function *bodies*, not just import the
+   module that defines them.
+3. Shadows the real `gateway` package with a poisoned stand-in (a scratch directory
+   prepended to `sys.path`) whose `__init__.py` writes an unconditional sentinel-file
+   record *before* raising `ImportError` — so the evidence survives even a
+   `try: import gateway.client\nexcept ImportError: pass` around the injected import,
+   which a plain "check `sys.modules` afterward" test (the existing runtime check's own
+   technique) would miss if the import failed and never registered. Also means the
+   check does not depend on the real `gateway` package being installed in `apps/
+   control-api`'s own venv (it normally is not — `gateway` lives in `services/
+   model-gateway`, a separate installable, by design).
+
+**Options considered.** (a) extend the existing runtime check as above; (b) a second
+AST-based static scan, widened from `WORKER_EXECUTOR_MODULES` to every module
+transitively reachable via any call graph from those modules; (c) both.
+
+**Pros and cons.** (b) alone has an irreducible blind spot this task explicitly
+verified, not just asserted: a fully dynamic import built from a runtime string
+(`importlib.import_module("gateway" + ".client")`) has no literal `ast.Import`/
+`ast.ImportFrom` node for any AST walker to find, static or otherwise — confirmed
+live below. Exhaustively static-scanning every reachable call site to catch every
+possible dynamic-import shape is not a tractable target (`exec`, `__import__`,
+`getattr(importlib, "import_module")`, a plugin/entry-point registry reached through
+data rather than code, ...); (a) sidesteps the whole class by not caring *how* the
+import happens, only whether one occurs when the code that fuzz-worker's dispatch path
+actually reaches is actually run. (c) — both — is what this fix leaves the repo with:
+the static AST scan (already existing) stays as cheap, fast, first-line defense with a
+precise offending-line-number message; the new runtime check is the one that cannot be
+out-designed by a cleverer bypass, at the cost of a subprocess per test run
+(sub-second here).
+
+**Cost implications.** None beyond the existing runtime check's own subprocess cost
+(already paid); one more subprocess invocation, ~0.3s locally.
+
+**Security implications.** This is the fix. Closes #198/SEC-54's confirmed blind spot
+for `workers/fuzzing/`+`orchestrator/executors.py` today, and — because it calls
+`executor_for`/`transition_policy_for` generically over whatever `JobKind`s `--kinds
+FUZZ,MINIMIZE` resolves to, not a hardcoded module path — auto-extends with zero
+test-code changes once T2's real `FUZZ`/`MINIMIZE` executors register themselves,
+exactly like the AST-based sibling test's own auto-extension property.
+
+**Scalability implications.** None; test-only, runs once per CI invocation.
+
+**Verification (this session).**
+1. Reproduced #198's exact PoC: injected `import gateway.client` into
+   `orchestrator/executors.py::_fuzz_transition_policy`'s body. New runtime test
+   failed with the sentinel-evidence message ("Dispatching a FUZZ or MINIMIZE job
+   imported the (poisoned, stand-in) `gateway` package... Evidence: gateway package
+   was imported"); the AST-based sibling test failed too (`test_worker_executor_
+   modules_import_boundary.py::test_no_worker_executor_module_imports_gateway_or_an_
+   http_client_anywhere`, pinpointing `executors.py:359`).
+2. Replaced the PoC with a fully dynamic import
+   (`importlib.import_module("gateway" + ".client")`) in the same function body:
+   the AST-based sibling test now **passed** (no literal `import` node to find — the
+   exact blind spot (b) above describes), while the new runtime test still **failed**
+   with the same sentinel evidence — proving the runtime check catches a class of
+   bypass the static scan structurally cannot.
+3. Reverted the injected PoC (`git diff` against HEAD on `orchestrator/executors.py`
+   is empty — confirmed clean).
+4. Full `tests/architecture/` suite on the real, unmodified codebase: 74 passed
+   (`python -m pytest tests/architecture/ -q` → `74 passed`).
+5. `apps/control-api/orchestrator/tests` + `missions/tests`: all pass except one
+   pre-existing, unrelated failure (`test_patch_generate_executor.py::
+   test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`,
+   a live-network test needing a real `model-host` sidecar reachable — confirmed
+   failing identically on a clean `origin/main` checkout with none of this branch's
+   changes applied, matching what D-125's own testing note already recorded for the
+   same test).
+
+**Known, disclosed, out-of-scope finding surfaced while verifying — not fixed here.**
+Rebasing onto `origin/main` (to pick up #250, merged after this branch was cut) turned
+up `tests/architecture/test_import_direction.py::test_only_declared_modules_may_
+construct_an_inference_client` failing on a clean `origin/main` with **no** changes
+from this branch applied: `services/model-gateway/gateway/client.py` now imports
+`http.client`'s connection classes (added by #250/D-130, "wrap `http.client.
+IncompleteRead`") without being added to that test's `INFERENCE_CLIENT_ALLOWLIST` (or
+`client.py` already being on it — it should be, as the one declared inference-client
+module, but evidently is not, or the added import trips a separate detector in the
+same test). Unrelated to #198/SEC-54 and to `workers/fuzzing`'s isolation boundary
+(this file's own concern); flagged for whoever owns `test_import_direction.py`/#250,
+not fixed unilaterally here per this seat's scope (not this PR's file, not this task).
+
+**Testing.** `tests/architecture/test_fuzz_worker_isolation.py` (4 tests, new one
+added: `test_running_a_fuzz_or_minimize_dispatch_never_touches_the_gateway`) and
+`tests/architecture/test_worker_executor_modules_import_boundary.py` (unmodified,
+2 tests) both green; full `tests/architecture/` suite (74 tests) green on the real
+codebase. See "Verification" above for the reproduction-then-revert sequence.
+
+**Recommendation.** Merge as-is; this is a coverage fix for a security-classified
+boundary (D-073/D-036), test-only, no production code touched.
+
+**Final approval authority** — `cybersecurity`, required before merge per this
+project's standing rule for security-classified findings (D-073/D-036 isolation
+boundary); this PR must not be self-merged.

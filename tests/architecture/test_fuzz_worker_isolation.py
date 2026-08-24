@@ -8,18 +8,40 @@ isolation; it is "does *anything reachable when that process starts* import it",
 which includes every Django `AppConfig.ready()` hook and every module `run_worker.py`
 itself pulls in before the claim loop starts.
 
-Two checks, mirroring `tests/architecture/test_import_direction.py`'s own two-layer
+Three checks, mirroring `tests/architecture/test_import_direction.py`'s own two-layer
 shape (static AST scan + a runtime subprocess belt, because a static scan cannot see
-an import reached through an entry point or a plugin registry):
+an import reached through an entry point or a plugin registry) plus one more runtime
+layer #198 (SEC-54) added:
 
 1. **Static.** No `.py` file under `workers/fuzzing/`, and no module named in
    `missions.management.commands.run_worker.WORKER_EXECUTOR_MODULES`, imports the
    `gateway` package or an HTTP client library.
-2. **Runtime.** `django.setup()` — exactly what `manage.py` does before any command's
-   `handle()` runs, and therefore exactly what happens the moment a bare-metal
-   `fuzz-worker` process starts — never loads `gateway` into `sys.modules`, whether the
-   codebase's `WORKER_EXECUTOR_MODULES`/`AppConfig.ready()` registration list grows to
-   include a `workers.fuzzing.dispatch` entry or not.
+2. **Runtime — process start.** `django.setup()` — exactly what `manage.py` does
+   before any command's `handle()` runs, and therefore exactly what happens the
+   moment a bare-metal `fuzz-worker` process starts — never loads `gateway` into
+   `sys.modules`, whether the codebase's `WORKER_EXECUTOR_MODULES`/`AppConfig.
+   ready()` registration list grows to include a `workers.fuzzing.dispatch` entry or
+   not. This only exercises **module-level** code — a decorator running at import
+   time, an `AppConfig.ready()` hook — not the *bodies* of the functions those
+   modules define.
+3. **Runtime — job dispatch (#198 / SEC-54).** Check 2's blind spot, closed: a lazy
+   `import gateway.client` sitting inside a function body (not module scope) never
+   executes during `django.setup()`, so check 2 cannot see it, and it is outside
+   `workers/fuzzing/`, so check 1's static scan does not cover it either — exactly
+   the bypass a reviewer demonstrated during PR #197's review by injecting one into a
+   function body in `apps/control-api/orchestrator/executors.py` (#198). This check
+   actually *calls* the registered `Executor` and `TransitionPolicy` for every
+   `JobKind` a `--kinds FUZZ,MINIMIZE` fuzz-worker claims (D-073) — the same call
+   `manage.py run_worker`'s claim loop makes once a job is dispatched — with the real
+   `gateway` package shadowed by a poisoned stub, so that *any* attempt to import it,
+   anywhere in the call graph a real job dispatch reaches, is recorded even if the
+   calling code wraps the import in a `try`/`except` that would otherwise swallow the
+   evidence. See `test_running_a_fuzz_or_minimize_dispatch_never_touches_the_gateway`
+   below for why a static scan alone (this file's check 1, or `test_worker_executor_
+   modules_import_boundary.py`'s AST walk of `WORKER_EXECUTOR_MODULES`) is not enough
+   on its own: neither can see a fully dynamic import built from a runtime string
+   (`importlib.import_module("gateway" + ".client")`), and only actually running the
+   code proves the property the boundary exists for.
 
 This file intentionally does not re-derive `tests/architecture/test_import_direction.
 py`'s general "exactly one module may construct an inference client" property — that
@@ -211,4 +233,165 @@ def test_starting_the_worker_process_never_loads_the_gateway() -> None:
         "Starting the worker process (django.setup() + loading WORKER_EXECUTOR_"
         f"MODULES) pulled in banned modules: {loaded}. fuzz-worker must never load "
         "the model-gateway client or an HTTP client library — see D-073."
+    )
+
+
+# --------------------------------------------------------------------------------------
+# 3. Runtime — job dispatch (#198 / SEC-54). Check 2 only proves module-level code
+#    (decorators, AppConfig.ready()) never loads `gateway`. It never calls the
+#    functions those modules define, so a lazy `import gateway.client` sitting inside
+#    a function body — #198's exact PoC, injected into `orchestrator/executors.py`
+#    during PR #197's review — never runs during check 2 and is invisible to it. This
+#    check closes that gap by actually calling the registered `Executor`/
+#    `TransitionPolicy` for every `JobKind` a `--kinds FUZZ,MINIMIZE` fuzz-worker
+#    claims, with `gateway` shadowed by a poisoned stub package so any import attempt
+#    — anywhere in the call graph, including a fully dynamic
+#    `importlib.import_module(...)` a static AST scan cannot see at all — is recorded
+#    even if the calling code wraps it in a `try/except ImportError`.
+# --------------------------------------------------------------------------------------
+
+#: Written into `gateway/__init__.py` inside a scratch directory prepended to
+#: `sys.path` ahead of everything else, so any `import gateway` (or `import
+#: gateway.client`, `from gateway import ...` — all of these run the *package's*
+#: `__init__.py` first) resolves here instead of the real package. Records a
+#: sentinel-file write before raising `ImportError`, so the evidence survives even a
+#: `try: import gateway.client\nexcept ImportError: pass` around the injected
+#: import — the exact shape that would otherwise let a compromised/lazy import hide
+#: from a plain "check sys.modules afterwards" test. Also means this check does not
+#: depend on the real `gateway` package being installed in `apps/control-api`'s own
+#: venv — it lives in `services/model-gateway`, a separate installable, and is not a
+#: dependency of `apps/control-api` (by design — see this file's own `BANNED_ROOTS`
+#: docstring).
+_POISONED_GATEWAY_INIT = '''\
+"""Poisoned stand-in for `gateway`, injected only by
+`tests/architecture/test_fuzz_worker_isolation.py::
+test_running_a_fuzz_or_minimize_dispatch_never_touches_the_gateway` (#198 / SEC-54).
+"""
+import os
+
+_sentinel = os.environ.get("FUZZ_ISOLATION_TEST_GATEWAY_TOUCH_SENTINEL")
+if _sentinel:
+    with open(_sentinel, "a", encoding="utf-8") as _fh:
+        _fh.write("gateway package was imported\\n")
+
+raise ImportError(
+    "gateway is poisoned for tests/architecture/test_fuzz_worker_isolation.py's "
+    "job-dispatch runtime check (#198/SEC-54) -- fuzz-worker must never import it."
+)
+'''
+
+
+def _write_poisoned_gateway_package(poison_root: Path) -> None:
+    package_dir = poison_root / "gateway"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text(_POISONED_GATEWAY_INIT, encoding="utf-8")
+
+
+@_control_api_only
+def test_running_a_fuzz_or_minimize_dispatch_never_touches_the_gateway(tmp_path: Path) -> None:
+    """#198 (SEC-54) reproduction and fix. Actually *calls* the registered `Executor`
+    and `TransitionPolicy` for every `JobKind` a `--kinds FUZZ,MINIMIZE` fuzz-worker
+    claims (D-073) — not just imports the module that defines them, which is all
+    `test_starting_the_worker_process_never_loads_the_gateway` above proves. A lazy
+    `import gateway.client` inside a function body only executes once that function is
+    *called*; this is the runtime belt that calls it, the same way `manage.py
+    run_worker`'s claim loop calls `orchestrator.executors.executor_for(job.kind)(ctx)`
+    once a job is actually dispatched (`missions/management/commands/run_worker.py::
+    Command._run_executor`).
+
+    Uses a poisoned stand-in `gateway` package (see `_POISONED_GATEWAY_INIT` above)
+    rather than relying on the real package's absence/presence in this environment,
+    and rather than only inspecting `sys.modules` afterwards — a swallowed
+    `except ImportError` around the injected import would leave no trace in
+    `sys.modules`, but the poisoned stub's sentinel write happens unconditionally,
+    before it raises.
+    """
+    poison_root = tmp_path / "poison"
+    _write_poisoned_gateway_package(poison_root)
+    sentinel = tmp_path / "gateway-touched.log"
+
+    program = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(poison_root)!r})\n"
+        "import django\n"
+        "django.setup()\n"
+        "from missions.management.commands.run_worker import (\n"
+        "    WORKER_EXECUTOR_MODULES, _load_executor_modules, parse_kinds,\n"
+        ")\n"
+        "_load_executor_modules(WORKER_EXECUTOR_MODULES)\n"
+        "from pathlib import Path\n"
+        "from missions.models import Job, Mission\n"
+        "from orchestrator.executors import ExecutorContext, executor_for, transition_policy_for\n"
+        "\n"
+        "kinds = parse_kinds('FUZZ,MINIMIZE')\n"
+        "for kind in sorted(kinds, key=lambda k: k.value):\n"
+        "    job = Job(kind=kind)\n"
+        "    mission = Mission()\n"
+        "    ctx = ExecutorContext(\n"
+        "        job=job,\n"
+        "        mission=mission,\n"
+        "        source_dir=Path('/nonexistent-source-dir'),\n"
+        "        workspace_root=Path('/nonexistent-workspace-root'),\n"
+        "        trace_id='fuzz-worker-isolation-test-198',\n"
+        "        cancel_requested=lambda: False,\n"
+        "    )\n"
+        "    # Broad catches deliberately: a stub raises NotImplementedError (no\n"
+        "    # executor wired yet), a real future executor may raise for lack of\n"
+        "    # real infra (no such source_dir) -- neither is this check's concern.\n"
+        "    # The poisoned gateway's sentinel write (unconditional, before it\n"
+        "    # raises) is the signal this check actually reads, not the return\n"
+        "    # value or exception here.\n"
+        "    try:\n"
+        "        executor_for(kind)(ctx)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    try:\n"
+        "        transition_policy_for(kind)(job, mission)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "print('dispatch-attempted')\n"
+    )
+
+    env = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": os.environ.get("DJANGO_SETTINGS_MODULE", "config.settings.test"),
+        "DJANGO_SECRET_KEY": os.environ.get(
+            "DJANGO_SECRET_KEY", "fuzz-worker-isolation-test-not-a-real-secret-01234"
+        ),
+        "PYTHONPATH": str(CONTROL_API),
+        "FUZZ_ISOLATION_TEST_GATEWAY_TOUCH_SENTINEL": str(sentinel),
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=CONTROL_API,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    if result.returncode != 0:
+        blamed = [root for root in BANNED_ROOTS if root in result.stderr]
+        assert not blamed, (
+            "dispatching a FUZZ/MINIMIZE job crashed the process, and the error "
+            f"names a banned root {blamed} — that is the boundary breaking, not a "
+            f"missing dependency:\n{result.stderr.strip()[-800:]}"
+        )
+        pytest.skip(
+            "could not start the worker process in this environment (dependencies "
+            f"missing?): {result.stderr.strip()[-400:]}"
+        )
+
+    assert "dispatch-attempted" in result.stdout, (
+        "the runtime check did not reach its own success marker — something above it "
+        f"failed silently.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+
+    assert not sentinel.exists(), (
+        "Dispatching a FUZZ or MINIMIZE job imported the (poisoned, stand-in) "
+        "`gateway` package. fuzz-worker must never construct a model-gateway client "
+        "or reach model-host (D-073) — this is exactly #198/SEC-54's finding: a lazy "
+        "import inside a function body, only triggered once that function actually "
+        f"runs. Evidence:\n{sentinel.read_text(encoding='utf-8') if sentinel.exists() else ''}"
     )
