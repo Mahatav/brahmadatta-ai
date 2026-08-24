@@ -72,7 +72,11 @@ class GatewaySettings:
     #: value the same way it carries `endpoint`. Blank is legal: only the compose
     #: `model-host-auth` sidecar demands this header today, and a bare `ollama serve`
     #: on loopback (this module's other supported shape) has no auth to send at all.
-    model_host_bearer_token: str = ""
+    #: `repr=False` (#224): no call path today puts this value in a log line, exception
+    #: message or repr() call, but nothing stopped a future one from doing so by
+    #: accident — a stray debug log or debugger breakpoint on the settings object would
+    #: otherwise print the token in cleartext.
+    model_host_bearer_token: str = field(default="", repr=False)
 
     #: D-123 (.project/decisions.md). Read from `MODEL_HOST_TIMEOUT_SECONDS` — the
     #: ONE source of truth for both this client's own request timeout (passed to

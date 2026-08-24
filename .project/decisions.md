@@ -13865,3 +13865,73 @@ comment thread for the disposition. This entry only corrects the label.
 
 **Final approval authority** — registry-hygiene correction, no code or security-posture
 implication; none needed.
+
+---
+
+## D-129 — `field(repr=False)` on the two bearer-token fields in `services/model-gateway/gateway/` (#224) · 2026-08-24 · `ai-ml-engineer` seat
+
+**Decision.** Add `field(repr=False)` (stdlib `dataclasses` mechanism) to
+`GatewaySettings.model_host_bearer_token` (`gateway/settings.py`) and
+`OllamaCodeLlamaBackend.bearer_token` (`gateway/ollama.py`) — the only two
+dataclass fields in the `services/model-gateway/gateway/` package that carry a live
+bearer-token value. A grep of the whole package for `token|bearer|secret|password|
+credential|api_key` (excluding `tests/`) found no other class-level field carrying a
+secret: `gateway/client.py`'s `bearer_token` and `tools/model_prep.py`'s
+`_bearer_token()` pass the value as a function parameter, not a dataclass field, so
+`repr()`/`str()` of any object never touches it there.
+
+**Options considered.**
+1. `field(repr=False)` on the two fields (chosen).
+2. A custom `__repr__`/`__str__` override on both classes that redacts the token
+   explicitly (e.g. prints `bearer_token='***'`).
+3. Do nothing — issue #224 itself confirms no real leak exists today.
+
+**Pros and cons.**
+1. Stdlib mechanism, one line per field, zero behavioral change to equality,
+   hashing, or field access (`field(repr=False)` only affects what `repr()`/`str()`
+   print). Con: a future field added to either class without `repr=False` reopens
+   the same gap — this fix does not add a structural guard against that, only closes
+   the two fields that exist today.
+2. Would also let a maintainer see *that* a token is configured (e.g.
+   `bearer_token='***'`) without printing the value, which `repr=False` (which omits
+   the field from the output entirely) does not preserve. Con: hand-written
+   `__repr__`/`__str__` is more code to maintain and easier to get subtly wrong (e.g.
+   forgetting to also override `__str__`, which frozen dataclasses do not derive from
+   `__repr__` automatically) for a class whose only current benefit is closing a
+   latent, not-yet-exploited gap.
+3. Zero effort. Con: leaves exactly the gap #224 was filed to close; the next
+   engineer who adds a debug log line or an exception handler that stringifies
+   `settings` or `backend` has no guard stopping a cleartext token from reaching a
+   log file.
+
+**Cost implications.** None — no runtime cost, no dependency added.
+
+**Security implications.** Closes the latent gap #224 describes: a future
+`repr()`/`str()`/debug log of either object can no longer print the token in
+cleartext, even by accident. Does not change today's actual exposure (issue #224's
+own review already confirmed no current call path reprs or logs either object) —
+this is hardening against a future regression, not a fix to a present leak.
+
+**Scalability implications.** None.
+
+**Recommendation.** Option 1. Matches the issue's own suggested fix, is the smallest
+change that closes the gap, and carries no behavioral risk since `repr=False` cannot
+affect equality, hashing, `__init__` argument order/defaults, or attribute access —
+only what `repr()`/`str()` print.
+
+**Verification.** New test file
+`services/model-gateway/gateway/tests/test_token_fields_not_in_repr.py` constructs
+each class with a realistic-looking token and asserts the token string is absent
+from both `repr()` and `str()` of the instance while another, non-secret field on
+the same instance is still present (proving the *field* is hidden, not that `repr()`
+is broken/empty for the whole object). Full suite:
+`python -m pytest gateway/tests/ -q` → `388 passed, 6 skipped` (6 skips pre-exist
+this change; run under Python 3.12.9 per this package's CI `PYTHON_VERSION`, since
+the ambient interpreter on this machine is 3.9 and lacks `datetime.UTC`, which
+`gateway/tests/conftest.py` already imports independent of this change).
+
+**Final approval authority** — CTO, per this seat's standing decision-record
+convention for a non-trivial (if small) hardening change to a shared gateway module;
+self-merged by the `ai-ml-engineer` seat given essentially zero behavioral risk
+(`repr=False` only affects `repr()`/`str()` output) and a clean, green test run — see
+this task's PR/handoff for the self-merge rationale in full.
