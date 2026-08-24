@@ -374,6 +374,16 @@ Injection, per environment:
 
 Development TLS keys are generated locally and never leave the machine.
 
+**`model-host-auth`'s envsubst'd values need a recreate, not a restart.** `MODEL_HOST_BEARER_TOKEN`
+and `MODEL_HOST_TIMEOUT_SECONDS` are rendered into the container's nginx config once, at
+container *creation* (`docker-entrypoint.d/20-envsubst-on-templates.sh`), not read live. After
+changing either in `.env`, run `docker compose up -d model-host-auth` (which detects the
+compose-level env diff and recreates the container) — `docker compose restart
+model-host-auth` reuses the already-rendered config and silently keeps the old value. Found
+live (#247, D-126): this is exactly the shape of the dual-hardcoded-timeout bug D-123
+diagnosed, just from an operator forgetting `up -d` rather than two independently-hardcoded
+literals.
+
 ## 9a. Generated fuzzer output
 
 Crash inputs, corpus entries and coverage profiles produced by a fuzz campaign are derived
