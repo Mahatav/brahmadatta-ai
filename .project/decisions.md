@@ -13846,3 +13846,22 @@ changing — only the label.
 
 **Final approval authority** — this is a registry-hygiene correction with no code or
 security-posture implication; no further approval needed.
+
+---
+
+## D-128 — SEC registry correction, continued (#181): also renumbered SEC-50 -> SEC-57
+· 2026-08-23 · orchestrating session
+
+**Same sweep that produced D-127** (checking every open issue with a "SEC-" title for
+collisions against D-075's dominant SEC-50 claim) found one more: issue #181 ("BASELINE
+and VERIFY executors run target/patch code without container-level isolation") also used
+"SEC-50". Renumbered to **SEC-57** — `SEC-56` was assigned to #191 in D-127; confirmed
+`SEC-51` through `SEC-56` are all already spoken for elsewhere before picking `SEC-57`.
+
+Not otherwise touched: #181 remains open, tracked backlog. The finding is real and
+already carries its own accepted-risk rationale (bounded blast radius, inherited from
+already-merged code, the in-scope target is a trusted fixture) — see the issue's own
+comment thread for the disposition. This entry only corrects the label.
+
+**Final approval authority** — registry-hygiene correction, no code or security-posture
+implication; none needed.
