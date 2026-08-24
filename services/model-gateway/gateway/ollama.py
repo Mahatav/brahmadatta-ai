@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
@@ -82,7 +82,10 @@ class OllamaCodeLlamaBackend:
     model_revision: str = CODELLAMA_REVISION
     model_artifact_sha256: str = ""
     timeout_sec: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS
-    bearer_token: str = ""
+    #: `repr=False` (#224): same rationale as `GatewaySettings.model_host_bearer_token`
+    #: — no call path today reprs or logs this object, but a future stray `repr()`/
+    #: `str()`/debug log shouldn't be able to print the token in cleartext.
+    bearer_token: str = field(default="", repr=False)
     keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
 
     @property
