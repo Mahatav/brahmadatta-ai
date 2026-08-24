@@ -98,7 +98,12 @@ function withSignal(init: RequestInit, signal?: AbortSignal): RequestInit {
   return signal ? { ...init, signal } : init;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * Shared by `request` (the ordinary typed-JSON path) and `requestWithProvenance` below (#52 —
+ * the one caller that also needs the raw `Response` to read a header off it). One fetch/error
+ * implementation either way; nothing about the ordinary request path changes.
+ */
+async function requestWithResponse<T>(path: string, init: RequestInit = {}): Promise<{ data: T; response: Response }> {
   let response: Response;
   try {
     response = await fetch(path, {
@@ -134,10 +139,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     // Acknowledgement-shaped responses always carry a body in this API (202 = Acknowledgement),
     // but guard the truly-empty 204 case rather than assume every non-200 has JSON to parse.
     const text = await response.text();
-    return (text ? JSON.parse(text) : (undefined as T)) as T;
+    return { data: (text ? JSON.parse(text) : (undefined as T)) as T, response };
   }
 
-  return (await response.json()) as T;
+  return { data: (await response.json()) as T, response };
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await requestWithResponse<T>(path, init)).data;
 }
 
 function jsonBody(payload: unknown): RequestInit {
@@ -186,6 +195,38 @@ export async function createMission(payload: MissionCreateRequest, signal?: Abor
 
 export async function getMissionDetail(missionId: string, signal?: AbortSignal): Promise<MissionDetail> {
   return request<MissionDetail>(`/api/v1/missions/${encodeURIComponent(missionId)}`, withSignal({}, signal));
+}
+
+/**
+ * #52 / D-058 §2.4 — the header `packages/test-fixtures/sse_replay.py` sets on literally every
+ * response it serves (`ReplayHandler._json`, and the SSE stream's own headers). A native
+ * `EventSource` never exposes response headers to JS, so the SSE stream itself cannot be the
+ * thing presentation mode reads this off of — this mission-detail fetch is a same-origin,
+ * same-backend request (the dev proxy/nginx location that fronts `/api/v1/missions/*` fronts
+ * both), so its header is exactly as trustworthy a signal as the stream's own header would be,
+ * without requiring a hand-rolled fetch-based SSE reader duplicating `connectMissionEvents`.
+ * Documented as a deliberate, disclosed implementation choice — flagged to `ui-ux-designer` in
+ * the PR, since D-058's text says "the SSE connection's response" specifically.
+ */
+export const FIXTURE_REPLAY_HEADER = 'X-Brahmadatta-Fixture';
+export const FIXTURE_REPLAY_HEADER_VALUE = 'replay';
+
+export interface MissionProvenance {
+  mission: MissionDetail;
+  fixtureHeaderValue: string | null;
+}
+
+/**
+ * Presentation-mode-only (`PresentationMissionCommandCenter`'s provenance check, #52). Never
+ * called from `MissionCommandCenter`/the live path — this is additive, not a replacement for
+ * `getMissionDetail`, so the ordinary live-mission flow is byte-for-byte unchanged.
+ */
+export async function getMissionDetailWithProvenance(missionId: string, signal?: AbortSignal): Promise<MissionProvenance> {
+  const { data, response } = await requestWithResponse<MissionDetail>(
+    `/api/v1/missions/${encodeURIComponent(missionId)}`,
+    withSignal({}, signal),
+  );
+  return { mission: data, fixtureHeaderValue: response.headers.get(FIXTURE_REPLAY_HEADER) };
 }
 
 /**

@@ -27,6 +27,19 @@ export type VerificationRecord = components['schemas']['VerificationRecord'];
 
 export type StreamState = 'idle' | 'connecting' | 'open' | 'stale' | 'closed' | 'error';
 
+/**
+ * #52 / D-058 §2.4 — the presentation-mode disclosure signal. `'fixture-replay'` only ever
+ * comes from a real HTTP response header (`X-Brahmadatta-Fixture: replay`, set by
+ * `packages/test-fixtures/sse_replay.py` on every one of its responses), never inferred from a
+ * build flag or a URL alone — see `deriveMockSource` below, which is the one place that mapping
+ * happens, and is exercised directly by `scripts/check-presentation-mode.mjs` per #52's
+ * acceptance criterion 2. `null` covers both "not yet known" and "confirmed real" — callers that
+ * need to tell those apart track it themselves (`PresentationMissionCommandCenter` does, via its
+ * own local `provenance` state), because that distinction is presentation-mode-only concern and
+ * does not belong in the mission snapshot every panel reads.
+ */
+export type MockSource = 'fixture-replay' | null;
+
 export interface MissionEvent {
   id: string;
   event: string;
@@ -105,6 +118,10 @@ export interface MissionSnapshot {
   releasedResources: ReleasedResource[];
   degradedReason: string | null;
   failedReason: string | null;
+  /** #52 §2.4 — non-null only inside a `command-center:presentation` build that has confirmed,
+   * via the real `X-Brahmadatta-Fixture` header, that this mission's data came from the
+   * fixture-replay server. Never set from the build flag alone. */
+  mockSource: MockSource;
 }
 
 export const emptyMissionSnapshot: MissionSnapshot = {
@@ -140,6 +157,7 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   releasedResources: [],
   degradedReason: null,
   failedReason: null,
+  mockSource: null,
 };
 
 export const $streamState = atom<StreamState>('idle');
@@ -314,6 +332,31 @@ export function startStaleWatcher(thresholdMs = 10000): () => void {
     }
   }, 2000);
   return () => window.clearInterval(interval);
+}
+
+/**
+ * #52 §2.4 acceptance criterion 2 — the one place a raw HTTP header value becomes `MockSource`.
+ * Pure and total: any header value other than the exact literal `'replay'` is real data, full
+ * stop. Exported so `scripts/check-presentation-mode.mjs` can assert the mapping directly,
+ * without needing a mounted component or a live fetch.
+ */
+export function deriveMockSource(fixtureHeaderValue: string | null): MockSource {
+  return fixtureHeaderValue === 'replay' ? 'fixture-replay' : null;
+}
+
+/**
+ * #52 §2.4 — the only writer of `MissionSnapshot.mockSource`. Guarded the same way
+ * `applyMissionEvent` guards every other write: a response for a mission the store has already
+ * moved on from (operator switched missions mid-flight, or a stale racing request resolves
+ * late) must never overwrite the current mission's disclosure state. Presentation-mode-only —
+ * the live/finale build never calls this.
+ */
+export function setMockSource(missionId: string, source: MockSource): void {
+  const current = $missionSnapshot.get();
+  if (current.missionId != null && current.missionId !== missionId) {
+    return;
+  }
+  $missionSnapshot.set({ ...current, mockSource: source });
 }
 
 export function setMissionRepositoryContext(repositoryRef: string): void {

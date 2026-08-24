@@ -21,10 +21,15 @@
     "check:candidate-compare": "node scripts/check-candidate-compare-overlay.mjs",
     "check:bottom-strip": "node scripts/check-bottom-strip-ledger.mjs",
     "check:mission-snapshot-hydration": "node --experimental-strip-types scripts/check-mission-snapshot-hydration.mjs",
-    "check": "npm run check:security && npm run check:issue-20 && npm run check:local-intake && npm run check:api && npm run check:mission-control-client && npm run check:mission-control-form && npm run check:brahmadatta-core && npm run check:stage-timeline && npm run check:findings-evidence && npm run check:candidate-compare && npm run check:bottom-strip && npm run check:mission-snapshot-hydration && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
+    "check:presentation-mode": "node --experimental-strip-types scripts/check-presentation-mode.mjs",
+    "check": "npm run check:security && npm run check:issue-20 && npm run check:local-intake && npm run check:api && npm run check:mission-control-client && npm run check:mission-control-form && npm run check:brahmadatta-core && npm run check:stage-timeline && npm run check:findings-evidence && npm run check:candidate-compare && npm run check:bottom-strip && npm run check:mission-snapshot-hydration && npm run check:presentation-mode && ASTRO_TELEMETRY_DISABLED=1 astro check && tsc --noEmit",
     "build": "npm run check && ASTRO_TELEMETRY_DISABLED=1 astro build",
     "preview": "ASTRO_TELEMETRY_DISABLED=1 astro preview",
-    "smoke:local": "node scripts/smoke-local-command-center.mjs"
+    "smoke:local": "node scripts/smoke-local-command-center.mjs",
+    "dev:presentation": "ASTRO_TELEMETRY_DISABLED=1 BD_PRESENTATION_BUILD=true astro dev",
+    "build:presentation": "ASTRO_TELEMETRY_DISABLED=1 BD_PRESENTATION_BUILD=true astro build --outDir dist-presentation",
+    "preview:presentation": "ASTRO_TELEMETRY_DISABLED=1 BD_PRESENTATION_BUILD=true astro preview --outDir dist-presentation",
+    "check:presentation-build-exclusion": "bash scripts/check-presentation-build-exclusion.sh"
   },
   "dependencies": {
     "@astrojs/react": "^6.0.2",
