@@ -65,8 +65,33 @@ if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
     if [[ -z "${UVICORN_DEV_FORWARDED_ALLOW_IPS:-}" ]]; then
       export UVICORN_DEV_FORWARDED_ALLOW_IPS="10.90.$(( (worktree_hash_dec % 250) + 1 )).0/24"
     fi
+
+    # #235: docker-compose.yml's control-api service interpolates
+    # `${DJANGO_CSRF_TRUSTED_ORIGINS:-https://localhost:8443,http://localhost:8080}` — a
+    # static literal that matches the PRIMARY checkout's nginx ports but not a linked
+    # worktree's derived ones (NGINX_HTTP_PORT/NGINX_HTTPS_PORT above). Django's CSRF
+    # middleware only ever narrows trust, never widens it (safe to fail this way), but a
+    # browser POST/PUT through the worktree's own nginx port was rejected until the
+    # operator manually overrode this var.
+    #
+    # Unlike UVICORN_FORWARDED_ALLOW_IPS just above, this does NOT need a differently-named
+    # source variable: .env.example's DJANGO_CSRF_TRUSTED_ORIGINS is already the correct
+    # PRIMARY-checkout dev value (no stale cross-profile value to accidentally inherit —
+    # contrast UVICORN_FORWARDED_ALLOW_IPS, which .env.example defines for the FINALE
+    # subnet, so reusing that name here would have silently picked up the wrong stack's
+    # value). Exporting the SAME name Django/compose already read is enough, and Compose's
+    # shell-environment interpolation outranks the value it would otherwise read from
+    # `--env-file .env` (verified empirically for this fix, since the precedence is easy to
+    # get backwards from docs alone: an unset shell var falls through to the `.env` file's
+    # literal value, a set one wins over it — same "operator's own override always wins"
+    # convention as COMPOSE_PROJECT_NAME/NGINX_HTTP_PORT above).
+    if [[ -z "${DJANGO_CSRF_TRUSTED_ORIGINS:-}" ]]; then
+      export DJANGO_CSRF_TRUSTED_ORIGINS="https://localhost:${NGINX_HTTPS_PORT},http://localhost:${NGINX_HTTP_PORT}"
+    fi
+
     note "isolated nginx ports: ${NGINX_HTTP_PORT} / ${NGINX_HTTPS_PORT}"
     note "isolated api network subnet: ${UVICORN_DEV_FORWARDED_ALLOW_IPS}"
+    note "isolated CSRF trusted origins: ${DJANGO_CSRF_TRUSTED_ORIGINS}"
   fi
 fi
 

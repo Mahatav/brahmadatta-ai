@@ -14774,3 +14774,112 @@ the number lands.
 
 **Final approval authority** — registry-hygiene correction, no code or
 security-posture implication; none needed.
+
+---
+
+## D-138 — #235 fix: `DJANGO_CSRF_TRUSTED_ORIGINS`'s dev default now derives from the same worktree-port parameterization as `NGINX_HTTP_PORT`/`NGINX_HTTPS_PORT` · 2026-08-24 · `devops-engineer` seat
+
+**Trigger** — Found during D-120 (worktree isolation, #230/#233): an isolated worktree's
+dev stack comes up healthy on its own derived nginx port (`dev-up.sh`'s
+`NGINX_HTTP_PORT`/`NGINX_HTTPS_PORT` derivation, PR #219/#233), but
+`DJANGO_CSRF_TRUSTED_ORIGINS`'s dev default in `.env`/`.env.example` and
+`docker-compose.yml` stayed the literal `https://localhost:8443,http://localhost:8080`
+— filed as #235, a usability gap (not a security regression: CSRF trust only ever
+narrows).
+
+**Decision** — `infrastructure/scripts/dev-up.sh` now derives and exports
+`DJANGO_CSRF_TRUSTED_ORIGINS` itself, inside the same linked-worktree branch that
+already derives `NGINX_HTTP_PORT`/`NGINX_HTTPS_PORT`/`UVICORN_DEV_FORWARDED_ALLOW_IPS`,
+built directly from those same two port values
+(`https://localhost:${NGINX_HTTPS_PORT},http://localhost:${NGINX_HTTP_PORT}`), guarded
+by the same `[[ -z "${VAR:-}" ]]` "operator's own override always wins" convention the
+other three already use. `docker-compose.yml`'s `control-api` service needed no
+structural change — it already interpolates
+`${DJANGO_CSRF_TRUSTED_ORIGINS:-https://localhost:8443,http://localhost:8080}`; a
+one-line comment was added pointing at the new source of truth so a future reader isn't
+surprised by the override. `.env`/`.env.example` are also left unchanged: their literal
+value is the correct, unmodified default for the *primary* checkout, which is exactly
+what `dev-up.sh` leaves alone (it only branches into the derivation when
+`git rev-parse --git-dir` differs from `--git-common-dir`).
+
+**Options considered** — (a) export the derived value under the SAME env var name
+(`DJANGO_CSRF_TRUSTED_ORIGINS`) `dev-up.sh` and `docker-compose.yml` already read; (b)
+follow the `UVICORN_FORWARDED_ALLOW_IPS`/`UVICORN_DEV_FORWARDED_ALLOW_IPS` precedent
+exactly — a differently-named script-only variable feeding the container's fixed env
+var name through compose interpolation; (c) move the derivation into
+`docker-compose.yml` itself, building the value from `${NGINX_HTTPS_PORT}`/
+`${NGINX_HTTP_PORT}` inline via nested interpolation.
+
+**Pros and cons** — (a) is what shipped. Verified empirically (throwaway `docker
+compose config` test, this session) that Compose's shell-environment interpolation
+outranks the value it would otherwise read from `--env-file .env` for the identical
+variable name — an unset shell var falls through to `.env`'s literal value unchanged
+(primary checkout, untouched), a set one overrides it (linked worktree only). No
+new variable name added to an already-dense script/compose surface. (b)'s reasoning
+doesn't transfer: `UVICORN_FORWARDED_ALLOW_IPS`'s split-name convention exists because
+`.env.example` already defines that exact name for a DIFFERENT profile's value (the
+finale edge subnet) — reusing it in the dev compose file would have silently picked up
+the wrong stack's value the moment a developer copied `.env.example` to `.env`, a name
+collision independent of worktree isolation. `.env.example`'s
+`DJANGO_CSRF_TRUSTED_ORIGINS` has no such cross-profile collision — it is already the
+correct dev value for the primary-checkout case — so introducing a second name here
+would be process-following without the underlying problem it exists to solve, and one
+more name for a future reader to trace back to its source. (c) works in principle but
+Compose's interpolation syntax does not reliably nest `${VAR:-${OTHER:-default}}`
+defaults, and `dev-up.sh` is already the single place in this repo that owns "what a
+linked worktree's stack looks like" (the `#230` header comment on `docker-compose.yml`
+says exactly this about the other three derived values) — splitting derivation logic
+into the compose file too would put worktree-port math in two files instead of one.
+
+**Verification** — Brought up an isolated worktree stack from this branch's own
+worktree (`git rev-parse --git-dir` ≠ `--git-common-dir`, confirmed). Pre-fix (fix
+stashed): `docker exec <control-api> env | grep CSRF` showed the stale
+`https://localhost:8443,http://localhost:8080` even though this worktree's real nginx
+ports were 26059/36059. Post-fix: the same command shows
+`https://localhost:36059,http://localhost:26059`, and `manage.py shell -c
+"from django.conf import settings; print(settings.CSRF_TRUSTED_ORIGINS)"` confirms
+Django's own resolved setting matches. `tests/architecture/` (67 passed, 6 skipped, no
+CSRF-specific coverage either side of the fix) unaffected before and after.
+
+Exercising a real CSRF-protected POST turned up an important caveat, reported in full
+in this session's handoff to the orchestrator rather than only here: Django's
+`CsrfViewMiddleware` has a same-origin fallback (`_origin_verified`/`_check_referer`
+compare `Origin`/`Referer` against `request.get_host()` directly) that does not consult
+`CSRF_TRUSTED_ORIGINS` at all when they already match — and since `USE_X_FORWARDED_HOST`
+/ `SECURE_PROXY_SSL_HEADER` are already correctly set (landed 2026-08-07, predating
+#235) and nginx forwards `Host` verbatim with its real port, a realistic same-origin
+browser POST through the isolated stack's own nginx port to the one CSRF-covered
+endpoint in this codebase (`/django-admin/login/`; `NinjaAPI` is constructed with
+`auth=BearerTokenAuth()` and no `csrf=True`, so `/api/` is not CSRF-covered at all)
+already succeeded even with the stale pre-fix default — confirmed live, both before and
+after this fix, with a real `curl` POST carrying a matching `Origin`/`Referer`. What IS
+demonstrably different pre/post-fix: a request whose `Origin` is the stale literal
+value (`https://localhost:8443`, i.e. what a client hardcoded against the primary
+checkout's port would send) is correctly rejected post-fix (403, "CSRF verification
+failed") since it now matches neither `get_host()` nor the trusted-origins list for
+THIS worktree — proof the config change takes effect, even though the literal
+browser-rejection symptom as filed does not currently reproduce given the already-fixed
+proxy headers. The fix is still correct, low-risk, drop-in configuration hygiene
+(`CSRF_TRUSTED_ORIGINS` should reflect the real origin regardless of whether an
+internal Django implementation detail currently papers over the gap for one endpoint)
+and matches the existing derivation convention exactly.
+
+**Cost implications** — None; a shell/compose change only.
+
+**Security implications** — None negative. CSRF trust only ever narrows to the exact
+origin `dev-up.sh` itself already derives for this worktree's nginx, never widens to
+anything unexpected — same reasoning #235 states. Confirmed live that a mismatched
+`Origin` (including the old literal default, now stale for this worktree) is still
+rejected post-fix.
+
+**Scalability implications** — None; dev-only, one more worktree-scoped derived value
+alongside the three `dev-up.sh` already computes.
+
+**Recommendation** — Merge. Self-merged given the fix is a narrow, verified, dev-only
+usability change with clean before/after evidence and no security-sensitive surface
+(#235 itself, cybersecurity's own prior "not a security regression" framing, and this
+session's own live confirmation that trust only narrows).
+
+**Final approval authority** — CTO for the technical mechanism (informational; no
+review blocked on it per #235's own non-security framing). No CEO/PM business-scope
+call involved.

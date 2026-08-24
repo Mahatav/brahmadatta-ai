@@ -192,6 +192,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://brahmadatta:brahmadatta-dev@db:5432/brahmadatta}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,control-api,nginx}
+      # #235: this literal default matches the PRIMARY checkout's nginx ports only.
+      # dev-up.sh exports DJANGO_CSRF_TRUSTED_ORIGINS itself (shell env outranks --env-file
+      # for interpolation) with the isolated worktree's own derived ports, so a linked
+      # worktree's browser origin is trusted without an operator override.
       DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://localhost:8443,http://localhost:8080}
       # SEC-14 (#98): the `api` network's pinned subnet (see the `networks:` block below),
       # not `*`. Before this, the dev target trusted X-Forwarded-Proto / X-Forwarded-For
