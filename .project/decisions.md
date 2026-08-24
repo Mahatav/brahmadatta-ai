@@ -13815,3 +13815,34 @@ where a number is read from, not what the number is); `cybersecurity`, gating me
 review of the `model-host-auth` nginx template change per `.claude/COMPANY.md`'s
 standing rule for auth-proxy-touching diffs; Mahatav, unchanged from D-123, for the
 memory-capacity question and the actual timeout value once it is re-measured.
+
+---
+
+## D-127 — SEC registry correction (#245): the "SEC-50" collision is three-way, not
+two-way — D-075 owns it, not D-082; #191's finding gets a genuinely fresh number ·
+2026-08-23 · orchestrating session
+
+**Correction.** #245 and D-125's own "Note on the SEC-50 label" both checked #191's
+finding against D-082 only and concluded D-082 should keep "SEC-50". That check was
+incomplete. `SEC-50` is in fact **D-075's** label first and overwhelmingly — D-075
+("SEC-50 ruling: D-073 §3's 'nothing to exfiltrate toward' mitigation does not hold")
+predates D-082 in this file, is the subject of its own dedicated fix (D-078) and
+re-verification rounds (multiple entries through D-6xx/D-7xx), and is cross-referenced
+by name ("D-075/SEC-50") more than 20 times elsewhere in this file — including by this
+session's own D-121/D-123/D-125/D-126 entries, written before this correction was
+noticed. Renumbering away from D-075's usage would be far more disruptive than useful.
+
+**So there are two independent SEC-50 claims already in this file before #191 ever
+used the label**: D-075 (dominant, correct, unchanged) and D-082 (a real, smaller,
+pre-existing collision this correction is the first to surface — not fixed
+retroactively; D-082's own text is left as historical record rather than edited).
+
+**Resolution for #191 specifically**: does not fight either prior claim for the
+number. Reassigned to **SEC-56** — the next genuinely unused number (`SEC-51` through
+`SEC-55` are already assigned to real findings elsewhere in this file/issue tracker;
+confirmed by grep before picking it). GitHub issue #191's title updated to read
+"SEC-56" in place of "SEC-50". No code or decision-record content from D-125 needed
+changing — only the label.
+
+**Final approval authority** — this is a registry-hygiene correction with no code or
+security-posture implication; no further approval needed.
