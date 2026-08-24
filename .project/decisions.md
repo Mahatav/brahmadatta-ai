@@ -15591,3 +15591,85 @@ original issue text, not gaps introduced by this pass.
 code/infra risk); self-merge authority per `CLAUDE.md`'s standing PR-merge grant, since
 this is documentation-only and every claim in it is backed by real command output shown
 above, not asserted.
+
+---
+
+## D-146 — #5: seeding pktcfg's git history as a standalone nested repo, shipped as a
+bundle · 2026-08-24 · `backend-developer` seat
+
+**Decision.** `demo/repositories/pktcfg` gets a real, plausible, 14-commit git history
+in which the already-seeded literal-tab heap-buffer-overflow (README.md's "The seeded
+defect") is introduced at exactly one commit,
+`114383dd517e49e1285b53608184cb744adb2aaa` ("decode: normalise literal tab bytes the
+same way as the `\t` escape", 2025-05-19). That history lives in a real, standalone
+nested git repository at `demo/repositories/pktcfg/.git` — not a submodule, not a
+subtree, not simulated. It is not committed to the outer `brahmadatta-ai` repository;
+it ships as a git bundle at `demo/repositories/pktcfg-history.bundle`, restored on
+demand by `demo/repositories/restore-pktcfg-history.sh`. Work authorized directly by
+D-144 (issue `#5` is explicitly in that ruling's scope list).
+
+**Options considered.**
+1. **Nested standalone repo, shipped as a bundle (chosen).** `git bisect` runs inside
+   `demo/repositories/pktcfg` exactly the way it would against any real project — no
+   outer-repo awareness, no wrapper semantics `#24` has to special-case. The `.git`
+   itself is excluded from the outer repo via `.gitignore` (a directory containing its
+   own `.git` becomes a submodule gitlink the instant `git add` sees it in the parent,
+   which is more machinery — remote URL config, `.gitmodules`, `git submodule update`
+   — than a same-repo, same-CI fixture needs). The bundle is a single committed file,
+   diffs cleanly, and restores fully offline (no network fetch), which the finale's
+   air-gapped requirement (`.claude/../memory` note on this project) makes a hard
+   constraint, not a nicety.
+2. **Real `git submodule`.** Gets the same standalone-nested-repo property `git
+   bisect` needs, and is the "normal" way to nest one real repo inside another. Rejected
+   because it requires a resolvable remote URL in `.gitmodules` — this fixture has no
+   independent upstream, so that URL would have to be the same GitHub repo pointing at
+   a subdirectory of itself (not how submodules work) or a fabricated location that
+   breaks the moment anyone clones fresh or works offline, which is exactly the failure
+   mode the finale cannot afford.
+3. **No real git repo at all — a synthetic commit-log data structure `#24` consumes
+   directly (e.g. a JSON list of `{sha, message, date, diff}`), with `git bisect`
+   simulated/interpreted rather than actually run.** Rejected: the issue's own
+   acceptance criteria require `git bisect run` to actually work, and `#24`'s wrapper
+   is explicitly meant to shell out to real `git`. A fixture that isn't real git
+   doesn't test what it claims to.
+4. **Rewrite the OUTER `brahmadatta-ai` repo's own history to plant the defect at some
+   commit that happens to touch `demo/repositories/pktcfg/src/decode.c`.** Rejected
+   outright, not seriously considered: this repo's history is shared, force-pushed-to
+   by nobody, and read by every other concurrent agent session today. Rewriting it to
+   serve one fixture would be indistinguishable from data loss to everyone else working
+   in it.
+
+**Pros and cons of each.** Covered inline above; (1) is the only option that is
+simultaneously real git, offline-safe, and free of new remote/URL machinery.
+
+**Cost implications.** None — no new infrastructure, no new dependency. The bundle is
+~31 KB.
+
+**Security implications.** None beyond the existing, already-authorized scope of this
+fixture (`demo/repositories/README.md`'s standing authorization: seeded defects
+confined to the fixture tree). No new attack surface: the nested repo is inert content,
+not executed except by `cmake`/`ctest`/`git bisect`, all of which already run against
+this fixture today. `pktcfg-bisect-check.sh` is deliberately kept outside the bisected
+commit range specifically so `git bisect run` can't be pointed at a script version that
+changes out from under it mid-run.
+
+**Scalability implications.** None — this is a fixture, not a runtime path. If more
+demo targets ever need a seeded git history, this same bundle-plus-restore-script
+pattern generalizes directly (`<target>-history.bundle` + one restore script per
+target, or one script parameterized over target name).
+
+**Recommendation.** Ship as built: real nested repo, git-ignored in the outer repo,
+distributed as a bundle, materialised by `restore-pktcfg-history.sh`. `#24`'s author
+should call that script (or replicate its three `git` commands) before invoking `git
+bisect` against this fixture, and should treat
+`114383dd517e49e1285b53608184cb744adb2aaa` as the known-correct answer when testing
+their own bisect wrapper.
+
+**Final approval authority** — CTO (technical, work already authorized by D-144). Not
+security-sensitive: no production code path, no new secrets, no new network surface,
+scope unchanged from the existing fixture authorization in
+`demo/repositories/README.md`. Self-merging after clean, thorough verification (see PR
+description for the full `git bisect run` transcript and the multi-commit build/test
+matrix) rather than routing through `cybersecurity` for sign-off — same class of
+decision D-144 itself already anticipated ("Normal per-PR review gates... still
+apply" for security-sensitive changes; this one isn't).

@@ -86,6 +86,17 @@ slow-unit-*
 !demo/repositories/pktcfg/crash/
 !demo/repositories/pktcfg/crash/crash-literal-tab.bin
 
+# pktcfg's own seeded git history (#5) lives as a real, standalone nested git repository
+# at demo/repositories/pktcfg/.git, so `git bisect` can run against it directly and
+# ordinarily, with no awareness of this monorepo around it. That .git directory is NOT
+# committed here: a subdirectory containing its own .git becomes a submodule gitlink the
+# moment `git add` sees it, which is more machinery than a fixture needs and not what
+# `.gitmodules` (absent from this repo) declares. The real history ships instead as a git
+# bundle at demo/repositories/pktcfg-history.bundle, restored on demand by
+# demo/repositories/restore-pktcfg-history.sh. See
+# demo/repositories/pktcfg/README.md#git-history-and-the-bisect-answer-key.
+demo/repositories/pktcfg/.git/
+
 # Claude local state
 .claude/settings.local.json
 .project/state.local.json
