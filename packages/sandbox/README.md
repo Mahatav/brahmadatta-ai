@@ -46,6 +46,8 @@ pytest packages/sandbox/tests -q
 | The sweep catches every descendant of rapid, repeated fork-and-detach, not just the ones present at the pre-kill snapshot (SEC-38, Linux) | `test_sweep_catches_rapid_repeated_detachment` |
 | A file-size limit is reported as `FILE_SIZE`, not `NONE` (SEC-35) | `test_file_size_limit_is_reported_as_file_size_not_none` |
 | `FILE_SIZE` is still reported for a target whose `SIGXFSZ` disposition is `SIG_IGN`, e.g. CPython (SEC-35, residual gap) | `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz` |
+| `FILE_SIZE` still gets reported even if the target deletes or truncates its own oversized file before exiting (SEC-39, #163) | `test_file_size_limit_survives_target_deleting_its_own_evidence` |
+| A stale large file left over in a *reused* workdir by an earlier, unrelated run is not misread as this run hitting `FILE_SIZE` (SEC-40, #164) | `test_stale_file_in_shared_workdir_is_not_misclassified_as_file_size` |
 | Output is capped rather than buffered without limit | `test_output_is_capped` |
 | Cleanup runs on success, on failure, and on cancel | `test_cleanup_on_success`, `test_cleanup_on_failure`, `test_cleanup_on_cancel` |
 | Cancel from another thread stops a running command | `test_cancel_stops_a_running_command_from_another_thread` |
@@ -201,6 +203,19 @@ developer on a Mac does not, and should know it.
   directly rather than leaving it as an unverified claim.
 - **`PATH` is inherited**, because a build needs a compiler. It is the largest hole in the
   environment scrubbing and it is deliberate.
+- **Descendant tracking (SEC-33/SEC-38's freeze-before-kill machinery) identifies a
+  process by bare pid, with no start-time or cgroup-id cross-check (SEC-41, #165,
+  informational).** `cybersecurity`'s binding D-056 re-attack of #159 — ~220,000 real
+  process creations, including one live pid-space wraparound (98747 → 2691) — did not
+  turn this into an observed misidentification; SEC-38's actual fix held. The
+  structural gap is real: nothing stops a pid being reused by an unrelated process
+  between this jail's discovery walk and the freeze/kill step under extreme scheduling
+  pressure beyond what was reproduced. Deliberately **not fixed**: closing it would mean
+  reworking the exact freeze-before-kill code both `cybersecurity` and
+  `engineering-manager` already independently verified CLEARED, in exchange for
+  hardening a race that adversarial testing at real scale did not manage to trigger —
+  a bad trade for a competition-timeline codebase. Revisit only if PID-reuse-under-load
+  hardening becomes an actual priority, per #165's own stated scope.
 
 ## Using it
 
@@ -278,7 +293,7 @@ with ContainerJail.create(policy, mission_ref=str(mission.id)) as sandbox:
 | 4. Docker socket never bind-mounted | structural — the only `-v` this module ever emits is the worktree | `test_no_call_shape_can_mount_the_docker_socket` (this package) and `tests/architecture/test_container_isolation.py` (repo-wide) |
 | 5. `--read-only` + sized tmpfs; worktree is the only writable mount | `_docker_run_args`, `ContainerJailPolicy.tmpfs_mb` | `test_the_root_filesystem_is_read_only`, `test_tmp_is_writable_scratch_under_the_read_only_root` |
 | 6. `--memory`/`--cpus`/`--pids-limit`, wall-clock kill | `ContainerJailPolicy`, `ContainerJail.run` | `test_memory_limit_is_passed_to_the_runtime_and_enforced`, `test_wall_clock_timeout_is_reported_and_the_container_is_removed` |
-| 7. Teardown + orphan reaper, on crash and cancel | `ContainerJail.close`/`cancel`, module-level `reap_orphans` | `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw` |
+| 7. Teardown + orphan reaper, on crash and cancel | `ContainerJail.close`/`cancel`, module-level `reap_orphans` | `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182) |
 | 8. Never called "rootless" | `IsolationMode.CONTAINER_NO_NETWORK` | code review — there is no test for a docstring, this is what one looks like |
 
 ## Why this module's teardown is simpler than `jail.py`'s
@@ -329,6 +344,11 @@ remove it:
 from packages.sandbox.container import reap_orphans
 
 removed = reap_orphans()   # call once, early, at orchestrator startup
+# removed is a list[ContainerRemoval]: one entry per container this call *found*,
+# each honestly reporting whether `docker rm -f` actually succeeded — check
+# `.removed`/`.error` rather than assuming every container found was removed
+# (SEC-51, #182: this used to be a bare list of ids, "found" and "removed"
+# collapsed into the same claim).
 ```
 
 ## What this module does not do

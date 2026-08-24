@@ -336,6 +336,100 @@ def test_file_size_limit_bounds_one_file_not_aggregate_usage(jail) -> None:
     assert "wrote 20 files" in result.stdout
 
 
+def test_file_size_limit_survives_target_deleting_its_own_evidence(jail) -> None:
+    """SEC-39 (#163), residual gap in the SEC-35 fallback found by `cybersecurity`'s
+    binding D-056 independent re-attack of #159 (not merged, not the #159 fix PR
+    itself -- a residual finding surfaced while adversarially re-attacking SEC-35).
+
+    A target that both (a) never lets `SIGXFSZ` reach it -- CPython's default
+    disposition, the same fact `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz`
+    relies on -- *and* (b) catches its own `EFBIG`, prints nothing recognizable about
+    it, and deletes the oversized file it was writing before exiting, defeats *both*
+    of the SEC-35 fallback's signals by the time `_classify` gets to look: no stderr
+    marker, and nothing oversized left on disk. Before the SEC-39 fix this reports as
+    a plain nonzero-exit failure -- indistinguishable from an unrelated bug, silently
+    wrong for exactly the property `FILE_SIZE` exists to name.
+
+    The `time.sleep(0.5)` before deleting is not padding for the test's benefit: it
+    stands in for real cleanup work (flushing other state, releasing resources) a
+    well-behaved-looking target plausibly does between catching the error and exiting
+    -- exactly the "exit-cleanup path" #163 names, not an instantaneous unlink.
+    """
+    policy = JailPolicy(cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=1 * MIB)
+    with Jail.create(policy) as jail_:
+        result = jail_.run(
+            python(
+                """
+                import errno
+                import os
+                import time
+
+                try:
+                    with open("toolarge.bin", "wb") as fh:
+                        for _ in range(50):
+                            fh.write(b"x" * (1024 * 1024))
+                            fh.flush()
+                except OSError as exc:
+                    assert exc.errno == errno.EFBIG
+                    time.sleep(0.5)
+                    os.remove("toolarge.bin")
+                    os._exit(1)
+                os._exit(0)
+                """
+            )
+        )
+    assert result.exit_code != 0, result.summary()
+    assert result.signal_number is None, (
+        "the whole point: no signal reaches a target that ignores SIGXFSZ"
+    )
+    for marker in ("File too large", "Errno 27", "EFBIG"):
+        assert marker not in result.stderr, (
+            "the target must leave no stderr marker either, or this is only "
+            "re-testing the original SEC-35 fallback, not the SEC-39 gap in it"
+        )
+    assert result.limit_hit is LimitKind.FILE_SIZE, result.summary()
+
+
+def test_stale_file_in_shared_workdir_is_not_misclassified_as_file_size(jail) -> None:
+    """SEC-40 (#164), the second residual gap found by that same D-056 re-attack.
+
+    `workers/baseline/run.py` reuses one workdir across an entire build sequence's
+    steps rather than a fresh one per `Jail` -- reachable, not hypothetical. A large
+    file left behind by an *earlier*, unrelated step must not make a later step's
+    completely different failure get misclassified as `FILE_SIZE` purely because
+    something large happens to already be sitting in the same directory.
+
+    `memory_bytes` is set well above this suite's realistic usage on purpose, and is
+    not part of what SEC-40 fixes: `_classify`'s *own*, pre-existing MEMORY fallback
+    reads `peak_mb` from `RUSAGE_CHILDREN.ru_maxrss`, which several platforms report as
+    a historical high-water mark across every child this test *process* has ever
+    reaped, not scoped to one run -- `probe_limits()`'s deliberately unbounded
+    allocator, called by other tests in this file (and, on Darwin, not stopped by
+    `RLIMIT_AS` at all -- see the module docstring), can leave that figure elevated for
+    the rest of the session regardless of test order. A tight `memory_bytes` here would
+    make this SEC-40 test flaky on that unrelated, orthogonal quirk instead of
+    reliably exercising the one thing it exists to check.
+    """
+    policy = JailPolicy(
+        cpu_seconds=10, wall_clock_seconds=15, max_file_bytes=1 * MIB,
+        memory_bytes=32768 * MIB,
+    )
+    with Jail.create(policy) as jail_:
+        stale = jail_.root / "leftover-from-a-previous-step.bin"
+        stale.write_bytes(b"x" * (2 * MIB))  # comfortably over max_file_bytes
+        old = time.time() - 3600
+        os.utime(stale, (old, old))
+
+        result = jail_.run(python("import sys; sys.exit(1)"))
+
+    assert result.exit_code == 1
+    assert result.signal_number is None
+    assert result.limit_hit is LimitKind.NONE, (
+        f"a stale, unrelated leftover file must not be reported as FILE_SIZE: "
+        f"{result.summary()}"
+    )
+
+
 # --- no orphans -------------------------------------------------------------------
 
 

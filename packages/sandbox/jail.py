@@ -44,6 +44,8 @@ live in `packages/sandbox/tests/test_jail.py`:
 | `limits_applied` is measured per run, not guessed from the platform (D-054) | `test_limits_applied_is_a_real_per_run_measurement` |
 | a detached descendant cannot survive rapid, repeated fork-and-detach (SEC-38) | `test_sweep_catches_rapid_repeated_detachment` |
 | `FILE_SIZE` is reported even for a target whose `SIGXFSZ` disposition is `SIG_IGN` (SEC-35) | `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz` |
+| `FILE_SIZE` survives the target deleting its own oversized file before exiting (SEC-39, #163) | `test_file_size_limit_survives_target_deleting_its_own_evidence` |
+| a stale large file left in a *shared, reused* workdir by an earlier run is not misread as this run hitting `FILE_SIZE` (SEC-40, #164) | `test_stale_file_in_shared_workdir_is_not_misclassified_as_file_size` |
 
 **Two gaps D-056 gated `#28`'s fuzzing worker on, fixed by `#159` — not yet independently
 re-verified.** Both were found by the security review of `#113`, both required an
@@ -58,6 +60,14 @@ gated on it, not as unblocked by the strength of this fix alone:
 |---|---|---|
 | **SEC-38** | `_sweep_detached_descendants`'s final re-walk was anchored on this jail's own child pid, which is normally already dead (reaped) by the time the sweep runs — `_kill_group` signals and waits on it first. A walk rooted at a pid nothing claims as parent finds nothing, so any descendant a *tracked* pid forked after the pre-kill snapshot had no path back to it and was lost, deterministically, for as long as that kept happening — reproducing at the real default `kill_grace_seconds=5.0` under rapid, repeated fork-and-detach. | The walk now runs from every tracked pid each pass, not just the dead root — but killing on discovery just relocates that same race onto the newly-found pid's own next `fork()`. Closing it needed a freeze step: every pid is `SIGSTOP`ped and *confirmed* stopped before anything is killed, with the discover-then-freeze cycle run to a fixed point (nothing new turns up with everything currently tracked already frozen) before any `SIGKILL` is sent — see `_sweep_detached_descendants` and `_freeze`. `test_sweep_catches_rapid_repeated_detachment` chains many rapid fork-and-detach cycles at the real default grace period and requires zero survivors, run repeatedly, not a single detachment. |
 | **SEC-35** | `_classify`'s `SIGXFSZ` branch only fires if the target actually receives and dies to that signal. CPython does not — `signal.getsignal(SIGXFSZ) is SIG_IGN` at interpreter start — so a Python target genuinely stopped by `RLIMIT_FSIZE` gets an ordinary `OSError` (`errno.EFBIG`) instead and can do anything with it, reporting `limit_hit == NONE`. Evidence-accuracy gap, not an isolation escape: the limit still stopped the process either way. | `_classify` gets the same fallback `MEMORY`'s branch already relies on for the same kind of ambiguity: a recognizable stderr marker, or (independent of anything the target says) a file on disk sized at the policy's cap — direct evidence `RLIMIT_FSIZE` actually stopped a write, gated behind `exit_code != 0` so an ordinary successful build never pays for the check. `test_file_size_limit_is_reported_for_a_target_that_ignores_sigxfsz`, verified against a real Python target, not `dd` — `dd` honours the signal, which is why the original SEC-35 test never caught this. |
+
+**Two further residuals in that same SEC-35 fallback, found by `cybersecurity`'s independent
+re-attack of `#159` (binding D-056 re-verification) and filed as `#163`/`#164`, fixed here:**
+
+| Gap | What was wrong | What changed |
+|---|---|---|
+| **SEC-39 (#163)** | The on-disk half of the SEC-35 fallback only looks at the workdir *after* the command has already exited. A target that gets killed for genuinely hitting `RLIMIT_FSIZE`, but deletes or truncates its own oversized file first — a caught-signal handler, an `atexit` hook, anything that runs before the process is actually gone — leaves neither a stderr marker nor a file on disk by the time `_classify` runs, and is misclassified as a plain crash instead of `FILE_SIZE`. | `_FileSizePeakTracker` samples the workdir on an interval *while the process is still running*, in this jail's own memory, which the target has no way to reach or erase. `_classify` now takes the larger of that peak and whatever is still on disk. This narrows the race, it does not close it outright — a target that deletes faster than the poll interval can still slip through one sample window; see `_FileSizePeakTracker`'s own docstring for why an interval-based poll was judged good enough here rather than a full inotify watch. `test_file_size_limit_survives_target_deleting_its_own_evidence`. |
+| **SEC-40 (#164)** | The on-disk scan looked at *any* file anywhere under the workdir, with no notion of when it was written. `workers/baseline/run.py` reuses one workdir across an entire build sequence's steps rather than a fresh one per `Jail`, so a large file left behind by an earlier, unrelated step is real, reachable evidence contamination — a later step's completely different failure gets misclassified as `FILE_SIZE` purely because of what an earlier step left lying around. | Both the peak tracker and the final on-disk check are scoped to files with `st_mtime` no older than this run's own start (`_max_file_size(..., since=...)`), with a small buffer for coarse-mtime filesystems. A stale file from a previous step, however large, is now excluded by age, not just found and blamed. `test_stale_file_in_shared_workdir_is_not_misclassified_as_file_size`. |
 
 Anything not in the enforced-properties table above is *intended*, not enforced. In
 particular this module does **not** prevent a running process from reading outside the
@@ -301,7 +311,31 @@ def _freeze(pids: set[int], timeout: float = 1.0) -> None:
             time.sleep(0.001)
 
 
-def _max_file_size(root: Path) -> int:
+#: SEC-40 (#164): a stale file, dropped in a shared workdir by an earlier, unrelated
+#: run, can be excluded from `_max_file_size`'s scan purely on age — but filesystem
+#: mtime resolution is not sub-second everywhere (notably HFS+, still reachable via an
+#: older macOS dev host or an unusual mount), so a same-run file written in the same
+#: second the walk's `since` was captured could otherwise be excluded by a rounding
+#: accident, not because it predates the run. This buffer trades a little of #164's
+#: fix back for that: a leftover file modified in the second immediately before this
+#: run started can still slip through, which is a far smaller, bounded window than "any
+#: file of any age anywhere in the shared workdir" — the bug being fixed.
+_MTIME_GRANULARITY_BUFFER_SECONDS = 1.0
+
+#: How often `_FileSizePeakTracker` samples the workdir while a command is still
+#: running. SEC-39 (#163): this is what lets the evidence survive a target deleting or
+#: truncating its own oversized file before `_classify` ever gets to look at disk — the
+#: peak is kept in this process's own memory, which the target has no way to reach.
+#: Bounded by the same trade the rest of this module makes explicitly rather than
+#: silently: tighter narrows the race further at the cost of one more `os.walk` of the
+#: workdir per interval for the lifetime of every command this jail runs, not just ones
+#: that hit the limit. 100ms is short enough to catch cleanup that takes any real time
+#: (a signal handler doing I/O, an atexit hook) and long enough that a multi-second
+#: build does not pay for a workdir walk more than a few hundred times over its life.
+_FILE_SIZE_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _max_file_size(root: Path, *, since: float | None = None) -> int:
     """The largest regular file anywhere under `root`, or 0 if there is none.
 
     SEC-35's on-disk-evidence fallback (see `_classify`): when a target's `SIGXFSZ`
@@ -311,6 +345,14 @@ def _max_file_size(root: Path) -> int:
     entry are swallowed rather than raised: a build directory can contain sockets, pipes,
     permission-denied files, or entries that vanish mid-walk, none of which should turn a
     classification helper into the reason a run's cleanup fails.
+
+    `since`, if given, is a `time.time()`-comparable wall-clock timestamp (already
+    reduced by `_MTIME_GRANULARITY_BUFFER_SECONDS`, if the caller wants that buffer):
+    any file whose `st_mtime` is older than it is skipped entirely. This is SEC-40's
+    (#164) fix — `workers/baseline/run.py` reuses one workdir across an entire build
+    sequence, so an unrelated earlier step's leftover large file is real, reachable
+    evidence contamination, not a hypothetical one, and a scan with no age filter at
+    all cannot tell it apart from something the *current* run actually wrote.
     """
     largest = 0
     for dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _exc: None):
@@ -319,12 +361,79 @@ def _max_file_size(root: Path) -> int:
             try:
                 if path.is_symlink():
                     continue
-                size = path.stat().st_size
+                stat_result = path.stat()
             except OSError:
                 continue
-            if size > largest:
-                largest = size
+            if since is not None and stat_result.st_mtime < since:
+                continue
+            if stat_result.st_size > largest:
+                largest = stat_result.st_size
     return largest
+
+
+class _FileSizePeakTracker:
+    """Watches `workdir` while a jailed command is still running and remembers the
+    largest file size ever observed there, scoped to files touched during *this* run.
+
+    Exists to close SEC-39 (#163): `_classify`'s SEC-35 on-disk fallback only looks at
+    what is left on disk *after* the command has already exited, and a target can
+    defeat that by deleting or truncating its own oversized file — in a caught
+    `SIGXFSZ` handler, or an exit-cleanup / `atexit` path — before `_classify` ever
+    runs, leaving no stderr marker (the target was never using the default handler in
+    the first place) and no file on disk either. Sampling on an interval *while the
+    process is still alive* keeps a value in this process's own memory that the target
+    cannot reach or erase, independent of anything still on disk by the time anyone
+    looks — the same principle `peak_memory_mb` already relies on via `RUSAGE_CHILDREN`,
+    applied here by direct polling since there is no equivalent kernel-tracked peak for
+    file size.
+
+    This narrows the race, it does not close it outright: a target that deletes its
+    output faster than `_FILE_SIZE_POLL_INTERVAL_SECONDS` can still slip through every
+    sample window. That residual gap is real, and is exactly what a full inotify-based
+    watch would close instead of a fixed-interval poll — judged not worth the added
+    complexity for a medium-severity, evidence-accuracy-only finding; tracked in
+    #163/#164 rather than silently declared closed.
+    """
+
+    def __init__(
+        self,
+        workdir: Path,
+        since: float,
+        interval: float = _FILE_SIZE_POLL_INTERVAL_SECONDS,
+    ) -> None:
+        self._workdir = workdir
+        self._since = since
+        self._interval = interval
+        self._peak = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="jail-file-size-peak-tracker", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop_and_get_peak(self) -> int:
+        """Stop sampling and return the largest size observed, including one last
+        sample taken now — after the process has already been signalled and (usually)
+        reaped, so this read runs closer to the moment of death than the periodic
+        sample before it, and strictly before `_classify` gets to look at anything."""
+        self._stop.set()
+        self._thread.join(timeout=self._interval * 4)
+        self._sample()
+        with self._lock:
+            return self._peak
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._sample()
+
+    def _sample(self) -> None:
+        size = _max_file_size(self._workdir, since=self._since)
+        with self._lock:
+            if size > self._peak:
+                self._peak = size
 
 
 @dataclass
@@ -525,10 +634,15 @@ class Jail:
         err_path = self._io_dir / "stderr"
 
         started = time.monotonic()
+        # Wall-clock, not monotonic: this is compared against `st_mtime`, which the
+        # filesystem stamps in wall-clock time, not against `started` above.
+        # `_MTIME_GRANULARITY_BUFFER_SECONDS` earlier absorbs coarse-mtime filesystems
+        # rounding a same-run file's timestamp down below this instant — see #164.
+        run_started_wall = time.time() - _MTIME_GRANULARITY_BUFFER_SECONDS
         with _MEASURE_LOCK:
             before = resource.getrusage(resource.RUSAGE_CHILDREN)
-            proc, timed_out, limits_applied = self._spawn_and_wait(
-                argv, workdir, env, out_path, err_path
+            proc, timed_out, limits_applied, peak_file_bytes = self._spawn_and_wait(
+                argv, workdir, env, out_path, err_path, run_started_wall
             )
             after = resource.getrusage(resource.RUSAGE_CHILDREN)
         wall = time.monotonic() - started
@@ -549,6 +663,8 @@ class Jail:
             stderr=stderr,
             out_trunc=out_trunc or err_trunc,
             workdir=workdir,
+            run_started_wall=run_started_wall,
+            peak_file_bytes=peak_file_bytes,
         )
 
         result = JailResult(
@@ -581,7 +697,8 @@ class Jail:
         env: dict[str, str],
         out_path: Path,
         err_path: Path,
-    ) -> tuple[subprocess.Popen[bytes], bool, dict[str, bool]]:
+        run_started_wall: float,
+    ) -> tuple[subprocess.Popen[bytes], bool, dict[str, bool], int]:
         policy = self._policy
 
         # D-054: report which limits actually took effect in *this* run, from the real
@@ -667,6 +784,13 @@ class Jail:
         with self._live_lock:
             self._live = proc
 
+        # SEC-39 (#163): start sampling before the process can do anything at all, so
+        # a target that hits RLIMIT_FSIZE and cleans up its own evidence in well under
+        # a second still has to race a peak that is already being tracked, not one
+        # that starts only after `_classify` notices something is wrong.
+        peak_tracker = _FileSizePeakTracker(workdir, run_started_wall)
+        peak_tracker.start()
+
         timed_out = False
         try:
             proc.wait(timeout=policy.wall_clock_seconds)
@@ -677,7 +801,9 @@ class Jail:
             with self._live_lock:
                 self._live = None
 
-        return proc, timed_out, limits_applied
+        peak_file_bytes = peak_tracker.stop_and_get_peak()
+
+        return proc, timed_out, limits_applied, peak_file_bytes
 
     @staticmethod
     def _read_limits_applied(read_fd: int) -> dict[str, bool]:
@@ -1010,6 +1136,8 @@ class Jail:
         stderr: str,
         out_trunc: bool,
         workdir: Path,
+        run_started_wall: float,
+        peak_file_bytes: int,
     ) -> LimitKind:
         """Say which limit stopped the command, or `NONE`.
 
@@ -1052,32 +1180,48 @@ class Jail:
         if out_trunc:
             return LimitKind.OUTPUT
 
-        # SEC-35 (re-opened by #159): the SIGXFSZ branch above only fires if the target
-        # actually dies to that signal, and nothing requires that. CPython ignores
-        # SIGXFSZ by default (`signal.getsignal(SIGXFSZ) is SIG_IGN` at interpreter
-        # start) — a Python target that crosses RLIMIT_FSIZE gets an ordinary `OSError`
-        # (`errno.EFBIG`) at the failing `write()` instead of being killed, and is free
-        # to do anything with it, including nothing visible at all. This is the same
-        # ambiguity the MEMORY branch above already has to live with — a limit that
-        # stopped the command without the tidy, unambiguous signal this function would
-        # rather have — and it gets the same answer: don't wait for a signal that might
-        # never come, look for direct evidence the limit was actually hit. Two
-        # independent sources, either is enough, checked only once something already
-        # looks wrong (`exit_code != 0`) so an ordinary successful build never pays for
-        # either:
+        # SEC-35 (re-opened by #159, hardened again by #163/#164): the SIGXFSZ branch
+        # above only fires if the target actually dies to that signal, and nothing
+        # requires that. CPython ignores SIGXFSZ by default (`signal.getsignal(SIGXFSZ)
+        # is SIG_IGN` at interpreter start) — a Python target that crosses
+        # RLIMIT_FSIZE gets an ordinary `OSError` (`errno.EFBIG`) at the failing
+        # `write()` instead of being killed, and is free to do anything with it,
+        # including nothing visible at all. This is the same ambiguity the MEMORY
+        # branch above already has to live with — a limit that stopped the command
+        # without the tidy, unambiguous signal this function would rather have — and it
+        # gets the same answer: don't wait for a signal that might never come, look for
+        # direct evidence the limit was actually hit. Three independent sources, any
+        # one is enough, checked only once something already looks wrong
+        # (`exit_code != 0`) so an ordinary successful build never pays for any of them:
         #   - the target's own words: CPython's default top-level handler for an
         #     uncaught EFBIG prints exactly this text to stderr on its way out, and a
         #     target that catches and reports the error itself is likely to mention the
         #     same errno;
-        #   - what is actually on disk: RLIMIT_FSIZE stops a write at exactly the limit
-        #     (soft == hard here, so there is no partial-warning stage to land short of
-        #     it), so a file sized at the policy's cap is direct, measured evidence the
-        #     cap was hit — independent of whether the target said anything about it.
+        #   - `peak_file_bytes`, sampled by `_FileSizePeakTracker` *while the process
+        #     was still alive*: this is SEC-39's (#163) fix. A target that gets killed
+        #     for hitting the limit and then deletes or truncates the oversized file
+        #     before this function ever runs defeats both the signal branch above and
+        #     the on-disk check below — but not this, because it was recorded before
+        #     the target had the chance to touch the file again;
+        #   - what is actually on disk right now: RLIMIT_FSIZE stops a write at exactly
+        #     the limit (soft == hard here, so there is no partial-warning stage to
+        #     land short of it), so a file still sized at the policy's cap is direct,
+        #     measured evidence the cap was hit. Scoped to files modified during this
+        #     run (`since=run_started_wall`) rather than the whole workdir — SEC-40
+        #     (#164): `workers/baseline/run.py` reuses one workdir across an entire
+        #     build sequence, so an unscoped scan can misattribute a stale, unrelated
+        #     large file left by an earlier step in that same sequence to a completely
+        #     different failure in a later one.
         if exit_code != 0:
             file_size_reported = any(
                 marker in stderr for marker in ("File too large", "Errno 27", "EFBIG")
             )
-            if file_size_reported or _max_file_size(workdir) >= self._policy.max_file_bytes:
+            on_disk_now = _max_file_size(workdir, since=run_started_wall)
+            if (
+                file_size_reported
+                or peak_file_bytes >= self._policy.max_file_bytes
+                or on_disk_now >= self._policy.max_file_bytes
+            ):
                 return LimitKind.FILE_SIZE
 
         if exit_code != 0 and peak_mb >= limit_mb * 0.95:

@@ -165,7 +165,8 @@ def test_reap_orphans_can_be_scoped_to_one_mission(monkeypatch):
 
     removed = reap_orphans(mission_ref="mission-a")
 
-    assert removed == ["abc123", "def456"]
+    assert [r.container_id for r in removed] == ["abc123", "def456"]
+    assert all(r.removed for r in removed), removed
     assert calls[0] == [
         "ps",
         "-aq",
@@ -175,6 +176,37 @@ def test_reap_orphans_can_be_scoped_to_one_mission(monkeypatch):
         "label=brahmadatta.mission=mission-a",
     ]
     assert calls[1:] == [["rm", "-f", "abc123"], ["rm", "-f", "def456"]]
+
+
+def test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success(monkeypatch):
+    """SEC-51 (#182): `docker rm -f`'s exit code must actually be inspected. Before
+    this fix, `reap_orphans` returned the bare list of ids it *found* and called that
+    "removed" regardless of what `rm -f` actually did -- this reproduces the exact
+    scenario from the issue: one container's `rm -f` fails (daemon refuses, wedged
+    state, anything), and the caller must be able to tell that container apart from
+    the one that was genuinely removed, not have both reported as clean.
+    """
+
+    def fake_run_cli(runtime: str, args: list[str], *, timeout: float):
+        if args[:2] == ["ps", "-aq"]:
+            return subprocess.CompletedProcess(
+                [runtime, *args], 0, "good123\nwedged456\n", ""
+            )
+        if args == ["rm", "-f", "wedged456"]:
+            return subprocess.CompletedProcess(
+                [runtime, *args], 1, "", "Error response from daemon: removal in progress"
+            )
+        return subprocess.CompletedProcess([runtime, *args], 0, "", "")
+
+    monkeypatch.setattr("packages.sandbox.container._run_cli", fake_run_cli)
+
+    results = reap_orphans(mission_ref="mission-a")
+
+    by_id = {r.container_id: r for r in results}
+    assert by_id["good123"].removed is True
+    assert by_id["good123"].error == ""
+    assert by_id["wedged456"].removed is False
+    assert "removal in progress" in by_id["wedged456"].error
 
 
 # --- docker socket never mounted (condition 4) -- pure, no docker needed -----------
@@ -433,7 +465,14 @@ def test_reap_orphans_removes_a_container_this_process_never_saw():
         removed = reap_orphans()
         # `docker ps -aq` reports ids, not names — reap_orphans returns exactly what
         # it received back from the daemon.
-        assert any(container_id.startswith(r) or r.startswith(container_id) for r in removed)
+        matches = [
+            r
+            for r in removed
+            if container_id.startswith(r.container_id)
+            or r.container_id.startswith(container_id)
+        ]
+        assert matches, removed
+        assert all(r.removed for r in matches), matches
         assert name not in _running_container_names()
     finally:
         subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True, timeout=15)

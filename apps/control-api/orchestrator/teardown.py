@@ -74,15 +74,28 @@ class DockerSandboxReaper:
             from packages.sandbox.container import reap_orphans
         except ModuleNotFoundError:
             return ()
-        removed = reap_orphans(runtime=self.runtime, mission_ref=str(mission_id))
+        # SEC-51 (#182): `reap_orphans` used to return a bare list of container ids it
+        # had merely *found*, so every one of them was reported here as `released=True`
+        # unconditionally -- `docker rm -f` failing for any real reason (daemon busy, a
+        # wedged container the runtime refuses to force-remove) was invisible. It now
+        # returns one `ContainerRemoval` per container with the real `rm -f` outcome,
+        # and that is what `released` reflects below. This became consequential with
+        # PR #179's `teardown_transition_policy`, which routes `CANCELLING` ->
+        # `CANCELLED`/`FAILED` off exactly this outcome -- a container that is still
+        # live now correctly fails teardown instead of being reported clean.
+        results = reap_orphans(runtime=self.runtime, mission_ref=str(mission_id))
         return tuple(
             TeardownOutcome(
                 resource_kind=self.resource_kind,
-                resource_id=container_id,
-                released=True,
-                detail="container removed by mission-scoped orphan reaper",
+                resource_id=result.container_id,
+                released=result.removed,
+                detail=(
+                    "container removed by mission-scoped orphan reaper"
+                    if result.removed
+                    else f"`{self.runtime} rm -f` failed: {result.error}"
+                ),
             )
-            for container_id in removed
+            for result in results
         )
 
 
