@@ -7,6 +7,7 @@ one AST guard to enforce.
 
 from __future__ import annotations
 
+import http.client
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -29,7 +30,30 @@ from gateway.errors import LiveGenerationError
 #: Found live: #57 finale-rehearsal wiring, CPU-only `codellama:7b-instruct` cold model
 #: load (~186s) plus generation exceeded `OllamaCodeLlamaBackend`'s 300s per-call
 #: `timeout_sec` on the very first attempt.
-_TRANSPORT_EXCEPTIONS: tuple[type[Exception], ...] = (TimeoutError, URLError, OSError)
+#:
+#: #237 (found by qa-engineer reviewing the fix above): `http.client.IncompleteRead` —
+#: raised when a response declares `Content-Length: N` and the socket closes after
+#: delivering fewer than `N` bytes — is a plain `Exception` subclass on every Python
+#: version this project runs (verified: 3.9 and the CI-pinned 3.12 both put it under
+#: `HTTPException` -> `Exception`, never under `OSError`), so it passed straight through
+#: the tuple above the same way the other three did before D-121. Realistic trigger: an
+#: OOM-killed or force-closed Ollama backend that drops the connection mid-response
+#: instead of failing the connect/read outright.
+#:
+#: Deliberately narrow — `http.client.IncompleteRead`, not the broader
+#: `http.client.HTTPException` — because `HTTPException` also covers this module's own
+#: protocol-state misuse (`CannotSendRequest`, `ResponseNotReady`, `InvalidURL`, ...).
+#: Those indicate a bug in how this chokepoint drives `http.client`, not a flaky
+#: backend, and folding them into "the model endpoint did not respond" would hide a
+#: real defect behind a retry instead of surfacing it. `IncompleteRead` (like the three
+#: exceptions already here) is unambiguously about the remote end, never about this
+#: module's own request-building.
+_TRANSPORT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    TimeoutError,
+    URLError,
+    OSError,
+    http.client.IncompleteRead,
+)
 
 
 def post_json(

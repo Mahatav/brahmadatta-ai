@@ -13935,3 +13935,116 @@ convention for a non-trivial (if small) hardening change to a shared gateway mod
 self-merged by the `ai-ml-engineer` seat given essentially zero behavioral risk
 (`repr=False` only affects `repr()`/`str()` output) and a clean, green test run — see
 this task's PR/handoff for the self-merge rationale in full.
+
+---
+
+## D-130 — #237: `http.client.IncompleteRead` added to `gateway/client.py`'s
+`_TRANSPORT_EXCEPTIONS`, narrowly (not the broader `HTTPException`) · 2026-08-24 ·
+`ai-ml-engineer` seat
+
+**Decision.** Add `http.client.IncompleteRead` — specifically that class, not the
+broader `http.client.HTTPException` — to `_TRANSPORT_EXCEPTIONS` in
+`services/model-gateway/gateway/client.py`, so it wraps into `LiveGenerationError` at
+the gateway's one HTTP chokepoint exactly like the three exception types D-121/#236
+already handles.
+
+**Context.** QA found this reviewing #236: `http.client.IncompleteRead` — raised when a
+response declares `Content-Length: N` and the socket then closes after delivering fewer
+than `N` bytes — is a plain `Exception` subclass, not `OSError`/`URLError`/
+`TimeoutError`, so it escaped `_TRANSPORT_EXCEPTIONS` and crashed
+`PATCH_GENERATE` the same way the other three types did before #236. QA reproduced it
+live: a real TCP server sending `Content-Length: 100` and then closing after 18 bytes,
+against `post_json` (the function `gateway/ollama.py` uses for live generation).
+Realistic trigger: an OOM-killed or force-closed Ollama backend that drops the
+connection mid-response.
+
+**Verified class hierarchy** (checked on both this repo's CI-pinned Python 3.12 and a
+3.9 interpreter, since the hierarchy is not guaranteed stable across versions):
+`IncompleteRead.__mro__` == `(IncompleteRead, HTTPException, Exception, BaseException,
+object)` on both. It is **not** an `OSError` subclass on either — confirms the escape
+QA found and rules out "maybe it's already caught on some Python version" as a reason
+to skip the fix.
+
+**Options considered.**
+1. **`http.client.IncompleteRead` only** (chosen). Matches the exact class QA
+   reproduced. `http.client` also exposes sibling `HTTPException` subclasses this
+   chokepoint could theoretically hit — `BadStatusLine`, `LineTooLong` (malformed/oversize
+   status line — plausibly another "backend sent garbage" shape, not reproduced here),
+   and `CannotSendRequest`/`CannotSendHeader`/`ResponseNotReady`/`NotConnected`/
+   `ImproperConnectionState`/`InvalidURL`/`UnimplementedFileMode` (all about this
+   module's own misuse of `http.client`'s request/response state machine, i.e. a bug in
+   `gateway/client.py` itself, not a flaky backend). `RemoteDisconnected` is already
+   covered — it inherits from both `ConnectionResetError`/`OSError` *and*
+   `BadStatusLine`/`HTTPException`, so it was already caught via `OSError` before this
+   fix.
+2. **`http.client.HTTPException`** (the issue's alternate suggestion). Broader — catches
+   everything in option 1's sibling list too, in one line, no enumeration risk of
+   missing a future `http.client` exception type.
+
+**Pros and cons.**
+- Option 1: pro — cannot mask a `gateway/client.py` programming bug (e.g.
+  `InvalidURL`/`CannotSendRequest`) as "the model endpoint did not respond" and quietly
+  retry it, which is the wrong verdict for the wrong reason; the `LiveGenerationError`
+  docstring's own contract ("timeout, OOM, unreachable backend, bad output") is about
+  the *remote end*, not this module's own state-machine misuse. con — does not also
+  close `BadStatusLine`/`LineTooLong`, which are plausibly real, not-yet-reproduced
+  variants of the same "backend sent a malformed response" shape; a future finding could
+  need the identical fix again for those two specifically.
+- Option 2: pro — one enumeration, closes the whole `HTTPException` family including
+  `BadStatusLine`/`LineTooLong` in the same fix. con — also swallows `InvalidURL` and
+  `UnimplementedFileMode`, which are not backend failures at all; `InvalidURL` in
+  particular could only be raised by a bug in this module's own request construction,
+  and turning a client-side bug into a retried "did not respond" would hide it behind
+  the fallback ladder instead of surfacing it as the defect it is.
+
+**Cost implications.** None — no runtime cost difference between catching one class or
+a family of classes in a tuple already evaluated per-exception at raise time.
+
+**Security implications.** None beyond what D-121 already assessed for this
+chokepoint — this only changes which caught-exception classes convert into the same
+`LiveGenerationError` shape; no new code path, no new data reaches this exception
+handler that wasn't already flowing to `post_json`/`get_json`/`iter_response_lines`.
+
+**Scalability implications.** None.
+
+**Recommendation.** Option 1 (narrow). D-121's own precedent enumerated the three
+specific classes actually observed/plausible at this chokepoint rather than reaching
+for a blanket catch; this fix follows that same discipline for the fourth. If
+`BadStatusLine`/`LineTooLong` are later found to hit this chokepoint live (analogous to
+how #237 followed #236), they should get the same treatment QA gave `IncompleteRead`
+here — a real repro, not a speculative addition.
+
+**Test.** `services/model-gateway/gateway/tests/test_client_transport_errors.py::
+test_post_json_wraps_a_truncated_real_response` — a real TCP server (not a mock, matching
+QA's own repro method) sending `Content-Length: 100` and closing after 18 bytes.
+Confirmed failing (bare `http.client.IncompleteRead`) against the pre-fix tuple and
+passing (wrapped `LiveGenerationError`, `details["cause"] == "IncompleteRead"`) against
+the fix, in this session. Full suite: `pytest gateway/tests/ -q` → 389 passed, 6 skipped
+(was 385 passed, 6 skipped before this change — the +1 net-new test, plus +3 landed by
+#251 in parallel on `main` while this branch was open, folded in by rebase).
+
+**Test-infrastructure note, found while verifying.** The first version of the new
+server helper was itself flaky (~40-50% failure rate over repeated local runs) —
+closing the server socket right after `sendall()` raced the client and sometimes
+produced `ConnectionResetError` instead of the intended `IncompleteRead`, traced to two
+real BSD-socket close semantics: (1) a bare `recv(65536)` does not guarantee draining
+the client's *entire* request in one call, and closing with any of the client's own
+bytes still unread in the receive queue triggers an abortive RST rather than a graceful
+FIN; (2) closing immediately after `sendall()` can itself race the client's read of
+those bytes. Fixed by parsing `Content-Length` out of the request and reading exactly
+that many body bytes before responding, and by `shutdown(SHUT_WR)` (clean FIN) plus a
+blocking drain-`recv` that waits for the client to close its own end before this test's
+server closes its. Verified stable over 200 standalone iterations and 30 pytest runs
+after the fix, 0 failures either way. Recorded here because it is exactly the kind of
+thing this repo's own `.claude/COMPANY.md` warns about — verify subagent output, don't
+trust a single green run — and because a future test needing this same
+truncated-response pattern should reuse `_drain_full_request`/the shutdown sequence
+rather than rediscover the race.
+
+**Final approval authority** — this seat, self-merged: correctness-only fix in the same
+file, exception-wrapping pattern, and `LiveGenerationError` shape as the
+already-cybersecurity-reviewed #236, adding a caught-exception type rather than
+changing what the chokepoint does with caught exceptions or what reaches it. Nothing
+about the verified class hierarchy was surprising (confirmed stable across the two
+Python versions checked, matching what the issue predicted), so no second opinion was
+sought per the assignment's own condition for requiring one.
