@@ -173,17 +173,36 @@ def safe_to_schema(row: MissionEvent) -> MissionEventSchema | None:
     mission, sequence, trace_id — no payload contents, since a malformed payload is
     exactly the thing not to trust well-formedness of for a log line) and returns
     `None` so the caller can skip just this one row and keep serving the rest.
+
+    #229: deliberately `logger.error(..., exc_info=False)`, never `logger.exception`
+    or anything that formats `exc`/`exc.errors()` wholesale. Pydantic's own
+    `ValidationError.__str__`/`__repr__` — which is exactly what `logger.exception`'s
+    traceback rendering calls — embeds each failing field's actual value as
+    `input_value=...`; `exc.errors()` carries the same value under the `"input"` key
+    of every entry. Either one, logged raw, is the malformed payload's contents
+    leaking into server logs anyway, contradicting the promise this docstring already
+    made before #229 (D-113's defense-in-depth landed the try/except; the logging
+    call inside it never actually delivered on the comment). `errors(include_url=
+    False)`'s `"loc"`/`"type"` keys are the shape of the failure — which field, which
+    kind of mismatch — with no value in them, which is what "no payload contents"
+    was always supposed to mean.
     """
     try:
         return to_schema(row)
-    except ValidationError:
-        logger.exception(
+    except ValidationError as exc:
+        error_shape = [
+            {"loc": e["loc"], "type": e["type"]} for e in exc.errors(include_url=False)
+        ]
+        logger.error(
             "Skipping malformed MissionEvent id=%s mission_id=%s sequence=%s "
-            "trace_id=%s — payload failed EventPayload schema validation.",
+            "trace_id=%s — payload failed EventPayload schema validation "
+            "(error_shape=%s; payload contents deliberately omitted).",
             row.id,
             row.mission_id,
             row.sequence,
             row.trace_id,
+            error_shape,
+            exc_info=False,
         )
         return None
 

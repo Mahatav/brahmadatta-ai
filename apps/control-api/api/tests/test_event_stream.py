@@ -553,6 +553,69 @@ def test_to_schema_still_raises_on_a_genuinely_unrecognized_kind():
         sse.to_schema(row)
 
 
+@pytest.mark.django_db
+def test_safe_to_schema_logs_row_metadata_but_never_the_payload_value(caplog):
+    """#229: `safe_to_schema`'s skip-and-log path must not leak the malformed
+    payload's actual contents into server logs — the log line's own comment claims
+    it "deliberately omits payload contents," but the pre-fix code used
+    `logger.exception`, whose traceback rendering calls pydantic's own
+    `ValidationError.__str__`, which embeds every failing field's value as
+    `input_value=...`.
+
+    Uses a row shaped like a real drift scenario — a recognized `kind` ("log") with
+    one extra field `extra="forbid"` rejects — rather than an unrecognized `kind`,
+    because that is the case where the leaking value is unambiguously "payload
+    contents" and not just an echoed tag name. The extra field's value is built to
+    look exactly like the kind of secret this codebase treats as restricted
+    (docs/03-technical/24-privacy-and-data-handling-plan.md): plausible repository
+    content that must never reach a log line.
+    """
+    import logging
+
+    from api import sse
+
+    secret_value = "sk-live-SUPER-SECRET-repo-content-should-never-be-logged-abc123"
+
+    mission = Mission.objects.create(
+        name="pktcfg",
+        repository_ref="file:///demo/repositories/pktcfg",
+        adapter=LanguageAdapter.C_CMAKE_CTEST.value,
+        policy={},
+    )
+    row = MissionEvent.objects.create(
+        mission=mission,
+        sequence=7,
+        timestamp=datetime(2026, 8, 21, 12, 0, tzinfo=UTC),
+        type=EventType.LOG.value,
+        stage=MissionStage.BASELINE.value,
+        state=MissionState.BASELINE.value,
+        status=EventStatus.RUNNING.value,
+        severity=Severity.INFO.value,
+        message="from a future, not-yet-modeled event shape",
+        payload={
+            "kind": "log",
+            "text": "safe, sanitized line",
+            "leaked_repo_field": secret_value,
+        },
+        evidence_refs=[],
+        metrics={},
+        trace_id=TRACE,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="api.sse"):
+        result = sse.safe_to_schema(row)
+
+    assert result is None
+
+    log_text = caplog.text
+    assert secret_value not in log_text
+
+    assert str(row.id) in log_text
+    assert str(row.mission_id) in log_text
+    assert str(row.sequence) in log_text
+    assert row.trace_id in log_text
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_sse_stream_skips_one_malformed_row_and_keeps_serving_the_rest():
     """Defense in depth (D-116 recommendation (b)/(c)): a single malformed row must

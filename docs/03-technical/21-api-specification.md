@@ -126,11 +126,17 @@ build.
 
 **Malformed-row resilience (D-116).** Both `GET .../events` (SSE) and
 `GET .../events/replay` now tolerate a single `MissionEvent` row whose `payload`
-fails schema validation: the row is logged (with its `trace_id`) and skipped rather
-than aborting the stream or 500ing the whole replay page. This is defense in depth
-for the *next* orchestrator-side schema drift, not a substitute for keeping this
-union's variant list matched to every `kind` the orchestrator actually emits —
-`api.sse.safe_to_schema` is the one place both paths route through.
+fails schema validation: the row is logged (id/mission id/sequence/`trace_id`) and
+skipped rather than aborting the stream or 500ing the whole replay page. This is
+defense in depth for the *next* orchestrator-side schema drift, not a substitute for
+keeping this union's variant list matched to every `kind` the orchestrator actually
+emits — `api.sse.safe_to_schema` is the one place both paths route through. Never
+reaches an HTTP response body either way — the skip is silent to the client — and the
+server-side log line itself never includes the payload's contents: `#229` found
+`safe_to_schema` using `logger.exception`, whose traceback rendering calls pydantic's
+own `ValidationError.__str__`/`.errors()`, both of which embed the offending value(s)
+via `input_value=`/`"input"`; it now logs only the failure's shape (`loc`/`type` per
+`ValidationError.errors(include_url=False)`) with `exc_info=False`.
 
 SSE framing: `id: <sequence>`, `event: <type>`, `data: <MissionEvent JSON>`. The
 endpoint sets `X-Accel-Buffering: no`; nginx also needs `proxy_buffering off`
