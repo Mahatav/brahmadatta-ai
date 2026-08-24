@@ -171,3 +171,76 @@ entry, repeated entry_count times
 
 Bytes after the declared entries are ignored. Every other malformation is an error, and
 `pkt_status_str()` names it for the evidence report.
+
+## Git history and the bisect answer key
+
+This repository's own git history (`git -C demo/repositories/pktcfg log`, once the
+history is materialised — see below) is a constructed fixture, seeded by
+[issue #5](https://github.com/brahmadatta-ai/brahmadatta-ai/issues/5) for the `git
+bisect` demo scenario (P1-1) and the bisect-timeline panel (#26). It is not derived from
+the outer `brahmadatta-ai` repository's own commit history: `pktcfg` is a self-contained
+nested git repository, materialised from a bundle checked into the outer repo (see
+"Materialising the nested git history" below), specifically so that `git bisect` can run
+against it directly, the ordinary way, without any awareness of the monorepo around it.
+
+The defect documented above was introduced at exactly one commit:
+
+| Field | Value |
+|---|---|
+| Commit | `114383dd517e49e1285b53608184cb744adb2aaa` |
+| Subject | `decode: normalise literal tab bytes the same way as the \t escape` |
+| Date | 2025-05-19 |
+| Parent (last known-good) | `1fe6d02d4209f256d5436a661fb7b9698a6ba745` — `fuzz: add libFuzzer harness and a starter seed corpus` |
+| Child (first known-bad after) | `af7c7472fdc2f662b3e98c769d26cdd3d38bfd59` — `fuzz: check in the literal-tab crash reproducer` |
+
+That commit adds the `if (c == '\t') { out = emit_tab(dst, out); ... }` branch to
+`pkt_decode_into()` in `src/decode.c` without adding the matching branch to
+`pkt_decoded_length()`. Every commit before it builds clean and passes all available
+tests, with no crash under `-DPKTCFG_SANITIZE=ON` against `crash/crash-literal-tab.bin`.
+Every commit at or after it builds clean and passes the same CTest suite (the literal-tab
+path has no unit test, by design — see above) but crashes under ASan against that same
+reproducer.
+
+Verified by hand with a checker script kept *outside* this repository, at
+`demo/repositories/pktcfg-bisect-check.sh` in the outer `brahmadatta-ai` repo (deliberately
+not tracked inside `pktcfg`'s own history — `git bisect run` checks out a different commit
+before every invocation, and a script that is itself part of the bisected range can vanish
+or change out from under it; the embedded 22-byte reproducer means the script also doesn't
+depend on `crash/crash-literal-tab.bin` existing in whichever commit is checked out, which
+it does not before commit `af7c747`):
+
+```sh
+cd demo/repositories/pktcfg
+git bisect start
+git bisect bad HEAD
+git bisect good 1fe6d02d4209f256d5436a661fb7b9698a6ba745
+git bisect run ../pktcfg-bisect-check.sh
+```
+
+which lands on `114383dd517e49e1285b53608184cb744adb2aaa` and no other commit. See
+`demo/repositories/pktcfg-bisect-check.sh` for the exact build-and-replay logic (configures
+`-DPKTCFG_SANITIZE=ON`, builds `pktcfg_replay`, feeds it the reproducer bytes, and exits
+non-zero only on a sanitizer abort — never on a CTest failure, since the baseline suite is
+green on both sides of the regression).
+
+### Materialising the nested git history
+
+`demo/repositories/pktcfg/.git` is not committed to the outer `brahmadatta-ai`
+repository — a directory containing its own `.git` would otherwise become a submodule
+gitlink, which is more machinery than this fixture needs, and the outer repo's own
+`.gitignore` excludes `demo/repositories/pktcfg/.git/` for exactly that reason. Instead
+the full, real history (14 commits, this one included) is shipped as a git bundle at
+`demo/repositories/pktcfg-history.bundle`, one directory up from here. To get a working
+`.git` back:
+
+```sh
+cd demo/repositories/pktcfg
+git init -q -b main
+git fetch -q ../pktcfg-history.bundle main:main
+git checkout -q -f main
+```
+
+That last step is a hard checkout by design: it makes the working tree match the
+bundle's `main` exactly, which is also exactly what's already tracked by the outer repo,
+so nothing should actually change on disk. `demo/repositories/restore-pktcfg-history.sh`
+does the above and is safe to re-run.

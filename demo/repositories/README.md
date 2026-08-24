@@ -13,7 +13,7 @@ Current fixtures:
 
 | Path | Purpose | Notes |
 |---|---|---|
-| `pktcfg/` | C/C++ parser target for fuzzing, reproducer replay, patch generation, and verification demos | Contains a seeded heap-buffer-overflow and four benchmark candidate patches. |
+| `pktcfg/` | C/C++ parser target for fuzzing, reproducer replay, patch generation, and verification demos | Contains a seeded heap-buffer-overflow, four benchmark candidate patches, and a seeded git history (#5) with a known first-bad commit for `git bisect`. Its own `.git` is not committed — run `restore-pktcfg-history.sh` to materialise it from `pktcfg-history.bundle`. |
 
 Before adding another demo repository:
 
