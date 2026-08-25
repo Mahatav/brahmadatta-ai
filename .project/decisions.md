@@ -15832,3 +15832,138 @@ merge authority, per that instruction.
 **Final approval authority** — `product-manager`/CEO already exercised via D-058 (and reconfirmed
 via D-144) for the user-facing-scope question; this record is the technical implementation
 report, reviewed by `cybersecurity`/`qa-engineer` per D-086's instruction before merge.
+
+## D-149 — #24: general-purpose `git bisect run` wrapper built on `packages.sandbox.Jail`,
+verified end to end against #5's real seeded pktcfg history · 2026-08-24 ·
+`backend-developer` seat, under D-144's authorization
+
+**Decision.** Built `workers/git_analysis/bisect_step.py` (the per-commit `git bisect run`
+target: runs one arbitrary check command under a hard wall-clock timeout, returns exactly
+one of `git bisect run`'s three step exit codes — 0 good, 1 bad, 125 skip, nothing else,
+ever) and `workers/git_analysis/bisect_run.py` (the `start`/`bad`/`good`/`run`/`reset`
+driver, plus a mission-event emitter for a future orchestrator stage). Reuses
+`packages.sandbox.Jail` for the timeout/kill-group mechanism — no second timeout
+implementation. Verified live, twice, against `demo/repositories/pktcfg`'s real bundled
+git history (#5/D-146): `git bisect` converges on exactly
+`114383dd517e49e1285b53608184cb744adb2aaa` both from the direct known-bad commit and from
+the fixture's actual `HEAD`, through this wrapper, not the throwaway oracle script alone.
+
+**Options considered.**
+1. **A general-purpose timeout+exit-code-normalizing wrapper around an arbitrary check
+   command (chosen).** `bisect_step.py` does not know or care what it is bisecting — it
+   takes `--timeout-seconds` and a check command, runs the command inside a `Jail`, and
+   maps the result to `{GOOD, BAD, SKIP}`. `demo/repositories/pktcfg-bisect-check.sh`
+   (already built for #5, read in full per the dispatch instructions) is used unmodified
+   as the check command for verification — its own cmake/build/replay logic is exactly the
+   "shape" the dispatch instructions pointed at, not something to duplicate.
+2. **A pktcfg-specific bisect script that hardcodes the cmake/ASan/replay sequence.**
+   Rejected: would only ever bisect this one fixture, defeating the point of a reusable
+   `#24` wrapper, and would duplicate logic `pktcfg-bisect-check.sh` and
+   `adapters/cpp/pipeline.py` already own.
+3. **Reuse `adapters/cpp/pipeline.py`'s `run_variant`/`run_reproducer` directly instead of
+   shelling out to a check script.** Considered and rejected for *this* verification:
+   `run_variant` also runs the full CTest suite, which `demo/repositories/pktcfg/README.md`
+   explicitly documents as green on both sides of the seeded regression (the literal-tab
+   path has no unit test, by design) — CTest pass/fail is not the bisect signal here, only
+   the sanitized reproducer replay is, which is exactly what `pktcfg-bisect-check.sh`
+   already isolates. The wrapper itself stays adapter-agnostic; a caller bisecting a
+   different kind of regression (a CTest regression, say) can point `--` at any check
+   command, including one built from `adapters/cpp/pipeline.py` functions directly.
+4. **Point `Jail.root` itself at the bisected checkout, so `Jail.close()`'s teardown "just
+   works" on the real repo.** Rejected outright without prototyping: `Jail.close()`
+   recursively removes `self._root` — pointing it at a real, git-tracked checkout would
+   delete that checkout's `.git` on every step. Instead the check command's argv
+   references the real checkout by an external absolute path while `Jail.create()`'s own
+   scratch tempdir is used only for `Jail`'s own bookkeeping (stdout/stderr capture,
+   `cwd`) — the same pattern `adapters/cpp/pipeline.py::_configure_argv` already uses for
+   `-S <source_dir>` pointing outside the jail while only the build directory lives inside
+   it. No changes to `packages/sandbox/jail.py` were needed or made.
+
+**Design choice: timeout → skip (125), not bad (1).** Documented at length in
+`bisect_step.py`'s own module docstring. Short version: a hung step is evidence the
+*environment* could not evaluate that commit under the configured budget, not evidence
+about the code — reporting it as `bad` would let noise (a slow disk, a loud neighbour
+process) silently steer bisection to the wrong commit. `git bisect run`'s own `skip`
+contract exists for exactly this case. The same reasoning is applied uniformly to every
+other jail limit (`CPU`, `MEMORY`, `FILE_SIZE`, `OUTPUT`) and to an unexpected signal death
+or wrapper-internal exception, not only `WALL_CLOCK` — see `classify()`.
+
+**Naming deviation from the folder-structure doc.** `docs/04-development/35-project-folder-
+structure.md` lists `workers/git-analysis/` (hyphenated). Built as `workers/git_analysis/`
+(underscore) instead, because this package must be a real, importable Python module (`git
+bisect run` invokes it, and it is unit-tested directly) — a hyphen is not a legal Python
+identifier. Every existing sibling that IS a real Python package
+(`workers/baseline`, `workers/fuzzing`, `workers/replay`) is already hyphen-free for the
+same reason; the doc's hyphenated directories that stay hyphenated in practice
+(`packages/test-fixtures`, `apps/command-center`) are confirmed, by grep, to never be
+imported as Python modules anywhere in this codebase. Judged a minor, in-scope internal-
+organization call (CLAUDE.md's "internal code organization... within the architect's stack
+choice" is explicitly backend-developer's call), not a deviation worth blocking on.
+
+**Scope deliberately NOT built: orchestrator wiring.** `apps/control-api/orchestrator/
+queue.py`'s `advance_through_triage` is a real, working stub today — it auto-completes
+`TRIAGE` with a "no analyzers configured" placeholder because Semgrep (#22), compiler
+warnings (#23), and bisect (#24) were all cut (`docs/09-company/06-architecture-spec.md`
+§"TRIAGE (ANALYZE)"). Turning bisect into a real, dispatched `TRIAGE` analyzer means
+deciding, at the architecture level: when a live mission (not #5's pre-seeded fixture) has
+a good/bad commit range to bisect at all; how this composes with #22/#23 landing in the
+same stage (#22 was checked — no PR yet as of this session); and whether it is automatic
+or operator-triggered. None of that is decidable unilaterally by one issue's implementer
+without risking exactly the kind of unauthorized architecture call D-144's own precedent
+(the #22 builder's correct refusal) exists to prevent. `workers/git_analysis/bisect_run.py`
+is built in the same *shape* `workers/baseline/run.py` already established for this exact
+situation — a pure, fully-tested function plus a mission-event emitter, ready for an
+executor to call once `software-architect`/`engineering-manager` design that wiring — but
+`queue.py` itself is untouched. `EventType`/`MissionStage`/`MissionState` enums are also
+untouched: events are emitted using the existing `STAGE_STARTED`/`STAGE_PROGRESS`/
+`STAGE_COMPLETED` vocabulary already in `apps/control-api/contracts/enums.py`, stage=
+`ANALYZE`, state=`TRIAGE` — no new enum members, zero collision risk with any concurrent
+`#22` work touching the same file.
+
+**Cost implications.** None — no new infrastructure or dependency; reuses `packages.sandbox`
+and `adapters.cpp.variants`' existing sanitizer-memory constant.
+
+**Security implications.** This touches the subprocess-execution path (`packages.sandbox.
+Jail`, driving arbitrary check commands and `git` subprocesses) — flagged for `cybersecurity`
+review before merge per the dispatch instructions and CLAUDE.md's standing rule for
+sandbox/auth/verification-gate changes. Notable points for that review: (1) `bisect_step.py`
+passes the check command's argv through unmodified (no shell, `Jail.run` never uses
+`shell=True`) — the only wrapper-added content is an appended repo-path argument and a
+`BISECT_REPO_PATH` env var, both derived from `Path.cwd()`/an explicit `--repo-path`, never
+from unsanitized external input in this build; (2) every exception path, including an
+unanticipated one, is caught and mapped to `skip` rather than allowed to propagate with an
+unpredictable exit code — verified by `test_cli_no_command_is_skip_not_a_crash` and the
+"never returns anything but the three exit codes" parametrized test; (3) no change to
+`packages/sandbox/jail.py` itself, so none of its existing enforced-properties table
+(SEC-33/38/35/39/40) is touched or reasoned about differently by this change.
+
+**Scalability implications.** None beyond what `Jail` already costs per invocation (one
+scratch tempdir, one subprocess) — a bisect session runs `O(log N)` steps for `N` commits
+in range, each independently timeout-bounded, so a pathological single commit cannot make
+the whole session unbounded (the property #24 exists to guarantee, verified directly by
+`test_run_git_bisect_a_hung_check_at_every_commit_does_not_hang_the_session`).
+
+**Verification.** `workers/git_analysis/tests/` — 42 tests, real subprocesses throughout
+(no mocking of `Jail` or `git`): `classify()`'s full branch table; `run_bisect_step()`
+against a real `Jail` for good/bad/skip/timeout/jail-unavailable; the CLI as an actual
+subprocess (`git bisect run` invokes an executable, not a Python function — proven at that
+boundary, not assumed); and, gated on the real toolchain and `demo/repositories/pktcfg`'s
+history bundle, two full live `git bisect` runs against #5's real seeded defect (direct
+known-bad-commit range, and the fixture's actual `HEAD`) both landing on exactly
+`114383dd517e49e1285b53608184cb744adb2aaa`, plus a live end-to-end timeout run (a
+three-commit throwaway repo, every step hung for 120s under a 1s-per-step budget, whole
+session completes in well under 30s). `pytest workers/git_analysis/tests -q`: 42 passed.
+Full regression pass (`packages/sandbox/tests adapters/cpp/tests workers/baseline/tests
+workers/git_analysis/tests`, `-m "not slow"`): 173 passed, 3 skipped, 0 failed. `ruff check
+workers/git_analysis/`: clean. `mypy workers/git_analysis/ --config-file mypy.ini`: clean.
+
+**Recommendation.** Ship as built. Route to `cybersecurity` for the subprocess-execution-
+path review before merge — not self-merged, per the dispatch instructions and CLAUDE.md's
+standing rule, unlike D-146's self-merge (that PR's own reasoning explicitly does not apply
+here: this one does add a new, general-purpose subprocess-driving code path, not inert
+fixture content). Orchestrator wiring is an explicit open question for
+`software-architect`/`engineering-manager`, not resolved by this record.
+
+**Final approval authority** — CTO (technical; work already authorized by D-144, issue #24
+named explicitly in scope). `cybersecurity` review required before merge per this record's
+own security-implications section; PR not self-merged.
