@@ -43,6 +43,7 @@ def test_run_verification_signature_is_provenance_blind():
         "reproducer",
         "baseline",
         "runner",
+        "renewed_fuzz",
     ]
     hints = typing.get_type_hints(run_verification)
     assert hints["return"] is GateMatrix

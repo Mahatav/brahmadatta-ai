@@ -87,6 +87,24 @@ gate must reject it before compile or verification work starts.
 source file and stays tiny, but introduces an unbalanced block. The policy gate should pass
 it and the compile gate should reject it without marking the mission itself failed.
 
+**`patches/candidate-d-overfit-single-input-fix.patch` — the overfit fix (#40).** Teaches
+`pkt_decoded_length()` the literal-tab expansion, exactly like candidate A — but gates it
+on `len == 3`, the exact `value_len` of `crash/crash-literal-tab.bin`. It is not the
+crash-only trap candidate B is: it patches the *right* function, the original reproducer no
+longer faults, and `test_tab_expansion` — the one regression test that actually exercises
+tab expansion — never touches the literal (unescaped) path at all (see "no unit test at
+baseline" above), so it stays green. Compile, `REPRODUCER_ELIMINATED`, and
+`REGRESSION_PRESERVED` all PASS; this candidate would be `Verified` under the original
+three-gate matrix. It is still wrong: any literal tab in a value whose length is not
+exactly 3 overflows exactly as before. `corpus/seed-literal-tab.bin` (value length 7, added
+for #40) is a real, minimal proof — replaying it against this candidate's own build faults
+immediately, `ASan heap-buffer-overflow ... decode.c:161`, no fuzzing needed to demonstrate
+it by hand. Renewed fuzzing (`RENEWED_FUZZING`, `orchestrator/verification.py`) is what
+catches this candidate for real, without a human having to already know which byte length
+to try: a bounded libFuzzer campaign against this candidate's own patched build rediscovers
+the crash and the gate FAILs, flipping the verdict from what every other gate alone would
+have called `Verified`.
+
 ### The test that catches the bad patch
 
 **`tests/test_tab_expansion.c`.** It asserts that a `\t` escape decodes to exactly

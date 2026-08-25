@@ -303,7 +303,8 @@ non-negotiable product rule in `CLAUDE.md`).
 |---|---|
 | `TRIAGE` (`ANALYZE`) | **Reopened under D-144, real as of D-150.** Semgrep (#22, PR #274) is a real `JobKind.ANALYZE` executor running inside `ContainerJail` against a vendored ruleset, replacing the old stub. Compiler-warning capture (#23) is specified but not yet built — see D-150 Question 2 for the exact composition (a second sub-step inside the same `ANALYZE` job, not a second stage) and the real BASELINE-capture gap it depends on first. `git bisect` (#24, PR #275) is built and tested but **deliberately not part of this stage or any automatic mission path** — D-150 rules it a separate, operator-triggered capability (only meaningfully invokable against the #5 fixture today), never dispatched by `JOB_BACKED_STATES`. Git-history/bisect-timeline UI (#26) is unbuilt and depends on the not-yet-built bisect executor actually emitting real events — see D-150 Question 3. The old "must not fabricate a finding count" discipline still applies: a real scan that finds nothing is a real zero, not the same as "no analyzer ran." |
 | `CORRELATE` | **Real, but narrower than the name.** P2-10 cut multi-finding correlation. Its one job here: bind the sanitizer-confirmed crash to a `SourceLocation` and produce the bounded `FindingDetail.code_slice` the patch stage feeds the model. Label it that way in the UI. |
-| `GateName.STATIC_DELTA`, `GateName.RENEWED_FUZZING` | Always `NOT_RUN`. Consequently `derive_verdict`'s optional-gate `FAIL`/`ERROR` branches are dead code in this scope. Keep them — they are what makes the matrix five rows instead of three. |
+| `GateName.STATIC_DELTA` | Always `NOT_RUN` (P1-2, still cut). |
+| `GateName.RENEWED_FUZZING` | **No longer always `NOT_RUN`** — #40/D-144 (2026-08-24) built this gate for real: `orchestrator/verification.py::run_verification` runs a bounded libFuzzer campaign (`RenewedFuzzConfig`, reusing `adapters.cpp.fuzzing.run_libfuzzer_campaign`, the same function `JobKind.FUZZ` uses) against the patched build and PASSes/FAILs on whether it finds a new crash; it still reports `NOT_RUN` with a disclosed reason when no `SANDBOX_FUZZ_IMAGE` is configured for the deployment or the harness itself could not be built/run. `derive_verdict`'s optional-gate `FAIL` branch is therefore live, not dead code, for this gate specifically — `STATIC_DELTA` alone is what still exercises only the `NOT_RUN` path. This line superseded the one below it; the line otherwise wins where it still describes `STATIC_DELTA`. |
 | `AnalyzerTool.COMPILER_DIAGNOSTIC` | Never produced (#23 cut). |
 | `MissionState.PAUSED` | Reachable, and worth keeping — it is the only safe response to "the fuzzer is behaving oddly and I want to look" at 03:00. |
 | `ResourceUsage.gpu_seconds` | Always `0.0` (D-015). Field retained so bundle shape survives. |
@@ -796,6 +797,24 @@ VERDICT   VERIFIED — 3 of 5 gates ran
   [REGRESSION_PRESERVED]   PASS      ctest 3.28.3, 24/24 (baseline 24/24)
   [STATIC_DELTA]           NOT RUN   cut from the seven-day build (P1-2)
   [RENEWED_FUZZING]        NOT RUN   cut from the seven-day build (P1-3)
+```
+
+`RENEWED_FUZZING`'s row above is the "no `SANDBOX_FUZZ_IMAGE` configured for this
+deployment" case, still real and still possible (see the reason text
+`orchestrator/verification.py::_run_renewed_fuzz` actually emits — worded differently
+from this mock-up's "cut from the seven-day build", which stopped being true for this
+gate at #40/D-144). With the image configured, the same row instead reads, e.g.:
+
+```
+  [RENEWED_FUZZING]        PASS      libFuzzer, no new crash in 50000 exec (90.0s, budget 90s)
+```
+
+or, when a bounded re-fuzz of the patched build finds a new crash the original
+reproducer never exercised — the case that flips the verdict away from `Verified` even
+though every other gate passed:
+
+```
+  [RENEWED_FUZZING]        FAIL      libFuzzer, 1 new crash (4200 exec, 11.3s, budget 90s)
 ```
 
 ### 5.5 Fixed vs. to decide

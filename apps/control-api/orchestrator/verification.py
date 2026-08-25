@@ -39,6 +39,33 @@ wrong does not raise: every ASan-instrumented process aborts at startup with
 ``RLIMIT_AS`` is unenforced on Darwin, which is why this passed locally before), that
 turned every gate FAIL, meaning VERIFY could never produce a ``VERIFIED`` verdict for any
 candidate, correct or not.
+
+#40 (D-144, superseding D-086's CTO-confirmation gate — see ``.project/decisions.md``):
+the ``RENEWED_FUZZING`` optional gate (``contracts.verdict.OPTIONAL_GATES``) is real here,
+not the ``GateMatrix`` field-default ``NOT_RUN``/"cut" stand-in it was before. This module
+deliberately does **not** build a second fuzzing mechanism: ``_run_renewed_fuzz`` calls
+``adapters.cpp.fuzzing.run_libfuzzer_campaign`` — the exact function
+``workers/fuzzing/dispatch.py``'s ``JobKind.FUZZ`` executor already calls for the original
+discovery campaign — against ``verify_root`` (this call's own copy of the worktree, with
+the candidate diff already applied in place), with a bounded budget the caller sizes
+(``RenewedFuzzConfig.budget_seconds``, expected to be materially smaller than the
+discovery campaign's ``MissionPolicy.fuzz_seconds`` — a targeted re-check, not open-ended
+discovery). Reused, not re-implemented: the same pinned fuzz-toolchain image, the same
+``ContainerJail`` isolation (D-024), the same libFuzzer metrics parser.
+
+Only ``PASS``/``FAIL``/``NOT_RUN`` are produced here, matching every other gate this
+module computes — ``GateStatus.ERROR`` has no producer anywhere in this file (checked
+directly; every existing gate degrades to ``NOT_RUN`` with a disclosed reason rather than
+``ERROR`` on an infra fault, e.g. ``_run_reproducer``'s missing-binary case) and this gate
+follows the same local convention rather than inventing the first one: a genuine new
+crash is ``FAIL`` (flips the verdict per ``derive_verdict``'s "an optional gate that ran
+and FAILED -> REJECTED" rule); anything that stopped the campaign from producing a clean
+answer — no ``SANDBOX_FUZZ_IMAGE`` configured, the fuzz harness itself failed to build
+against the patched source, the container sandbox was unavailable — is ``NOT_RUN`` with
+the reason stated, same as the rest of this module already does for the required gates
+when an earlier step blocks them. ``NOT_RUN`` on an optional gate does not affect the
+verdict (``derive_verdict``'s own contract, unchanged by this addition) — an
+infrastructure gap must never silently downgrade or silently pass a candidate.
 """
 
 from __future__ import annotations
@@ -51,10 +78,14 @@ import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 
+from adapters.cpp.errors import AdapterError, StepFailure
+from adapters.cpp.fuzzing import LibFuzzerRunResult, run_libfuzzer_campaign
 from adapters.cpp.variants import MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS
 from contracts.enums import EvidenceSource, GateName, GateStatus
 from contracts.verdict import GateMatrix, GateResult
 from packages.sandbox import Jail, JailPolicy
+from packages.sandbox.container import ContainerJailPolicy
+from packages.sandbox.errors import JailError
 from packages.sandbox.policy import DEFAULT_ENV_ALLOWLIST
 
 #: Environment variables a verification subprocess (`git apply`, `cmake` configure/build,
@@ -207,6 +238,28 @@ class VerificationBaseline:
     )
 
 
+@dataclass(frozen=True)
+class RenewedFuzzConfig:
+    """#40 — bounded configuration for the ``RENEWED_FUZZING`` optional gate.
+
+    ``container_policy=None`` is the honest "not configured for this deployment" case
+    (no ``SANDBOX_FUZZ_IMAGE`` — see ``orchestrator/verify_dispatch.py``'s builder for
+    this dataclass): the gate is disclosed as ``NOT_RUN`` rather than silently omitted.
+    ``campaign_runner`` defaults to the real ``adapters.cpp.fuzzing.
+    run_libfuzzer_campaign`` and exists only so a test can inject a scripted result
+    without a real Docker daemon, the same shape ``CommandRunner``/``runner=`` already
+    gives the compile/reproducer/regression gates above.
+    """
+
+    container_policy: ContainerJailPolicy | None
+    budget_seconds: int = 120
+    harness_target: str = "pktcfg_fuzz"
+    harness_binary: str = "pktcfg_fuzz"
+    corpus_dir: str = "corpus"
+    mission_ref: str = "renewed-fuzz"
+    campaign_runner: Callable[..., LibFuzzerRunResult] | None = None
+
+
 def run_verification(
     worktree: Path,
     candidate_diff: str,
@@ -214,6 +267,7 @@ def run_verification(
     baseline: VerificationBaseline | None = None,
     *,
     runner: CommandRunner | None = None,
+    renewed_fuzz: RenewedFuzzConfig | None = None,
 ) -> GateMatrix:
     """Apply ``candidate_diff`` in a fresh worktree and return deterministic gates.
 
@@ -275,6 +329,10 @@ def run_verification(
                     GateName.REGRESSION_PRESERVED,
                     "Not run: candidate diff did not apply in the fresh worktree.",
                 ),
+                renewed_fuzzing=_not_run(
+                    GateName.RENEWED_FUZZING,
+                    "Not run: candidate diff did not apply in the fresh worktree.",
+                ),
             )
 
         build_dir = verify_root / baseline.build_dir
@@ -295,6 +353,10 @@ def run_verification(
                     GateName.REGRESSION_PRESERVED,
                     "Not run: configure failed before the regression suite existed.",
                 ),
+                renewed_fuzzing=_not_run(
+                    GateName.RENEWED_FUZZING,
+                    "Not run: configure failed before a patched build existed to fuzz.",
+                ),
             )
 
         build_result = command_runner(
@@ -314,6 +376,10 @@ def run_verification(
                     GateName.REGRESSION_PRESERVED,
                     "Not run: build failed before the regression suite could run.",
                 ),
+                renewed_fuzzing=_not_run(
+                    GateName.RENEWED_FUZZING,
+                    "Not run: build failed before a patched build existed to fuzz.",
+                ),
             )
 
         compile_gate = _pass(GateName.COMPILE, "cmake")
@@ -325,10 +391,19 @@ def run_verification(
             baseline,
         )
         regression_gate = _run_regressions(command_runner, verify_root, baseline)
+        # #40: the patched build exists and compiled cleanly — the one precondition
+        # this gate needs (see `_run_renewed_fuzz`'s own docstring for why it runs
+        # independently of the reproducer/regression outcome). Still inside the `with
+        # Jail.create(...)` block: `verify_root` is deleted the moment it exits, and
+        # `run_libfuzzer_campaign` needs to `shutil.copytree` it into its own
+        # `ContainerJail` before that happens (mirrors D-106's identical concern for
+        # the original FUZZ path's crash-artifact copy-out).
+        renewed_fuzzing_gate = _run_renewed_fuzz(renewed_fuzz, verify_root)
         return _matrix(
             compile_=compile_gate,
             reproducer=reproducer_gate,
             regression=regression_gate,
+            renewed_fuzzing=renewed_fuzzing_gate,
         )
 
 
@@ -433,6 +508,89 @@ def _run_regressions(
     )
 
 
+def _run_renewed_fuzz(config: RenewedFuzzConfig | None, verify_root: Path) -> GateResult:
+    """#40 — the ``RENEWED_FUZZING`` optional gate.
+
+    Runs independently of ``reproducer_gate``/``regression_gate``'s own outcome — this
+    is deliberate. The gate's job is to disclose whatever a bounded fuzz campaign finds
+    against the patched build; withholding it just because another gate already failed
+    would hide evidence the verdict (and a human reviewing a ``REJECTED``/
+    ``HUMAN_REVIEW_REQUIRED`` candidate) could use. It never *upgrades* a verdict —
+    ``derive_verdict`` still requires every gate in ``REQUIRED_GATES`` to PASS.
+
+    See the module docstring's own "#40" section for why every outcome here is
+    PASS/FAIL/NOT_RUN, never ERROR: this mirrors every other gate in this file, and
+    ``GateStatus.ERROR`` has no producer anywhere in this module.
+    """
+    if config is None:
+        return _not_run(
+            GateName.RENEWED_FUZZING,
+            "Not run: renewed fuzzing was not requested for this verification run.",
+        )
+    if config.container_policy is None:
+        return _not_run(
+            GateName.RENEWED_FUZZING,
+            "Not run: no fuzzing sandbox image is configured for this deployment "
+            "(SANDBOX_FUZZ_IMAGE unset).",
+        )
+
+    campaign_runner = config.campaign_runner or run_libfuzzer_campaign
+    try:
+        result = campaign_runner(
+            verify_root,
+            config.container_policy,
+            harness_target=config.harness_target,
+            harness_binary=config.harness_binary,
+            corpus_dir=config.corpus_dir,
+            budget_seconds=config.budget_seconds,
+            mission_ref=config.mission_ref,
+        )
+    except (StepFailure, AdapterError, ValueError) as exc:
+        message = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        return _not_run(
+            GateName.RENEWED_FUZZING,
+            f"Not run: the renewed-fuzz harness could not be built or run against "
+            f"the patched source: {message}",
+        )
+    except JailError as exc:
+        return _not_run(
+            GateName.RENEWED_FUZZING,
+            f"Not run: the sandbox was unavailable for renewed fuzzing: {exc}",
+        )
+
+    if result.failure is not None:
+        return _not_run(
+            GateName.RENEWED_FUZZING,
+            f"Not run: the renewed-fuzz harness failed to build or run against the "
+            f"patched source ({result.failure.step}: {result.failure.first_error}).",
+        )
+
+    metrics = result.metrics
+    if metrics.unique_crashes > 0:
+        return GateResult(
+            name=GateName.RENEWED_FUZZING,
+            status=GateStatus.FAIL,
+            evidence_source=EvidenceSource.TOOL_EXECUTION,
+            tool="libFuzzer",
+            detail=(
+                f"Renewed fuzzing found {metrics.unique_crashes} new crash(es) "
+                f"({metrics.executions} executions, {result.runtime_seconds:.1f}s, "
+                f"budget {config.budget_seconds}s) against the patched build."
+            ),
+        )
+    return GateResult(
+        name=GateName.RENEWED_FUZZING,
+        status=GateStatus.PASS,
+        evidence_source=EvidenceSource.TOOL_EXECUTION,
+        tool="libFuzzer",
+        detail=(
+            f"Renewed fuzzing found no new crash in {metrics.executions} executions "
+            f"({result.runtime_seconds:.1f}s, budget {config.budget_seconds}s) "
+            f"against the patched build."
+        ),
+    )
+
+
 def _subprocess_runner(
     argv: Sequence[str],
     cwd: Path,
@@ -479,11 +637,18 @@ def _matrix(
     compile_: GateResult,
     reproducer: GateResult,
     regression: GateResult,
+    renewed_fuzzing: GateResult,
 ) -> GateMatrix:
+    # `renewed_fuzzing` has no default (unlike `GateMatrix`'s own field, which
+    # defaults to the "cut" reason `contracts.verdict` still uses for `STATIC_DELTA`,
+    # genuinely still cut). #40 made `RENEWED_FUZZING` real; every call site above is
+    # required to say explicitly why it did or did not run rather than falling back to
+    # a stale "cut from the seven-day build" default that no longer describes this gate.
     return GateMatrix(
         compile=compile_,
         reproducer_eliminated=reproducer,
         regression_preserved=regression,
+        renewed_fuzzing=renewed_fuzzing,
     )
 
 
