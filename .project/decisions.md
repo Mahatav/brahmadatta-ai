@@ -16562,3 +16562,342 @@ dependency, no new paid service.
 **Final approval authority** — CTO for the technical call (already satisfied by D-144
 superseding D-086's confirmation gate, per this record's own context section); normal
 per-PR `cybersecurity` review still required before merge, per `CLAUDE.md`.
+## D-153 — #23: compiler diagnostics parsed into `AnalyzerTool.COMPILER_DIAGNOSTIC`
+`Finding` rows off the BASELINE stage's own build, deduplicated against another
+tool's finding on the same file:line, compiler identity recorded via `StageToolRun`
+· 2026-08-24 · `backend-developer` seat
+
+Built under D-144's blanket CUT-reopen authorization (`#23` is named explicitly in its
+scope list). Verified D-144 is real and unretracted for this issue by reading
+`origin/main`'s own `.project/decisions.md` directly (not a stale local checkout — see
+D-147's own "process lesson" section, which this session's first action was to follow:
+`git fetch origin main` into an isolated worktree, then re-check both D-144 and D-147
+before touching any file, and separately re-read `gh issue view 23 --comments` for a
+hidden per-issue prohibition the way #41's own comment thread had one — #23 has zero
+comments, no such prohibition exists).
+
+**Decision.** Parse gcc/clang compiler diagnostics out of the SAME `cmake --build`
+invocation `workers/baseline/run.py::run_baseline_stage` already runs for the D3 gate —
+never a second build just to observe warnings. Each `warning`/`error`-severity
+diagnostic becomes one `Finding` row (`tool=AnalyzerTool.COMPILER_DIAGNOSTIC`, an enum
+member that already existed on `main` before this change — the schema anticipated this
+work, `adapters/cpp/variants.py`'s `BASELINE` `VariantSpec.analyzer_tools` already named
+it too) via `orchestrator.findings.record_finding`, the same write path
+`workers/fuzzing/dispatch.py` and #22's (uncommitted as of this writing)
+`workers/static_analysis/dispatch.py` both use. One `StageToolRun` row per mission
+records the real compiler identity (`compiler_id`/`compiler_version`, already probed by
+`adapters/cpp/toolchain.py::read_compiler_identity` for the D3 gate's own report and
+reused here, not re-probed) — #23's third acceptance criterion, satisfied by reusing the
+existing `StageToolRun` model (`missions/models.py`, architecture spec §5.1) rather than
+adding a new field to `Finding` itself.
+
+**Options considered.**
+
+1. **Parse inside `adapters/cpp/pipeline.py::run_variant` itself**, so every variant
+   (not just `BASELINE`) gets diagnostic capture for free. Rejected: `run_variant` is
+   framework-free (D-026 boundary) and is compiler-toolchain-engineer's module: adding
+   `Finding`/Django-aware persistence there would cross that boundary and duplicate
+   work `ASAN_UBSAN`/`ASAN`/`UBSAN` builds don't need — their compiler warnings are not
+   the mission's evidence signal, their sanitizer *runtime* reports are
+   (`adapters/cpp/sanitizer.py`, already wired). `BASELINE`'s own `VariantSpec.
+   analyzer_tools=("CTEST", "COMPILER_DIAGNOSTIC")` (pre-existing, unmodified by this
+   change) already scopes `COMPILER_DIAGNOSTIC` to `BASELINE` alone.
+2. **A new `JobKind` (e.g. `JobKind.COMPILE_ANALYZE`) that re-runs the build under
+   `-Wall -Wextra` and diffs against the BASELINE build.** Rejected outright by the
+   assignment's own instruction and independently on the merits: `demo/repositories/
+   pktcfg/CMakeLists.txt` already builds with `-Wall -Wextra -Wshadow -Wconversion` by
+   default (verified directly, not assumed — the comment there literally reads
+   "Compiler warnings are evidence for this project, so they are on by default"), so a
+   second build would be redundant work producing byte-identical diagnostics, doubling
+   the D3 gate's wall-clock cost for zero new evidence.
+3. **(Chosen) Parse `BaselineOutcome`'s already-captured build stdout/stderr in
+   `workers/baseline/run.py`, persist from `workers/baseline/dispatch.py`.** No second
+   build, respects the framework-free/Django-aware module boundary already established
+   for this stage (`BaselineOutcome` stays a plain dataclass; `Finding`/`StageToolRun`
+   writes live in the dispatch module that already owns `BaselineReport` persistence).
+
+**Dedup design (#23's own acceptance criterion: "Deduplicated against Semgrep findings
+on the same line").** `record_finding`'s own dedup is exact-`fingerprint` equality
+(`orchestrator/findings.py`) — two different tools' fingerprints (a `-W` flag here, a
+Semgrep rule id there) will not collide by accident, so a second, explicit check was
+added: before writing a compiler-diagnostic `Finding`, query whether the mission
+already has a `Finding` from a DIFFERENT tool at the identical `(file_path, line)`, and
+skip if so (`workers/baseline/dispatch.py::_line_already_has_a_finding_from_another_
+tool`). Deliberately does NOT dedup two distinct compiler diagnostics against each
+other on the same line (a real case — see `adapters/cpp/tests/
+test_compiler_diagnostics.py::test_a_distinct_diagnostic_on_the_same_line_is_not_
+dropped`) — the exclusion is scoped to `AnalyzerTool.COMPILER_DIAGNOSTIC` specifically.
+
+**Known asymmetry, stated rather than hidden.** Architecture spec's mission flow runs
+`BASELINE` before `TRIAGE`/`ANALYZE` (#22's `JobKind.ANALYZE` backs `TRIAGE`), so in
+production compiler-diagnostic findings are always recorded FIRST — the dedup check
+above has nothing to defer to yet on the day #22 merges, because no Semgrep finding
+exists at BASELINE time. The check is still correct and forward-compatible (symmetric,
+stage-order-independent), and is the reciprocal half of what #22's own dispatch module
+would need on its own side (an `.exclude(tool=AnalyzerTool.COMPILER_DIAGNOSTIC)`-shaped
+query against `COMPILER_DIAGNOSTIC` rows) for the criterion to hold in the direction
+that actually fires given real stage order. This module could not safely make that edit
+itself — #22's dispatch module is uncommitted, in a different in-flight session's
+worktree (`/private/tmp/build-22-semgrep-v2`, `feat/22-semgrep-integration`, read-only
+reconnaissance only, never written to) — per this repository's "never silently rewrite
+another role's prior work" rule. Flagged here and in `workers/baseline/dispatch.py`'s
+own module docstring for whoever finishes #22.
+
+**A schema addition that overlaps #22's own, independently designed one.**
+`DiscoveryMethod.STATIC_ANALYSIS` did not exist on `main` (`DiscoveryMethod` had only
+`FUZZING_CAMPAIGN`/`DIRECT_HARNESS`/`REPLAYED_REPRODUCER`); #22's own uncommitted branch
+independently adds the identical member (same name, same string value) for the
+identical reason ("a finding surfaced by reading source, no execution/crash involved").
+Added here rather than inventing a second, differently-named concept — reusing #22's
+already-designed shape is what this task's own instructions ask for ("if not landed
+yet... design for it"), and a same-named/same-valued duplicate add is the cheapest
+possible merge conflict (keep one copy) versus two overlapping enum members drifting
+apart in the codebase. Whoever merges #22 second resolves the trivial collision.
+
+**Testing.** Real compiler output only, never fabricated: `adapters/cpp/tests/
+test_compiler_diagnostics.py` embeds verbatim captures from two real compilers —
+AppleClang 21.0.0 (this development host) and gcc 13.4.0 (`gcc:13` Docker image, the
+same family the real Linux worker image installs via `build-essential`) — compiling the
+identical small C snippet with `-Wall -Wextra -Wshadow -Wconversion`, the exact flags
+`demo/repositories/pktcfg` already builds with. `workers/baseline/tests/
+test_run_baseline.py` and `orchestrator/tests/test_baseline_executor.py` both add a
+`warning_producing_source` fixture — a real copy of pktcfg (never the committed tree)
+with one small function appended that genuinely warns under those same flags — and run
+the REAL executor/`run_baseline_stage` against it end to end, asserting on real
+`Finding`/`StageToolRun` rows with normalized `file_path`, correct `line`/`severity`,
+and a non-"unknown" compiler identity. Also verified directly (not assumed) that
+`demo/repositories/pktcfg` itself builds with zero warnings today even with those flags
+on — a real, honest "zero findings" result is asserted, not skipped.
+
+Full results (all commands run in this session, real output):
+- `pytest adapters/cpp/tests workers/baseline/tests -q -rs`: 86 passed, 1 skipped (the
+  skip is the pre-existing, Linux-only `RLIMIT_AS`/ASan sanitizer-memory case, unrelated
+  to this change — confirmed identical on unmodified `main`).
+- `pytest orchestrator/tests/test_baseline_executor.py -q` (Postgres-shaped test
+  settings, SQLite locally): 16 passed, including the three new #23 tests (real-warnings
+  end-to-end, clean-build honest-zero, and the same-line dedup-against-another-tool
+  case).
+- `ruff check` on every touched/new file: 2 pre-existing findings, both outside this
+  diff (confirmed via `git diff --stat` — an unrelated `S105`/`RUF003` in
+  `contracts/enums.py` untouched by this change).
+- `mypy` (`workers/baseline/run.py`, `adapters/cpp/compiler_diagnostics.py`): clean.
+  `mypy workers/baseline/dispatch.py` (MYPYPATH=apps/control-api): 13 pre-existing
+  errors, byte-identical in count and content to the same command run against
+  unmodified `main` (confirmed directly, not assumed).
+- `infrastructure/scripts/openapi-contract-check.sh`: FAILED before regenerating
+  `packages/schemas/openapi.json` (the new `DiscoveryMethod.STATIC_ANALYSIS` member
+  changed the generated schema), PASS after `tools/export_openapi.py` regenerated it —
+  re-verified on both Python 3.12 and 3.13 (CI's own interpreter-independence check),
+  both byte-identical.
+- One pre-existing, unrelated failure found and confirmed NOT caused by this change,
+  reproduced identically against unmodified `main`:
+  `orchestrator/tests/test_patch_generate_executor.py::
+  test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`
+  (this sandbox's DNS/network resolves `model-host` to something answering 401 rather
+  than failing to resolve — an environment property, not a code regression) and
+  `packages/test-fixtures/tests/test_mission_fixture.py::
+  test_fixture_exercises_every_payload_variant` (the committed fixture already does not
+  cover a 16th `MissionEvent.payload` variant the committed schema already declares,
+  independent of anything in this PR).
+
+**Documentation kept truthful.** `docs/09-company/06-architecture-spec.md` §2.5's table
+said "`AnalyzerTool.COMPILER_DIAGNOSTIC` | Never produced (#23 cut)" and "compiler-
+warning capture is CUT (#23)" — both now false. Updated in this PR to describe what is
+actually built, including the ordering caveat above, rather than leaving a stale CUT
+claim next to real, running code.
+
+**Cost implications.** None — no new infrastructure, no new container image, no new
+subprocess invocation. Parses text already captured in memory during a build that was
+already going to run.
+
+**Security implications.** `Finding.sanitizer_report`/`title` carry compiler-quoted
+source identifiers (variable/function names from the warning text) — the same class of
+free-text-from-target-output every other analyzer tool in this codebase already writes
+to that field, redacted through the identical, already-reviewed `orchestrator.
+redaction.redact_sanitizer_report` (SEC-48/SEC-50 lineage) `workers/fuzzing/dispatch.py`
+and #22's own dispatch module both use — no new redaction mechanism introduced. Diagnostic
+`file` paths are normalized relative to the mission's source root before ever reaching a
+`Finding` row (mirrors Semgrep's own `_strip_root`), so no absolute host/container
+filesystem path reaches a persisted finding. Touches the finding-storage/redaction
+pipeline per this task's own framing — not self-merged; routed to `cybersecurity` for
+review before merge, per CLAUDE.md's standing rule and D-144's own text ("this ruling
+authorizes the WORK, not a bypass of the existing review discipline").
+
+**Scalability implications.** Negligible — one regex pass over a build's already-
+captured, already-bounded (`JailResult`'s own output cap) stdout/stderr, once per
+mission's `BASELINE` job (`MAX_ATTEMPTS_BY_KIND[JobKind.BASELINE] == 1`).
+
+**Recommendation.** Ship as built. Route to `cybersecurity` for the finding-storage/
+redaction-pipeline review before merge (this task's own instruction, independent of
+D-144's blanket authorization). Flag the #22 coordination note (the `DiscoveryMethod.
+STATIC_ANALYSIS` duplicate-add, and the reciprocal same-line dedup check #22's own
+dispatch module should add once it lands) to whoever finishes #22.
+
+**Final approval authority** — CTO (technical; work already authorized by D-144, issue
+#23 named explicitly in scope). `cybersecurity` review required before merge per this
+record's own security-implications section and this task's explicit instruction; PR not
+self-merged.
+
+## D-151 — #23/PR #278: SEC-A/SEC-B fixes, `Finding.title` redaction bypass and
+`#line`-forged `Finding.file_path`/`line` · 2026-08-24 · `backend-developer` seat
+
+Two real, cybersecurity-confirmed HIGH-severity findings blocking PR #278 (#23,
+compiler warnings as structured findings, D-150). Fixed in place on
+`fix/278-security-findings`, branched from `feat/23-compiler-warnings-findings` (the
+same branch PR #278 is open against — see this record's own "Final approval
+authority" for why this did not open a second PR).
+
+**SEC-A — `Finding.title` bypassed redaction.** `workers/baseline/dispatch.py::
+_finding_kwargs` redacted `sanitizer_report` via `redact_sanitizer_report(diagnostic.
+raw)`, but the pre-fix `_title_for` built `title` straight from `diagnostic.message`
+(raw compiler diagnostic text) truncated to 300 chars, with no redaction pass applied
+anywhere downstream. gcc/clang echo arbitrary TARGET source text verbatim into
+`message` for several real diagnostic kinds — `[[deprecated("...")]]`/
+`__attribute__((deprecated("...")))` reasons, `#warning "..."`, `static_assert(...,
+"...")` — so an untrusted target source file containing
+`__attribute__((deprecated("rotate DATABASE_URL=postgresql://user:pass@host/db")))`
+produced a `title` carrying that credential verbatim, reaching the exported evidence
+bundle (`orchestrator/evidence_export.py`) and the `FINDING_RECORDED` SSE event
+unredacted. Reproduced live against real AppleClang before and after the fix (see
+this PR's handoff).
+
+**SEC-B — `#line` let adversarial target source forge `Finding.file_path`/`line`.**
+The pre-fix `_normalize_file_path` tried `resolved.relative_to(source_dir.resolve())`
+and, on `ValueError` (the path is not under `source_dir`), fell back to trusting the
+raw string anyway (`raw_file.lstrip("/")`) — treating "not resolvable under
+`source_dir`" as a harmless edge case (a system header) rather than a threat. Both gcc
+and clang honour the standard C preprocessor `#line` directive, and target source is
+untrusted: `#line 1 "/etc/passwd"` ahead of `int compute(int limit) { ... }` makes
+`cc -Wall -Wextra` report a real `-Wunused-parameter` warning AT `/etc/passwd:1`,
+which the pre-fix fallback turned into `Finding.file_path="etc/passwd", line=1` —
+an evidence row falsely attributed to an arbitrary attacker-chosen location, capable
+of colliding with (and silently suppressing via same-line dedup) a genuine finding,
+or misdirecting triage away from the real vulnerable line. Reproduced live against
+real AppleClang before and after the fix.
+
+**Fixes.**
+
+* **SEC-A** — `_title_for` (`workers/baseline/dispatch.py`) rebuilt to use
+  structured, compiler-controlled fields only: the diagnostic's own `-W...` flag (a
+  fixed, finite compiler vocabulary, never target source text), severity, the
+  `FindingCategory` this module already derives from the flag, `file_path`, and
+  `line` — never `diagnostic.message`/`.raw`. Mirrors `workers/fuzzing/dispatch.py::
+  _title_for`'s own structured-fields-only contract exactly, rather than adding a
+  second, differently-shaped redaction pass for one more free-text field (the
+  allowlist-not-denylist reasoning `orchestrator/redaction.py`'s own module
+  docstring already gives for why pattern-matching secrets out of open-ended text is
+  the wrong shape of fix). `diagnostic.message`/`.raw` still reach
+  `Finding.sanitizer_report`, unchanged, through the already-reviewed
+  `redact_sanitizer_report` pass.
+* **SEC-B** — `_normalize_file_path` rebuilt to canonicalize BOTH the diagnostic's
+  reported path and `source_dir` (`Path.resolve()`, which also follows symlinks —
+  closing the adjacent variant where a symlink planted inside `source_dir` points
+  back out to a real host path) and require the resolved diagnostic path to
+  genuinely sit under the resolved source root. Returns `None` — never a
+  best-effort guess — when it does not. `_persist_compiler_diagnostics` treats
+  `None` as "never record a `Finding` for this diagnostic": dropping is the chosen
+  mechanism over recording-with-an-unverified-location-flag, because `file_path`/
+  `line` are treated as ground truth by the same-line cross-tool dedup, CORRELATE,
+  and the patch stage's code-slice extraction — a forged location is actively
+  dangerous to those consumers, not merely inaccurate, so no consumer should ever
+  see one. Not silently invisible: the rejection count is still surfaced on the
+  `StageToolRun.flags` row (`unverified-location:<n>`), visible to an operator even
+  though no `Finding` was created.
+
+**False-positive risk considered and tested for.** `#line` is not exclusively an
+attack vector — bison/flex-generated parsers legitimately use it to attribute their
+own diagnostics back to the `.y`/`.l` grammar file they were generated from, and that
+grammar file is itself checked into the target's repository, under `source_dir`. The
+fix's actual test (`source_dir` containment, not "is this a `#line` directive at
+all") accepts that case unchanged: a `#line` target that resolves under `source_dir`
+— including a relative one, joined against `source_dir` before resolving, matching
+how a real generated file's `#line` would name a sibling in-tree file — is recorded
+exactly as any other in-tree diagnostic would be. Proven with a real compiled
+fixture (`legitimate_line_directive_source` /
+`test_a_real_legitimate_line_directive_is_still_recorded`), not asserted from
+reasoning alone.
+
+**Options considered (SEC-B, drop vs. flag-as-unverified).**
+
+1. **Keep the `Finding` but mark its location unverified** (a new field, or a
+   sentinel `file_path`). Rejected: every downstream consumer of `file_path`/`line`
+   (dedup, CORRELATE, patch code-slice) treats them as ground truth today with no
+   "unverified" branch to route to — adding one is a real schema/consumer change
+   across multiple modules this PR does not own, for a case (an escaped location)
+   that is never useful evidence regardless of how it is labelled.
+2. **(Chosen) Drop the diagnostic entirely, count and surface the drop on
+   `StageToolRun.flags`.** No schema change, no new consumer branch, and the one
+   real risk this creates — silently losing a real diagnostic — is mitigated by the
+   count staying visible on the `StageToolRun` row rather than vanishing with no
+   trace anywhere.
+
+**Testing.** Both real PoCs from the cybersecurity report reproduced against real
+AppleClang, confirmed to fail against the pre-fix code and pass against the fix (git
+diff toggled locally in this session, both directions, real `pytest` runs — not
+inferred): `test_title_for_never_carries_raw_diagnostic_message_text` /
+`test_a_real_deprecated_attribute_secret_never_reaches_a_finding_title` (SEC-A);
+`test_normalize_file_path_rejects_a_line_directive_escape` /
+`test_normalize_file_path_rejects_a_symlink_escape` /
+`test_a_line_directive_escaped_diagnostic_is_not_recorded_as_a_finding` /
+`test_a_real_line_directive_escape_is_not_recorded_as_a_finding` (SEC-B); the
+legitimate-`#line` case above is new coverage, not a reproduction (`apps/control-api/
+orchestrator/tests/test_baseline_executor.py`). One pre-existing D-150 test,
+`test_real_compiler_warnings_become_finding_and_stage_tool_run_rows`, asserted a
+`Finding.title` contained a raw identifier name (`diagnostic_probe_unused`) — exactly
+the class of content SEC-A's fix now deliberately excludes from `title` by design;
+updated to select the finding by `fingerprint` prefix instead, matching the new
+title contract rather than the pre-fix one.
+
+Full results (all commands run in this session, real output; a real `python3.12`
+venv with `apps/control-api/requirements.txt`/`requirements-dev.txt` installed —
+the system `python3` here is 3.9, too old for Django 5.2's `>=3.10` floor):
+- `pytest adapters/cpp/tests workers/baseline/tests -q -rs`: 86 passed, 1 skipped
+  (same pre-existing Linux-only ASan/`RLIMIT_AS` skip D-150 already documented) —
+  unaffected by this fix, confirming no regression outside `workers/baseline/
+  dispatch.py`.
+- `pytest orchestrator/tests/test_baseline_executor.py -q` (SQLite test settings):
+  24 passed (D-150's 16, plus 8 new SEC-A/SEC-B tests this record adds).
+- `ruff check workers/baseline/dispatch.py apps/control-api/orchestrator/tests/
+  test_baseline_executor.py`: clean.
+- `mypy workers/baseline/dispatch.py` (`MYPYPATH=apps/control-api`): 13 errors,
+  byte-identical in count to D-150's own documented pre-existing baseline (the
+  `StrEnum`/`JobKind` dict-item family in `orchestrator/executors.py` and
+  `missions/models.py`) — none newly introduced by this fix.
+
+Note on the assignment's literal test command
+(`pytest adapters/cpp/tests workers/baseline/tests orchestrator/tests/
+test_baseline_executor.py -q`): run as two separate invocations, matching how D-150
+itself was actually verified and matching the repository's real layout —
+`orchestrator/tests/` only exists under `apps/control-api/`, with its own
+`pytest.ini` (`DJANGO_SETTINGS_MODULE = config.settings.test`) that only takes effect
+when pytest's rootdir resolution lands there; `adapters/cpp/tests`/`workers/
+baseline/tests` are framework-free and run from the repo root under the root
+`pytest.ini`. A single combined invocation from either directory does not resolve
+all three paths at once given this layout — confirmed directly, not assumed, rather
+than silently reporting a command that was never actually run as-is.
+
+**Cost implications.** None — pure logic changes to functions already on the write
+path; no new dependency, no new subprocess, no schema migration.
+
+**Security implications.** This record's entire subject. Both fixes close the exact
+mechanisms cybersecurity's PoCs demonstrated, verified against the same PoCs, in both
+directions (fail pre-fix, pass post-fix). Per CLAUDE.md's standing rule and this
+task's explicit instruction, this fix is not self-merged — it requires the same (or a
+fresh) `cybersecurity` reviewer to re-confirm both findings are closed before PR #278
+merges.
+
+**Scalability implications.** Negligible — `_normalize_file_path` now does two
+`Path.resolve()` calls instead of one per diagnostic (still bounded by the same
+`JailResult` output cap D-150 already documented); `_title_for` does strictly less
+string work than before (no longer touches `diagnostic.message` at all).
+
+**Recommendation.** Merge the fix commit into `feat/23-compiler-warnings-findings`
+(this session pushed `fix/278-security-findings`, branched from and tracking that
+same remote branch, rather than opening a second PR — the end state this task asked
+for is PR #278 itself carrying both fixes) once `cybersecurity` re-confirms both
+SEC-A and SEC-B are closed. Do not merge PR #278 on this record's own say-so.
+
+**Final approval authority** — CTO (technical; fixes a blocker on work already
+authorized by D-144/D-150). `cybersecurity` re-review is a hard gate before PR #278
+merges, per this task's explicit instruction and CLAUDE.md's standing review-chain
+rule; not self-merged.

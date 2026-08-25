@@ -52,6 +52,89 @@ why). `TRANSITIONS[MissionState.BASELINE]` (`contracts/state_machine.py`) is
 for here even by mistake, unlike the `STRESS_TEST` trap `_fuzz_transition_policy`
 guards against.
 
+## Compiler diagnostics -> `Finding`/`StageToolRun` rows (#23, D-144)
+
+`BaselineOutcome.compiler_diagnostics` (`workers/baseline/run.py`) is real, already
+structurally parsed — this module's only job is turning each `warning`/`error`-severity
+one into a `Finding` row (`orchestrator.findings.record_finding`, the same write path
+`workers/fuzzing/dispatch.py` and #22's `workers/static_analysis/dispatch.py` both use)
+plus one `StageToolRun` row recording the compiler identity (architecture spec §5.1:
+tool name/version alongside the findings it produced) — mirroring #22's own
+`StageToolRun` write for Semgrep exactly, not inventing a second shape.
+
+`note`-severity diagnostics are never turned into findings — see `adapters/cpp/
+compiler_diagnostics.py`'s own docstring: a `note:` only ever restates the location of
+the `warning:`/`error:` it is attached to, never a new one.
+
+**Two HIGH-severity findings fixed post-review, both still in this docstring's scope
+(cybersecurity, PR #278; full reasoning lives on each fixed function's own
+docstring):**
+
+* **SEC-A** — `Finding.title` used to build straight from `diagnostic.message` (raw
+  compiler diagnostic text, which echoes arbitrary TARGET source text verbatim for
+  `[[deprecated("...")]]`/`#warning`/`static_assert` diagnostics) with no redaction,
+  reaching the exported evidence bundle and the `FINDING_RECORDED` SSE event
+  unredacted. Fixed in `_title_for` by building the title from structured,
+  compiler-controlled fields only (flag/category/file/line), the same
+  structured-fields-only contract `workers/fuzzing/dispatch.py::_title_for` already
+  uses — never free text, redacted or otherwise.
+* **SEC-B** — `_normalize_file_path` used to trust whatever path a diagnostic
+  reported, including one redirected by an adversarial `#line` directive in
+  untrusted target source (`#line 1 "/etc/passwd"` is honoured verbatim by both gcc
+  and clang), forging `Finding.file_path`/`line` to an arbitrary attacker-chosen
+  location. Fixed by requiring the diagnostic's canonicalized, symlink-resolved path
+  to genuinely sit under `source_dir`'s own canonicalized path before trusting it as
+  evidence; a diagnostic that fails this check is never recorded as a `Finding` (see
+  `_normalize_file_path` and `_persist_compiler_diagnostics`).
+
+### File-path normalization
+
+A diagnostic's `file` field, as gcc/clang print it, is whatever path the compiler was
+invoked with — in this stage's case, an absolute path into the mission's extracted
+snapshot directory (`ctx.source_dir`), since `adapters/cpp/pipeline.py::_configure_argv`
+passes `str(detected.source_dir)` to CMake's `-S`. `_normalize_file_path` strips that
+prefix, the identical treatment `adapters/semgrep/parser.py::_strip_root` gives Semgrep's
+own `file_path` — so the two tools' `Finding.file_path` values are directly comparable
+(`src/config.c`, never an absolute host/container path), which the cross-tool dedup
+below depends on.
+
+### Dedup against a different tool's finding on the same line (#23's own acceptance
+criterion: "Deduplicated against Semgrep findings on the same line")
+
+`record_finding`'s own dedup is exact-`fingerprint` equality (`orchestrator/
+findings.py`), which two different tools' fingerprints — each embedding its own
+tool-specific material (a `-W` flag here, a Semgrep rule id there) — will essentially
+never collide on by accident. "Same line, different tool" needs a second, explicit
+check: before calling `record_finding` for a compiler diagnostic, `_line_already_has_a_
+finding_from_another_tool` queries whether *this mission* already has a `Finding` (any
+tool other than `COMPILER_DIAGNOSTIC` itself) at the exact same `(file_path, line)` —
+and skips creating a new row if so, rather than recording a second, likely-redundant
+finding for a location another tool already flagged.
+
+This deliberately does NOT dedup two distinct compiler diagnostics against each other on
+the same line (e.g. an unused-parameter warning and a shadow note both landing on line
+3 of one function signature, a real case — see `adapters/cpp/tests/
+test_compiler_diagnostics.py::test_a_distinct_diagnostic_on_the_same_line_is_not_dropped`)
+— the `.exclude(tool=AnalyzerTool.COMPILER_DIAGNOSTIC)` below is exactly that
+narrowing, so BASELINE's own two-real-warnings-one-line case still records both.
+
+**Ordering note, stated rather than assumed.** Architecture spec's mission flow runs
+`BASELINE` before `TRIAGE`/`ANALYZE` (#22's own `JobKind.ANALYZE` backs `TRIAGE`), so in
+production this stage's compiler-diagnostic findings are always recorded FIRST — the
+check above will find nothing to dedup against on the day #22 merges, because no
+Semgrep finding exists yet when BASELINE runs. The check is still correct and still
+worth having: it makes the dedup contract symmetric and stage-order-independent (a
+`Finding` written by whichever tool runs first is what a same-line collision defers to,
+not "whichever tool the code happens to name"), and it is the reciprocal half of what
+#22's own `_finding_kwargs`/`_persist_outcome` (`workers/static_analysis/dispatch.py`,
+uncommitted as of this writing) would need to add on its own side — an
+`.exclude(tool=AnalyzerTool.SEMGREP)`-shaped query against `COMPILER_DIAGNOSTIC` rows —
+for the criterion to hold in the direction that actually fires given real stage order.
+Flagged in this PR's handoff for whoever finishes #22, not silently assumed to be their
+problem alone: this module could not safely make that edit itself (#22's dispatch
+module is uncommitted, owned by a different in-flight session, per this repository's
+"never silently rewrite another role's prior work" rule).
+
 ## A real, documented gap: cooperative cancellation
 
 `run_baseline_stage(mission_id, source_dir, workspace_root, *, jail_policy=None)`
@@ -74,16 +157,35 @@ support that is not real.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from adapters.cpp.compiler_diagnostics import CompilerDiagnostic
 from authorization import store
-from contracts.enums import ErrorCode, MissionState
+from contracts.enums import (
+    AnalyzerTool,
+    DiscoveryMethod,
+    ErrorCode,
+    FindingCategory,
+    MissionStage,
+    MissionState,
+    Severity,
+)
 from contracts.schemas.common import ArtifactRef
-from missions.models import Artifact, BaselineReport, Job, JobKind, JobState, Mission
+from missions.models import (
+    Artifact,
+    BaselineReport,
+    Finding,
+    Job,
+    JobKind,
+    JobState,
+    Mission,
+    StageToolRun,
+)
 from orchestrator.executors import (
     ExecutorContext,
     ExecutorResult,
@@ -91,6 +193,8 @@ from orchestrator.executors import (
     register_executor,
     register_transition_policy,
 )
+from orchestrator.findings import record_finding
+from orchestrator.redaction import redact_sanitizer_report
 from workers.baseline.run import BaselineOutcome, run_baseline_stage
 
 __all__: list[str] = []
@@ -99,6 +203,26 @@ __all__: list[str] = []
 #: XML copy `run_baseline_stage` writes before its jail tears down. See
 #: `_log_ref_artifact`'s own docstring for the bug this closes (D-100).
 BASELINE_LOG_ARTIFACT_KIND = "baseline_ctest_junit"
+
+#: `Finding.title`'s own field ceiling (`missions/models.py`).
+_TITLE_MAX_CHARS = 300
+
+#: Diagnostic severities that become a `Finding` row. `note` never does — see this
+#: module's docstring, "Compiler diagnostics -> Finding/StageToolRun rows".
+_FINDING_SEVERITIES = frozenset({"warning", "error"})
+
+#: Conservative, substring-based mapping from a `-W` flag to a `FindingCategory` —
+#: same spirit as `workers/fuzzing/dispatch.py::_category_for`'s kind-substring
+#: matching. Deliberately narrow: most `-W` flags (`-Wunused-variable`, `-Wshadow`,
+#: `-Wunused-parameter`, ...) are style/maintainability warnings with no security
+#: category that honestly fits, and fall through to `FindingCategory.OTHER` rather
+#: than being force-fit into one that does not apply.
+_CATEGORY_BY_FLAG_SUBSTRING: tuple[tuple[str, FindingCategory], ...] = (
+    ("conversion", FindingCategory.INTEGER_OVERFLOW),
+    ("overflow", FindingCategory.INTEGER_OVERFLOW),
+    ("sign-compare", FindingCategory.INTEGER_OVERFLOW),
+    ("null-dereference", FindingCategory.NULL_DEREFERENCE),
+)
 
 
 def _classify(
@@ -275,6 +399,244 @@ def _persist_report(mission: Mission, outcome: BaselineOutcome) -> BaselineRepor
         return BaselineReport.objects.get(mission=mission)
 
 
+def _normalize_file_path(raw_file: str, source_dir: Path) -> str | None:
+    """Strip `ctx.source_dir`'s absolute prefix off a compiler-reported path, after
+    verifying the path genuinely resolves under `source_dir` — never trusting the
+    string gcc/clang printed at face value.
+
+    gcc/clang print whatever path was in effect when the diagnostic fired — normally
+    an absolute path into the mission's extracted snapshot directory on this stage's
+    own build (see this module's docstring), since `adapters/cpp/pipeline.py::
+    _configure_argv` passes `str(detected.source_dir)` to CMake's `-S`. Not leaving
+    that absolute prefix on a `Finding.file_path` matches `adapters/semgrep/
+    parser.py::_strip_root`'s identical treatment for Semgrep matches, which is what
+    makes the two tools' `file_path` values directly comparable for the same-line
+    dedup below.
+
+    **SEC-B (cybersecurity, PR #278).** Both gcc and clang honour a standard C
+    preprocessor `#line` directive — `#line 1 "/etc/passwd"` — and will happily print
+    that attacker-chosen file/line for every diagnostic that follows it in the
+    translation unit, even though target source under `source_dir` is untrusted
+    input this stage never controls. Reproduced live: a target source file
+    containing `#line 1 "/etc/passwd"\\nint compute(int limit) { ... }` makes gcc/
+    clang report a real `-Wall`/`-Wextra` warning AT `/etc/passwd:1`. The previous
+    version of this function treated "not resolvable under `source_dir`" as a
+    harmless edge case (a system header) and fell back to trusting the raw string
+    anyway (`raw_file.lstrip("/")`) — which let an adversarial `#line` forge
+    `Finding.file_path`/`line` to an arbitrary attacker-chosen location. Downstream,
+    `file_path`/`line` are treated as ground truth by dedup (`_line_already_has_a_
+    finding_from_another_tool` below), CORRELATE, and the patch stage's code-slice
+    extraction — a forged location can silently suppress a genuine finding via
+    same-line dedup, or misdirect triage away from the real vulnerable line.
+
+    Fixed by resolving BOTH `raw_file` and `source_dir` to their real, canonical
+    filesystem paths (`Path.resolve()`, which also follows symlinks — closing the
+    obvious variant of the same attack where a symlink planted *inside* `source_dir`
+    points back out to a real host path) and requiring the resolved diagnostic path
+    to sit under the resolved source root. Returns `None`, rather than a
+    best-effort guess, whenever it does not — the caller must not record a `Finding`
+    whose location cannot be verified (see `_persist_compiler_diagnostics`).
+
+    A relative `raw_file` (some generators emit one) is resolved against
+    `source_dir` first, not the current process's cwd — this function runs in the
+    control-api process, well after the build's own `cwd` (`jail.root`, see
+    `adapters/cpp/pipeline.py::run_variant`) has torn down, so "the process cwd
+    when this happens to run" is never a meaningful anchor for a relative path.
+
+    This *does* still accept the legitimate, non-adversarial case of `#line`: a
+    generated parser/lexer (e.g. bison/flex output) that re-points its own
+    diagnostics at the `.y`/`.l` grammar file it was generated from. That grammar
+    file is itself checked into the target's repository, under `source_dir`, so it
+    resolves under the source root exactly like any other in-tree file and is
+    accepted normally — only a `#line` target that escapes `source_dir` entirely is
+    rejected. See `adapters/cpp/tests/test_compiler_diagnostics.py` for both cases
+    exercised against real compiler behaviour.
+    """
+    try:
+        candidate = Path(raw_file)
+        if not candidate.is_absolute():
+            candidate = source_dir / candidate
+        resolved = candidate.resolve()
+        source_root = source_dir.resolve()
+        return str(resolved.relative_to(source_root))
+    except ValueError:
+        return None
+
+
+def _category_for_flag(flag: str | None) -> FindingCategory:
+    if flag:
+        lowered = flag.lower()
+        for substring, category in _CATEGORY_BY_FLAG_SUBSTRING:
+            if substring in lowered:
+                return category
+    return FindingCategory.OTHER
+
+
+def _severity_for(diagnostic: CompilerDiagnostic, category: FindingCategory) -> Severity:
+    if diagnostic.severity == "error":
+        return Severity.HIGH
+    if category is not FindingCategory.OTHER:
+        return Severity.MEDIUM
+    return Severity.LOW
+
+
+def _fingerprint(compiler_id: str, flag: str | None, file_path: str, line: int, column: int | None) -> str:
+    material = ":".join(
+        ["compiler", compiler_id, flag or "unknown", file_path, str(line), str(column or "")]
+    )
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"compiler:{flag or 'unknown'}:{digest}"[:128]
+
+
+def _title_for(diagnostic: CompilerDiagnostic, category: FindingCategory, file_path: str) -> str:
+    """Built entirely from structured, compiler-controlled fields — the diagnostic's
+    own `-W...` flag (drawn from gcc/clang's fixed, finite flag vocabulary, never
+    target source text), its severity, and the `FindingCategory` this module already
+    derives from that flag — NEVER from `diagnostic.message`.
+
+    **SEC-A (cybersecurity, PR #278).** The previous version of this function built
+    `title` straight from `diagnostic.message` — raw compiler diagnostic text —
+    truncated to `_TITLE_MAX_CHARS` but never run through `redact_sanitizer_report`
+    the way `sanitizer_report` below already is. gcc/clang echo arbitrary TARGET
+    source text verbatim into `message` for several real, common diagnostic kinds:
+    `[[deprecated("...")]]` attribute reasons, `#warning "..."`, and
+    `static_assert(..., "...")` messages all reproduce their literal string argument
+    in the diagnostic. Reproduced live: a target source file containing
+    `[[deprecated("rotate DATABASE_URL=postgresql://user:pass@host/db")]]` produces a
+    diagnostic whose `message` contains that string verbatim — which, built straight
+    into `title` with no redaction, reached the exported evidence bundle
+    (`orchestrator/evidence_export.py`) and the `FINDING_RECORDED` SSE event
+    unredacted.
+
+    Fixed the same way `workers/fuzzing/dispatch.py::_title_for` already avoids this
+    class of bug entirely: build the title from structured fields only, never from
+    attacker-influenced free text, rather than trying to pattern-match secrets out of
+    an open-ended string (the same allowlist-not-denylist reasoning `orchestrator/
+    redaction.py`'s own module docstring gives for why `sanitize_detail` does not try
+    to recognise *unsafe* shapes). `diagnostic.message`/`.raw` still reach
+    `Finding.sanitizer_report` below — through `redact_sanitizer_report`, which
+    already redacts exactly this class of embedded secret (an `ENV_VAR=value`-shaped
+    assignment) — never `Finding.title`, which has no redaction pass applied to it
+    anywhere downstream and must therefore never carry raw target text at all.
+    """
+    label = diagnostic.flag or f"compiler {diagnostic.severity}"
+    if category is not FindingCategory.OTHER:
+        bug = category.value.replace("_", " ").lower()
+        title = f"{bug} ({label}) at {file_path}:{diagnostic.line}"
+    else:
+        title = f"{label} at {file_path}:{diagnostic.line}"
+    return title[:_TITLE_MAX_CHARS]
+
+
+def _finding_kwargs(diagnostic: CompilerDiagnostic, file_path: str, compiler_id: str) -> dict[str, Any]:
+    category = _category_for_flag(diagnostic.flag)
+    return {
+        "category": category,
+        "severity": _severity_for(diagnostic, category),
+        "tool": AnalyzerTool.COMPILER_DIAGNOSTIC,
+        "discovery_method": DiscoveryMethod.STATIC_ANALYSIS,
+        "file_path": file_path,
+        "line": diagnostic.line,
+        "function": None,
+        "fingerprint": _fingerprint(compiler_id, diagnostic.flag, file_path, diagnostic.line, diagnostic.column),
+        "title": _title_for(diagnostic, category, file_path),
+        # `diagnostic.raw`/`.message` are the compiler's own text, quoting whatever
+        # source identifiers (variable/function names) appear on the offending line —
+        # free text from the target, same redaction discipline `workers/fuzzing/
+        # dispatch.py`/#22's `workers/static_analysis/dispatch.py` both already apply
+        # to their own tool output before it reaches a `Finding` row.
+        "sanitizer_report": redact_sanitizer_report(diagnostic.raw),
+        "reproducible": False,
+    }
+
+
+def _line_already_has_a_finding_from_another_tool(
+    mission: Mission, file_path: str, line: int
+) -> bool:
+    """See this module's docstring, "Dedup against a different tool's finding on the
+    same line" — the `.exclude` is what keeps two distinct compiler diagnostics on the
+    same line from being dropped against EACH OTHER; only a different tool's row at
+    the identical location suppresses a new compiler-diagnostic `Finding`.
+    """
+    return (
+        Finding.objects.filter(mission=mission, file_path=file_path, line=line)
+        .exclude(tool=str(AnalyzerTool.COMPILER_DIAGNOSTIC))
+        .exists()
+    )
+
+
+def _persist_compiler_diagnostics(
+    mission: Mission, source_dir: Path, outcome: BaselineOutcome, trace_id: str
+) -> int:
+    """Turn every `warning`/`error`-severity `BaselineOutcome.compiler_diagnostics`
+    entry into a `Finding` row, plus one `StageToolRun` row recording the compiler
+    identity (#23's third acceptance criterion: "compiler version recorded with the
+    findings") whenever a compiler actually ran (`outcome.compiler_id != "unknown"` —
+    see `workers/baseline/run.py`'s own docstring for the one case it stays
+    "unknown": a DETECT/PROBE_TOOLCHAIN/CONFIGURE failure, where no compiler ever ran
+    at all).
+
+    Called BEFORE `_persist_report` in `_baseline_executor`, not after — the same
+    "findings before the terminal marker" ordering `workers/fuzzing/dispatch.py::
+    _persist_outcome` and #22's `workers/static_analysis/dispatch.py::_persist_outcome`
+    both use (see either module's own docstring): `BaselineReport` existing is what
+    `_baseline_executor`'s own idempotency check reads, so writing it first would let a
+    crash between the two calls permanently skip these findings on every future
+    "already recorded" short-circuit, never writing them at all.
+
+    Returns the number of `Finding` rows actually created (for `ExecutorResult.
+    result`), which is not the same number as `len(outcome.compiler_diagnostics)`
+    whenever `note` diagnostics, a same-line dedup skip, or an unverifiable location
+    (SEC-B — see `_normalize_file_path`) are present.
+    """
+    recorded = 0
+    unverified_location = 0
+    for diagnostic in outcome.compiler_diagnostics:
+        if diagnostic.severity not in _FINDING_SEVERITIES:
+            continue
+        file_path = _normalize_file_path(diagnostic.file, source_dir)
+        if file_path is None:
+            # SEC-B: the diagnostic's reported location does not verifiably resolve
+            # under `source_dir` (a real system header, or an adversarial `#line`
+            # escape — see `_normalize_file_path`'s own docstring). Never recorded as
+            # a `Finding`: `file_path`/`line` are treated as ground truth by dedup,
+            # CORRELATE, and the patch stage, and a forged location is actively
+            # dangerous there, not merely inaccurate. Not silently invisible either —
+            # counted here and surfaced on the `StageToolRun` row below, so an
+            # operator can see diagnostics existed that this stage declined to trust.
+            unverified_location += 1
+            continue
+        if _line_already_has_a_finding_from_another_tool(mission, file_path, diagnostic.line):
+            continue
+        record_finding(
+            mission.id,
+            trace_id=trace_id,
+            now=outcome.recorded_at,
+            detected_at=outcome.recorded_at,
+            **_finding_kwargs(diagnostic, file_path, outcome.compiler_id),
+        )
+        recorded += 1
+
+    if outcome.compiler_id != "unknown":
+        StageToolRun.objects.create(
+            mission=mission,
+            stage=str(MissionStage.BASELINE),
+            tool_name=outcome.compiler_id,
+            tool_version=outcome.compiler_version,
+            image_digest=None,  # subprocess-jail path is unpinned — see toolchain.py
+            flags=[
+                f"diagnostics:{len(outcome.compiler_diagnostics)}",
+                f"findings:{recorded}",
+                f"unverified-location:{unverified_location}",
+            ],
+            artifact_refs=[],
+            started_at=outcome.recorded_at,
+            finished_at=outcome.recorded_at,
+        )
+
+    return recorded
+
+
 @register_executor(JobKind.BASELINE)
 def _baseline_executor(ctx: ExecutorContext) -> ExecutorResult:
     """`JobKind.BASELINE` — configure, build, `ctest` on the pristine snapshot.
@@ -299,6 +661,9 @@ def _baseline_executor(ctx: ExecutorContext) -> ExecutorResult:
         source_dir=ctx.source_dir,
         workspace_root=ctx.workspace_root,
     )
+    # #23: findings before the terminal report — see `_persist_compiler_diagnostics`'s
+    # own docstring for why the ordering matters.
+    _persist_compiler_diagnostics(ctx.mission, ctx.source_dir, outcome, ctx.trace_id)
     report = _persist_report(ctx.mission, outcome)
     return _executor_result(_fields_from_report(report), already_recorded=False)
 
