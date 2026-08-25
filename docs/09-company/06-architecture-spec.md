@@ -172,7 +172,7 @@ Eighteen. Thirteen live, five terminal.
 | `SNAPSHOTTED` | Immutable snapshot ingested, `archive_sha256` recomputed server-side and matched. | `INGEST` | operator: preflight |
 | `VALIDATING` | Preflight has run. **A pass leaves the mission here, awaiting `start`.** | `INGEST` | operator: start |
 | `BASELINE` | Configure → build → ctest on the pristine tree. | `BASELINE` | orchestrator |
-| `TRIAGE` | Deterministic triage. **Empty in this scope — see §2.5.** | `ANALYZE` | orchestrator |
+| `TRIAGE` | Deterministic triage. **Real as of D-150/#22 — see §2.5.** | `ANALYZE` | orchestrator |
 | `STRESS_TEST` | Sanitizer build + libFuzzer campaign + crash capture + minimization. | `STRESS_TEST` | orchestrator |
 | `CORRELATE` | Bind the confirmed crash to a source location and build the bounded context package. | `CORRELATE` | orchestrator |
 | `PATCH` | Generate **the candidate set** (§2.3). Policy-evaluate each. | `PATCH` | orchestrator |
@@ -301,7 +301,7 @@ non-negotiable product rule in `CLAUDE.md`).
 
 | State / path | Status in the 7-day build |
 |---|---|
-| `TRIAGE` (`ANALYZE`) | **Runs and finds nothing, by construction.** Semgrep is CUT (#22), compiler-warning capture is CUT (#23), bisect is CUT (#24), git history is CUT (#26). The stage must emit `STAGE_STARTED`, then a `LOG` event reading *"No static analyzers configured in this build — see the gate matrix"*, then `STAGE_COMPLETED`, and record `AnalyzerTool` coverage as empty in the bundle. It must not fabricate a finding count. |
+| `TRIAGE` (`ANALYZE`) | **Reopened under D-144, real as of D-150.** Semgrep (#22, PR #274) is a real `JobKind.ANALYZE` executor running inside `ContainerJail` against a vendored ruleset, replacing the old stub. Compiler-warning capture (#23) is specified but not yet built — see D-150 Question 2 for the exact composition (a second sub-step inside the same `ANALYZE` job, not a second stage) and the real BASELINE-capture gap it depends on first. `git bisect` (#24, PR #275) is built and tested but **deliberately not part of this stage or any automatic mission path** — D-150 rules it a separate, operator-triggered capability (only meaningfully invokable against the #5 fixture today), never dispatched by `JOB_BACKED_STATES`. Git-history/bisect-timeline UI (#26) is unbuilt and depends on the not-yet-built bisect executor actually emitting real events — see D-150 Question 3. The old "must not fabricate a finding count" discipline still applies: a real scan that finds nothing is a real zero, not the same as "no analyzer ran." |
 | `CORRELATE` | **Real, but narrower than the name.** P2-10 cut multi-finding correlation. Its one job here: bind the sanitizer-confirmed crash to a `SourceLocation` and produce the bounded `FindingDetail.code_slice` the patch stage feeds the model. Label it that way in the UI. |
 | `GateName.STATIC_DELTA`, `GateName.RENEWED_FUZZING` | Always `NOT_RUN`. Consequently `derive_verdict`'s optional-gate `FAIL`/`ERROR` branches are dead code in this scope. Keep them — they are what makes the matrix five rows instead of three. |
 | `AnalyzerTool.COMPILER_DIAGNOSTIC` | Never produced (#23 cut). |
