@@ -878,6 +878,13 @@
           "category": {
             "$ref": "#/components/schemas/FindingCategory"
           },
+          "crash_count": {
+            "default": 1,
+            "description": "How many raw crash occurrences share this fingerprint, including the one that created this finding (#30). A rediscovery of the same root cause increments this rather than creating a second finding.",
+            "minimum": 1,
+            "title": "Crash Count",
+            "type": "integer"
+          },
           "detected_at": {
             "format": "date-time",
             "title": "Detected At",

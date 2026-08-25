@@ -522,6 +522,17 @@ class Finding(models.Model):
     line = models.PositiveIntegerField(null=True, blank=True)
     function = models.CharField(max_length=300, null=True, blank=True)
     fingerprint = models.CharField(max_length=128)
+    crash_count = models.PositiveIntegerField(
+        default=1,
+        help_text=(
+            "How many raw crash occurrences this fingerprint has collapsed into one "
+            "row, including the one that created it (#30). orchestrator.findings."
+            "record_finding increments this every time a caller rediscovers an "
+            "existing (mission, fingerprint) pair instead of writing a new row -- "
+            "the cluster count for 'a hundred crashes on one root cause reads as "
+            "one finding.'"
+        ),
+    )
     reproducible = models.BooleanField(
         default=False,
         help_text="True only when a minimized input replayed from a clean build.",

@@ -159,6 +159,13 @@ class FindingSummary(StrictSchema):
     fingerprint: str = Field(
         max_length=128, description="Stable deduplication key across runs."
     )
+    crash_count: int = Field(
+        default=1,
+        ge=1,
+        description="How many raw crash occurrences share this fingerprint, "
+        "including the one that created this finding (#30). A rediscovery of the "
+        "same root cause increments this rather than creating a second finding.",
+    )
     reproducible: bool = Field(
         description="True only when a minimized input replayed the failure from a "
         "clean build. Not a guess."

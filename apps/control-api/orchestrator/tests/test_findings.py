@@ -114,6 +114,53 @@ def test_record_finding_dedupes_by_mission_and_fingerprint(mission):
     )
 
 
+def test_record_finding_starts_a_new_finding_at_crash_count_one(mission):
+    """#30: a fresh finding represents exactly the one crash that created it."""
+    walk_to(mission, MissionState.STRESS_TEST)
+
+    row = _record(mission)
+
+    assert row.crash_count == 1
+
+
+def test_record_finding_increments_crash_count_on_each_rediscovery(mission):
+    """#30's cluster-count acceptance criterion: a hundred crashes on one root
+    cause read as one finding, with the count showing how many collapsed into it."""
+    walk_to(mission, MissionState.STRESS_TEST)
+
+    first = _record(mission)
+    for _ in range(4):
+        again = _record(mission)
+        assert again.id == first.id
+
+    first.refresh_from_db()
+    assert first.crash_count == 5
+    # Still exactly one row -- the count grows, no second Finding is created.
+    assert Finding.objects.filter(mission=mission).count() == 1
+
+
+def test_record_finding_keeps_distinct_fingerprints_at_their_own_count(mission):
+    """A genuinely different root cause must not share the first one's count."""
+    walk_to(mission, MissionState.STRESS_TEST)
+
+    same_cause_a = _record(mission)
+    same_cause_b = _record(mission)
+    different_cause = _record(
+        mission,
+        fingerprint="fuzz:UNDEFINED_BEHAVIOUR_SANITIZER:signed-overflow:add:cafebabe",
+        function="add",
+        title="undefined behaviour in add",
+    )
+
+    assert same_cause_a.id == same_cause_b.id
+    assert different_cause.id != same_cause_a.id
+
+    same_cause_a.refresh_from_db()
+    assert same_cause_a.crash_count == 2
+    assert different_cause.crash_count == 1
+    assert Finding.objects.filter(mission=mission).count() == 2
+
+
 def test_record_finding_does_not_dedupe_across_missions(mission):
     other = _second_mission()
     walk_to(mission, MissionState.STRESS_TEST)

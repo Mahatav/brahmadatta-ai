@@ -136,6 +136,37 @@ finding — the honest reading of that field's own docstring ("True only when a
 *minimized* input replayed... from a clean build," `missions/models.py`): D-106
 records a real, unminimized reproducer, not a minimized one, and does not touch that
 field's semantics.
+
+## Crash deduplication and clustering (#30)
+
+`_fingerprint` (below) is the dedup key, and it already existed before #30 —
+`orchestrator.findings.record_finding` has collapsed same-fingerprint crashes into
+one `Finding` row since #168/T2 (see that module's own "Idempotency" docstring). What
+#30 actually closes is two narrower gaps, not a new dedup mechanism from scratch:
+
+1. **The key was a single frame, not a stack signature.** Pre-#30, `_fingerprint`
+   hashed only the crash-site frame (`tool`, `kind`, `function`, `file`, `line` from
+   the sanitizer's `SUMMARY:` line). `_stack_signature` now folds in up to
+   `_MAX_STACK_SIGNATURE_FRAMES` function names from the parsed call stack
+   (`adapters.cpp.sanitizer.SanitizerFinding.stack`, already extracted by
+   `parse_sanitizer_output` and previously unused past `finding.function`) — see its
+   own docstring for why function names only, not file/line, for the frames beyond
+   the crash site.
+2. **No cluster count existed.** `record_finding` returned the existing row silently
+   on a rediscovery; nothing recorded *how many* raw crashes had collapsed into it.
+   `Finding.crash_count` (`missions/models.py`) now does — incremented by
+   `record_finding` itself, not here, since every discovery path (`FUZZ`,
+   `REPLAYED_REPRODUCER`) funnels through that one function. See its docstring,
+   "Cluster counts (#30)".
+
+`workers/replay/run.py` has its own, independent `_fingerprint` (prefix
+`"replayed:"` rather than `"fuzz:"`) that this change does not touch — a crash
+rediscovered via a replayed reproducer is deliberately a different fingerprint from
+the same crash discovered by a live campaign (`discovery_method` differs, and
+`FindingSummary`'s own claim about `FUZZING_CAMPAIGN` vs `REPLAYED_REPRODUCER` is
+weaker for the latter), so the two are not expected to cluster together. Out of
+scope for #30, which is about crashes within one discovery method reading as one
+finding, not merging across methods.
 """
 
 from __future__ import annotations
@@ -148,7 +179,7 @@ from django.conf import settings
 
 from adapters.cpp.errors import BuildStep
 from adapters.cpp.fuzzing import DurableArtifact
-from adapters.cpp.sanitizer import SanitizerFinding, parse_sanitizer_output
+from adapters.cpp.sanitizer import SanitizerFinding, StackFrame, parse_sanitizer_output
 from authorization.errors import UnreadableArchiveError
 from authorization.store import ingest_from_path
 from contracts.enums import (
@@ -521,8 +552,66 @@ def _category_for(finding: SanitizerFinding) -> FindingCategory:
     return FindingCategory.OTHER
 
 
-def _fingerprint(tool: str, kind: str, function: str, file: str | None, line: int | None) -> str:
-    material = ":".join(["fuzz", tool, kind, function, file or "", str(line or "")])
+#: Crash-clustering material beyond the crash-site frame (#30): how many of the
+#: sanitizer's own parsed stack frames (`SanitizerFinding.stack`,
+#: `adapters.cpp.sanitizer.parse_sanitizer_output`) feed the dedup key, on top of the
+#: crash-site frame that was already there. Bounded rather than unbounded so a report
+#: with a very deep stack (recursion, a long call chain) does not make the key more
+#: sensitive to inlining/optimisation noise the further it walks from the actual
+#: fault -- the frames closest to the crash are the ones that identify the root
+#: cause; frames near the top of main() rarely do.
+_MAX_STACK_SIGNATURE_FRAMES = 5
+
+
+def _stack_signature(function: str, stack: tuple[StackFrame, ...]) -> str:
+    """The call-path component of the fingerprint's hashed material (#30).
+
+    Function names only, from the top `_MAX_STACK_SIGNATURE_FRAMES` parsed frames --
+    not `file`/`line` for anything past the crash site. The crash site's own
+    file/line already sits alongside this in `_fingerprint`'s material and is the
+    primary discriminator between distinct bug classes; a *caller's* line number
+    varies with exactly which mutated input tripped the same bug (e.g. pktcfg's
+    seeded defect: `emit_tab` is reached from two different lines inside
+    `pkt_decode_into`, one per branch that normalises a tab, but it is the same root
+    cause either way) and including it here would needlessly split one root cause
+    into two clusters. Falls back to the crash-site function alone when no stack was
+    parsed (a SUMMARY-only report, or a sanitizer whose stack frames did not match
+    the parser's grammar) -- the fingerprint's pre-#30 behaviour.
+    """
+    frames = [frame.function for frame in stack[:_MAX_STACK_SIGNATURE_FRAMES] if frame.function]
+    return "/".join(frames) if frames else function
+
+
+def _fingerprint(
+    tool: str,
+    kind: str,
+    function: str,
+    file: str | None,
+    line: int | None,
+    stack: tuple[StackFrame, ...] = (),
+) -> str:
+    """Stable dedup key for one crash (#30's "dedup key derived from the sanitizer
+    stack signature, documented"). Two crashes hash to the same fingerprint exactly
+    when they share a tool, a sanitizer-reported crash kind, a crash-site location
+    (function/file/line, taken from the sanitizer's own SUMMARY line -- see
+    `adapters.cpp.sanitizer.parse_sanitizer_output`'s own docstring for why that line
+    is the stable part of the report), and a call path (`_stack_signature`, above) --
+    so a hundred differently-mutated inputs that all fault at the same root cause
+    collapse to one fingerprint, while a crash at the same function reached through a
+    genuinely different call path, or a different crash kind/location entirely,
+    keeps its own.
+
+    Truncated to 128 chars to match `Finding.fingerprint`'s column width
+    (`missions/models.py`) -- the leading `fuzz:{tool}:{kind}:{function}:` segment
+    stays human-readable in logs and the evidence UI; the trailing 16-hex-digit
+    digest is what actually carries the stack-signature material, so truncation can
+    never make two distinct signatures collide into the same *readable* prefix while
+    still differing where it matters.
+    """
+    call_path = _stack_signature(function, stack)
+    material = ":".join(
+        ["fuzz", tool, kind, function, file or "", str(line or ""), call_path]
+    )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"fuzz:{tool}:{kind}:{function}:{digest}"[:128]
 
@@ -547,7 +636,14 @@ def _finding_kwargs_from_sanitizer(finding: SanitizerFinding) -> dict[str, Any]:
         "file_path": file_path,
         "line": finding.line,
         "function": function,
-        "fingerprint": _fingerprint(finding.tool, finding.kind, function or "<unknown>", finding.file, finding.line),
+        "fingerprint": _fingerprint(
+            finding.tool,
+            finding.kind,
+            function or "<unknown>",
+            finding.file,
+            finding.line,
+            finding.stack,
+        ),
         "title": _title_for(category, function, file_path, finding.line),
         # SEC-50 (#191): `finding.raw` is `adapters.cpp.sanitizer`'s verbatim capture
         # of the sandboxed process's own stdout/stderr — exactly the kind of raw tool

@@ -231,6 +231,35 @@ stream, plus the derived boolean `BaselineReport.passed` (configure and build su
 at least one test ran, none failed). Whoever checks the gate on 2026-08-09 should look
 for the event type, not for a state.
 
+### Crash deduplication and clustering — `FindingSummary.crash_count` (#30, 2026-08-24)
+
+`Finding.fingerprint` was already the dedup key before #30: `orchestrator.findings.
+record_finding` collapses every crash that hashes to the same `(mission,
+fingerprint)` pair into one `Finding` row (enforced by
+`finding_mission_fingerprint_unique`, not just application logic). #30 closed two
+narrower gaps rather than replacing that mechanism:
+
+* **The key is now a stack signature, not a single frame.** `workers.fuzzing.
+  dispatch._fingerprint` hashes the crash-site frame (`tool`, `kind`, `function`,
+  `file`, `line`, taken from the sanitizer's own `SUMMARY:` line) plus up to five
+  calling-frame function names from the sanitizer's parsed stack trace, so crashes
+  reached via a different call path — not just a different mutated input — cluster
+  correctly. Documented in that function's own docstring, which is the source of
+  truth for the exact material hashed.
+* **`FindingSummary.crash_count`** (new field, `int`, default `1`, minimum `1`) is
+  how many raw crash occurrences a `Finding` represents — incremented by
+  `record_finding` every time a caller rediscovers an existing fingerprint rather
+  than a second `Finding` being created. Additive to the frozen D1 contract: existing
+  clients that ignore the field see no behavior change, and every `FindingSummary`
+  a real `Finding` row produces always carries a real value (`>= 1`), never absent.
+
+Out of scope for #30, and unchanged by it: `workers/replay/run.py` computes its own,
+independent fingerprint (prefix `"replayed:"`) for a `REPLAYED_REPRODUCER` finding —
+the same underlying crash discovered by a live campaign and by a replayed reproducer
+still gets two `Finding` rows, one per `discovery_method`, since a replayed finding
+makes a structurally weaker claim than a live one (see "Fallback provenance" below).
+Only crashes discovered within the same `discovery_method` cluster together.
+
 ### Fallback provenance — a substituted path is inexpressible as the primary one
 
 The CEO approved fallbacks for D1–D7 (issues #81 subprocess jail, #82 model replay,

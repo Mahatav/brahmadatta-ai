@@ -155,3 +155,8 @@ def test_record_finding_survives_a_genuine_create_race(mission):
         Finding.objects.filter(mission=mission, fingerprint="race-fingerprint-sequential").count()
         == 1
     )
+    # #30: the losing writer still counts as a real rediscovery of the same crash --
+    # the IntegrityError fallback bumps `crash_count` on the winner's row rather than
+    # silently dropping the fact that a second caller found it too.
+    second.refresh_from_db()
+    assert second.crash_count == 2
