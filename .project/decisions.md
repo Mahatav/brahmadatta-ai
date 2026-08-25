@@ -15967,3 +15967,179 @@ fixture content). Orchestrator wiring is an explicit open question for
 **Final approval authority** — CTO (technical; work already authorized by D-144, issue #24
 named explicitly in scope). `cybersecurity` review required before merge per this record's
 own security-implications section; PR not self-merged.
+
+## D-150 — #23: compiler diagnostics parsed into `AnalyzerTool.COMPILER_DIAGNOSTIC`
+`Finding` rows off the BASELINE stage's own build, deduplicated against another
+tool's finding on the same file:line, compiler identity recorded via `StageToolRun`
+· 2026-08-24 · `backend-developer` seat
+
+Built under D-144's blanket CUT-reopen authorization (`#23` is named explicitly in its
+scope list). Verified D-144 is real and unretracted for this issue by reading
+`origin/main`'s own `.project/decisions.md` directly (not a stale local checkout — see
+D-147's own "process lesson" section, which this session's first action was to follow:
+`git fetch origin main` into an isolated worktree, then re-check both D-144 and D-147
+before touching any file, and separately re-read `gh issue view 23 --comments` for a
+hidden per-issue prohibition the way #41's own comment thread had one — #23 has zero
+comments, no such prohibition exists).
+
+**Decision.** Parse gcc/clang compiler diagnostics out of the SAME `cmake --build`
+invocation `workers/baseline/run.py::run_baseline_stage` already runs for the D3 gate —
+never a second build just to observe warnings. Each `warning`/`error`-severity
+diagnostic becomes one `Finding` row (`tool=AnalyzerTool.COMPILER_DIAGNOSTIC`, an enum
+member that already existed on `main` before this change — the schema anticipated this
+work, `adapters/cpp/variants.py`'s `BASELINE` `VariantSpec.analyzer_tools` already named
+it too) via `orchestrator.findings.record_finding`, the same write path
+`workers/fuzzing/dispatch.py` and #22's (uncommitted as of this writing)
+`workers/static_analysis/dispatch.py` both use. One `StageToolRun` row per mission
+records the real compiler identity (`compiler_id`/`compiler_version`, already probed by
+`adapters/cpp/toolchain.py::read_compiler_identity` for the D3 gate's own report and
+reused here, not re-probed) — #23's third acceptance criterion, satisfied by reusing the
+existing `StageToolRun` model (`missions/models.py`, architecture spec §5.1) rather than
+adding a new field to `Finding` itself.
+
+**Options considered.**
+
+1. **Parse inside `adapters/cpp/pipeline.py::run_variant` itself**, so every variant
+   (not just `BASELINE`) gets diagnostic capture for free. Rejected: `run_variant` is
+   framework-free (D-026 boundary) and is compiler-toolchain-engineer's module: adding
+   `Finding`/Django-aware persistence there would cross that boundary and duplicate
+   work `ASAN_UBSAN`/`ASAN`/`UBSAN` builds don't need — their compiler warnings are not
+   the mission's evidence signal, their sanitizer *runtime* reports are
+   (`adapters/cpp/sanitizer.py`, already wired). `BASELINE`'s own `VariantSpec.
+   analyzer_tools=("CTEST", "COMPILER_DIAGNOSTIC")` (pre-existing, unmodified by this
+   change) already scopes `COMPILER_DIAGNOSTIC` to `BASELINE` alone.
+2. **A new `JobKind` (e.g. `JobKind.COMPILE_ANALYZE`) that re-runs the build under
+   `-Wall -Wextra` and diffs against the BASELINE build.** Rejected outright by the
+   assignment's own instruction and independently on the merits: `demo/repositories/
+   pktcfg/CMakeLists.txt` already builds with `-Wall -Wextra -Wshadow -Wconversion` by
+   default (verified directly, not assumed — the comment there literally reads
+   "Compiler warnings are evidence for this project, so they are on by default"), so a
+   second build would be redundant work producing byte-identical diagnostics, doubling
+   the D3 gate's wall-clock cost for zero new evidence.
+3. **(Chosen) Parse `BaselineOutcome`'s already-captured build stdout/stderr in
+   `workers/baseline/run.py`, persist from `workers/baseline/dispatch.py`.** No second
+   build, respects the framework-free/Django-aware module boundary already established
+   for this stage (`BaselineOutcome` stays a plain dataclass; `Finding`/`StageToolRun`
+   writes live in the dispatch module that already owns `BaselineReport` persistence).
+
+**Dedup design (#23's own acceptance criterion: "Deduplicated against Semgrep findings
+on the same line").** `record_finding`'s own dedup is exact-`fingerprint` equality
+(`orchestrator/findings.py`) — two different tools' fingerprints (a `-W` flag here, a
+Semgrep rule id there) will not collide by accident, so a second, explicit check was
+added: before writing a compiler-diagnostic `Finding`, query whether the mission
+already has a `Finding` from a DIFFERENT tool at the identical `(file_path, line)`, and
+skip if so (`workers/baseline/dispatch.py::_line_already_has_a_finding_from_another_
+tool`). Deliberately does NOT dedup two distinct compiler diagnostics against each
+other on the same line (a real case — see `adapters/cpp/tests/
+test_compiler_diagnostics.py::test_a_distinct_diagnostic_on_the_same_line_is_not_
+dropped`) — the exclusion is scoped to `AnalyzerTool.COMPILER_DIAGNOSTIC` specifically.
+
+**Known asymmetry, stated rather than hidden.** Architecture spec's mission flow runs
+`BASELINE` before `TRIAGE`/`ANALYZE` (#22's `JobKind.ANALYZE` backs `TRIAGE`), so in
+production compiler-diagnostic findings are always recorded FIRST — the dedup check
+above has nothing to defer to yet on the day #22 merges, because no Semgrep finding
+exists at BASELINE time. The check is still correct and forward-compatible (symmetric,
+stage-order-independent), and is the reciprocal half of what #22's own dispatch module
+would need on its own side (an `.exclude(tool=AnalyzerTool.COMPILER_DIAGNOSTIC)`-shaped
+query against `COMPILER_DIAGNOSTIC` rows) for the criterion to hold in the direction
+that actually fires given real stage order. This module could not safely make that edit
+itself — #22's dispatch module is uncommitted, in a different in-flight session's
+worktree (`/private/tmp/build-22-semgrep-v2`, `feat/22-semgrep-integration`, read-only
+reconnaissance only, never written to) — per this repository's "never silently rewrite
+another role's prior work" rule. Flagged here and in `workers/baseline/dispatch.py`'s
+own module docstring for whoever finishes #22.
+
+**A schema addition that overlaps #22's own, independently designed one.**
+`DiscoveryMethod.STATIC_ANALYSIS` did not exist on `main` (`DiscoveryMethod` had only
+`FUZZING_CAMPAIGN`/`DIRECT_HARNESS`/`REPLAYED_REPRODUCER`); #22's own uncommitted branch
+independently adds the identical member (same name, same string value) for the
+identical reason ("a finding surfaced by reading source, no execution/crash involved").
+Added here rather than inventing a second, differently-named concept — reusing #22's
+already-designed shape is what this task's own instructions ask for ("if not landed
+yet... design for it"), and a same-named/same-valued duplicate add is the cheapest
+possible merge conflict (keep one copy) versus two overlapping enum members drifting
+apart in the codebase. Whoever merges #22 second resolves the trivial collision.
+
+**Testing.** Real compiler output only, never fabricated: `adapters/cpp/tests/
+test_compiler_diagnostics.py` embeds verbatim captures from two real compilers —
+AppleClang 21.0.0 (this development host) and gcc 13.4.0 (`gcc:13` Docker image, the
+same family the real Linux worker image installs via `build-essential`) — compiling the
+identical small C snippet with `-Wall -Wextra -Wshadow -Wconversion`, the exact flags
+`demo/repositories/pktcfg` already builds with. `workers/baseline/tests/
+test_run_baseline.py` and `orchestrator/tests/test_baseline_executor.py` both add a
+`warning_producing_source` fixture — a real copy of pktcfg (never the committed tree)
+with one small function appended that genuinely warns under those same flags — and run
+the REAL executor/`run_baseline_stage` against it end to end, asserting on real
+`Finding`/`StageToolRun` rows with normalized `file_path`, correct `line`/`severity`,
+and a non-"unknown" compiler identity. Also verified directly (not assumed) that
+`demo/repositories/pktcfg` itself builds with zero warnings today even with those flags
+on — a real, honest "zero findings" result is asserted, not skipped.
+
+Full results (all commands run in this session, real output):
+- `pytest adapters/cpp/tests workers/baseline/tests -q -rs`: 86 passed, 1 skipped (the
+  skip is the pre-existing, Linux-only `RLIMIT_AS`/ASan sanitizer-memory case, unrelated
+  to this change — confirmed identical on unmodified `main`).
+- `pytest orchestrator/tests/test_baseline_executor.py -q` (Postgres-shaped test
+  settings, SQLite locally): 16 passed, including the three new #23 tests (real-warnings
+  end-to-end, clean-build honest-zero, and the same-line dedup-against-another-tool
+  case).
+- `ruff check` on every touched/new file: 2 pre-existing findings, both outside this
+  diff (confirmed via `git diff --stat` — an unrelated `S105`/`RUF003` in
+  `contracts/enums.py` untouched by this change).
+- `mypy` (`workers/baseline/run.py`, `adapters/cpp/compiler_diagnostics.py`): clean.
+  `mypy workers/baseline/dispatch.py` (MYPYPATH=apps/control-api): 13 pre-existing
+  errors, byte-identical in count and content to the same command run against
+  unmodified `main` (confirmed directly, not assumed).
+- `infrastructure/scripts/openapi-contract-check.sh`: FAILED before regenerating
+  `packages/schemas/openapi.json` (the new `DiscoveryMethod.STATIC_ANALYSIS` member
+  changed the generated schema), PASS after `tools/export_openapi.py` regenerated it —
+  re-verified on both Python 3.12 and 3.13 (CI's own interpreter-independence check),
+  both byte-identical.
+- One pre-existing, unrelated failure found and confirmed NOT caused by this change,
+  reproduced identically against unmodified `main`:
+  `orchestrator/tests/test_patch_generate_executor.py::
+  test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`
+  (this sandbox's DNS/network resolves `model-host` to something answering 401 rather
+  than failing to resolve — an environment property, not a code regression) and
+  `packages/test-fixtures/tests/test_mission_fixture.py::
+  test_fixture_exercises_every_payload_variant` (the committed fixture already does not
+  cover a 16th `MissionEvent.payload` variant the committed schema already declares,
+  independent of anything in this PR).
+
+**Documentation kept truthful.** `docs/09-company/06-architecture-spec.md` §2.5's table
+said "`AnalyzerTool.COMPILER_DIAGNOSTIC` | Never produced (#23 cut)" and "compiler-
+warning capture is CUT (#23)" — both now false. Updated in this PR to describe what is
+actually built, including the ordering caveat above, rather than leaving a stale CUT
+claim next to real, running code.
+
+**Cost implications.** None — no new infrastructure, no new container image, no new
+subprocess invocation. Parses text already captured in memory during a build that was
+already going to run.
+
+**Security implications.** `Finding.sanitizer_report`/`title` carry compiler-quoted
+source identifiers (variable/function names from the warning text) — the same class of
+free-text-from-target-output every other analyzer tool in this codebase already writes
+to that field, redacted through the identical, already-reviewed `orchestrator.
+redaction.redact_sanitizer_report` (SEC-48/SEC-50 lineage) `workers/fuzzing/dispatch.py`
+and #22's own dispatch module both use — no new redaction mechanism introduced. Diagnostic
+`file` paths are normalized relative to the mission's source root before ever reaching a
+`Finding` row (mirrors Semgrep's own `_strip_root`), so no absolute host/container
+filesystem path reaches a persisted finding. Touches the finding-storage/redaction
+pipeline per this task's own framing — not self-merged; routed to `cybersecurity` for
+review before merge, per CLAUDE.md's standing rule and D-144's own text ("this ruling
+authorizes the WORK, not a bypass of the existing review discipline").
+
+**Scalability implications.** Negligible — one regex pass over a build's already-
+captured, already-bounded (`JailResult`'s own output cap) stdout/stderr, once per
+mission's `BASELINE` job (`MAX_ATTEMPTS_BY_KIND[JobKind.BASELINE] == 1`).
+
+**Recommendation.** Ship as built. Route to `cybersecurity` for the finding-storage/
+redaction-pipeline review before merge (this task's own instruction, independent of
+D-144's blanket authorization). Flag the #22 coordination note (the `DiscoveryMethod.
+STATIC_ANALYSIS` duplicate-add, and the reciprocal same-line dedup check #22's own
+dispatch module should add once it lands) to whoever finishes #22.
+
+**Final approval authority** — CTO (technical; work already authorized by D-144, issue
+#23 named explicitly in scope). `cybersecurity` review required before merge per this
+record's own security-implications section and this task's explicit instruction; PR not
+self-merged.
