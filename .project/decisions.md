@@ -16279,6 +16279,21 @@ unimplementable without a second pass.
   and land before or alongside #23's own parser — flagging this now so #23 is not
   staffed as "just write a parser" and then discovers there is nothing to parse.
 
+  **Update, same day, after this record was drafted:** #23 landed (PR #278) while this
+  architecture pass was still running, in parallel, and the blocker above turned out
+  not to require the durable-Artifact fix predicted here. Its actual approach is
+  simpler: `parse_compiler_diagnostics()` runs INLINE on `build_result.build.stdout`/
+  `.stderr` from directly inside `run_baseline_stage`, before the `with Jail.create(...)`
+  block that owns those bytes exits — never needing them to survive the jail's teardown
+  at all, since what gets persisted afterward is the already-parsed, structured
+  `Finding` rows (via the normal `record_finding` path), not the raw log text. No second
+  `Artifact` kind, no `captured_stdout`/`captured_stderr` threading was needed. The
+  underlying fact this record traced (raw compiler output does not survive past a
+  passing BASELINE job) is still correct; the predicted FIX for it (persist the raw log
+  durably first, then parse it later) was simply not the one #23's own implementer
+  chose, and parsing-before-teardown is the better of the two — no follow-on
+  BASELINE-extension task is needed for `engineering-manager` to staff after all.
+
 **Alternative composition considered and rejected:** a second `JobKind.COMPILER_WARNINGS`,
 sequenced after `ANALYZE` within `TRIAGE`. Rejected because `JOB_BACKED_STATES` is a
 one-`MissionState`-to-one-`JobKind` map today (`orchestrator/queue.py`); making one
@@ -16347,12 +16362,14 @@ as stale and explicitly asked `software-architect`/`cto` to reconcile. Updated t
 describe the real composition this record specifies, not to invent new claims.
 
 **Deliberately NOT built:** the `JobKind.BISECT` endpoint/executor from Question 1, and
-the BASELINE compiler-output capture extension from Question 2. Both are real,
-non-trivial feature work (a new enum member + migration + endpoint + executor for the
-first; changes across two other seats' owned modules for the second), not "wiring
-together pieces that already compose" — the actual gap in each case is a genuinely
-missing capability, not a disconnected wire. Both PR #274 and PR #275 are also still
-OPEN (unmerged, pending `cybersecurity` review) as of this writing; touching
+(at the time this record was drafted) the BASELINE compiler-output capture extension
+from Question 2 — see the "Update, same day" note above: #23 landed with a simpler
+approach that made this second item unnecessary. Question 1's item is still real,
+non-trivial feature work (a new enum member + migration + endpoint + executor), not
+"wiring together pieces that already compose" — the actual gap is a genuinely missing
+capability, not a disconnected wire. PR #274 (Question 2's Semgrep/ANALYZE half) and
+PR #275 (Question 1's bisect executor) were both still open at the time this record was
+drafted, mid-session; PR #275 has since merged. Touching
 `orchestrator/queue.py` or `contracts/enums.py` directly in this session would have
 risked exactly the kind of collision that already produced two independent "D-149"
 entries today (PR #274's embedded record, and PR #275's, which landed first as the real
@@ -16361,8 +16378,9 @@ now-familiar convention). This record is the buildable spec for both; staffing t
 `engineering-manager`'s call.
 
 **Cost implications.** None beyond what #22/#23/#24 already committed to (D-144). The
-compiler-log-capture extension is small (reuses the existing `Artifact` store, no new
-model). The bisect endpoint is a normal-sized backend task, not a research spike — every
+compiler-log-capture extension this record anticipated turned out not to be needed at
+all (see the "Update, same day" note) — #23 shipped complete, no follow-on cost there.
+The bisect endpoint is a normal-sized backend task, not a research spike — every
 primitive it needs (`enqueue_job`, `register_executor`, `packages.sandbox.Jail`,
 `run_git_bisect`) already exists and is tested.
 
@@ -16381,13 +16399,12 @@ already established; making it operator-triggered rather than automatic means it
 paid once per explicit request, never once per mission — the more scalable of the two
 options by construction, not just the more honest one.
 
-**Recommendation.** Ship this composition as the target. Route Question 1's endpoint/
-executor and Question 2's BASELINE-capture extension to `engineering-manager` for
-staffing (both are real backend-developer-shaped tasks; the BASELINE half additionally
-needs `compiler-toolchain-engineer` sign-off on the `adapters/cpp/pipeline.py` touch).
-`#23`'s implementer should read this record's Question 2 section in full before starting
-— it changes both what #23 depends on (BASELINE extension, not yet built) and how it
-composes (one job, not two).
+**Recommendation.** Ship this composition as the target. Route Question 1's bisect
+endpoint/executor to `engineering-manager` for staffing (a real backend-developer-shaped
+task) whenever bisect needs to be reachable from a live mission rather than only #5's
+pre-seeded fixture. Question 2's anticipated BASELINE-capture extension is no longer
+open work — see the "Update, same day" note: #23 shipped (PR #278) with a simpler,
+complete solution that needed it not at all.
 
 **Final approval authority** — CTO (technical composition call, explicitly left open by
 D-144/PR #275's own builder rather than decided unilaterally — this record is that
