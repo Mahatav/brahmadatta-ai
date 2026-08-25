@@ -62,6 +62,30 @@ def broken_configure_source(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def warning_producing_source(tmp_path: Path) -> Path:
+    """A real copy of pktcfg with one real, `-Wunused-variable`/`-Wconversion`-
+    producing function appended to `src/config.c` (#23) — mirrors `workers/baseline/
+    tests/conftest.py`'s fixture of the same name exactly (same injected snippet), so
+    both suites are asserting on the identical real compiler output."""
+    dest = tmp_path / "pktcfg-warnings"
+    shutil.copytree(PKTCFG_SOURCE, dest)
+    config_c = dest / "src" / "config.c"
+    config_c.write_text(
+        config_c.read_text()
+        + "\n"
+        "/* #23 test fixture: a real, intentional compiler diagnostic. */\n"
+        "static int pkt_debug_probe_diagnostic(void)\n"
+        "{\n"
+        "    int diagnostic_probe_unused = 0;\n"
+        "    long wide_value = 90000;\n"
+        "    short narrowed_value = wide_value;\n"
+        "    return narrowed_value;\n"
+        "}\n"
+    )
+    return dest
+
+
+@pytest.fixture
 def candidate_b_source(tmp_path: Path) -> Path:
     """configure/build succeed; ctest reports one real failure. Mirrors
     `workers/baseline/tests/conftest.py`'s own fixture of the same name."""
@@ -409,6 +433,161 @@ def test_a_broken_configure_produces_build_failed_and_routes_to_failed(
     transitions.transition(mission.id, target, trace_id=TRACE, now=NOW)
     mission.refresh_from_db()
     assert mission.state_enum is MissionState.FAILED
+
+
+class _FakeOutcome:
+    """The three `BaselineOutcome` attributes `_persist_compiler_diagnostics` reads,
+    without constructing a full real one (`SnapshotInfo` et al. are irrelevant here —
+    this test is about the dedup query, not the build)."""
+
+    def __init__(self, compiler_diagnostics):
+        self.compiler_diagnostics = compiler_diagnostics
+        self.compiler_id = "TestCompiler"
+        self.compiler_version = "1.0"
+        self.recorded_at = NOW
+
+
+def test_a_compiler_diagnostic_defers_to_an_existing_finding_on_the_same_line(mission: Mission):
+    """#23's own acceptance criterion: 'Deduplicated against Semgrep findings on the
+    same line.' Simulates the post-#22 world directly (a pre-existing SEMGREP
+    `Finding` on the exact file:line a compiler diagnostic also lands on) without
+    depending on #22's own uncommitted code — see `workers/baseline/dispatch.py`'s
+    module docstring, "Ordering note", for why this direction has to be simulated
+    rather than reproduced through the real ANALYZE stage today."""
+    from adapters.cpp.compiler_diagnostics import CompilerDiagnostic
+    from contracts.enums import AnalyzerTool, DiscoveryMethod, FindingCategory, Severity
+    from missions.models import Finding
+    from workers.baseline import dispatch as baseline_dispatch
+
+    Finding.objects.create(
+        mission=mission,
+        category=str(FindingCategory.OTHER),
+        severity=str(Severity.MEDIUM),
+        tool="SEMGREP",  # AnalyzerTool.SEMGREP does not exist on this branch yet (#22
+        # is uncommitted) - the dedup query below excludes only COMPILER_DIAGNOSTIC,
+        # so any other tool string, including one #22 has not landed yet, proves it.
+        discovery_method=str(DiscoveryMethod.STATIC_ANALYSIS),
+        file_path="src/config.c",
+        line=73,
+        fingerprint="semgrep:pre-existing:same-line",
+        title="pre-existing semgrep finding on the same line",
+        detected_at=NOW,
+    )
+
+    diagnostic_same_line = CompilerDiagnostic(
+        severity="warning",
+        file="/abs/src/config.c",
+        line=73,
+        column=9,
+        message="unused variable 'diagnostic_probe_unused'",
+        flag="-Wunused-variable",
+        raw="src/config.c:73:9: warning: unused variable 'diagnostic_probe_unused' [-Wunused-variable]",
+    )
+    diagnostic_other_line = CompilerDiagnostic(
+        severity="warning",
+        file="/abs/src/config.c",
+        line=75,
+        column=19,
+        message="implicit conversion",
+        flag="-Wconversion",
+        raw="src/config.c:75:19: warning: implicit conversion [-Wconversion]",
+    )
+
+    recorded = baseline_dispatch._persist_compiler_diagnostics(
+        mission,
+        Path("/abs"),
+        _FakeOutcome((diagnostic_same_line, diagnostic_other_line)),
+        TRACE,
+    )
+
+    # Only the line with NO pre-existing finding from another tool gets a new row.
+    assert recorded == 1
+    compiler_findings = Finding.objects.filter(
+        mission=mission, tool=str(AnalyzerTool.COMPILER_DIAGNOSTIC)
+    )
+    assert compiler_findings.count() == 1
+    assert compiler_findings.get().line == 75
+    # The pre-existing SEMGREP finding on line 73 is untouched, not overwritten.
+    assert Finding.objects.filter(mission=mission, line=73).count() == 1
+
+
+@requires_toolchain
+@pytest.mark.slow
+def test_real_compiler_warnings_become_finding_and_stage_tool_run_rows(
+    mission: Mission, tmp_path: Path, warning_producing_source: Path
+):
+    """End to end against a REAL build: the executor runs `cmake --build` once (the
+    D3 gate's own build), and real `-Wunused-variable`/narrowing-conversion warnings
+    it produces become real `Finding` rows plus one `StageToolRun` row carrying the
+    real compiler identity — #23's three acceptance criteria, proven against real
+    compiler output, not a mock."""
+    from contracts.enums import AnalyzerTool, DiscoveryMethod, Severity
+    from missions.models import Finding, StageToolRun
+
+    walk_to(mission, MissionState.BASELINE)
+    job = _job(mission)
+    ctx = _ctx(mission, job, warning_producing_source, tmp_path / "workspace")
+
+    result = executor_for(JobKind.BASELINE)(ctx)
+
+    assert result.outcome == JobOutcome.SUCCEEDED  # warnings alone never fail BASELINE
+    assert result.result["passed"] is True
+
+    findings = list(
+        Finding.objects.filter(mission=mission, tool=str(AnalyzerTool.COMPILER_DIAGNOSTIC))
+    )
+    assert findings, "expected at least one real COMPILER_DIAGNOSTIC finding"
+    assert all(f.discovery_method == str(DiscoveryMethod.STATIC_ANALYSIS) for f in findings)
+    # file:line:severity, structured — never the raw multi-line compiler transcript
+    # sitting in a field meant for one location.
+    assert all(f.file_path == "src/config.c" for f in findings)  # normalized, not absolute
+    assert all(f.line and f.line > 0 for f in findings)
+    unused_var = next(f for f in findings if "diagnostic_probe_unused" in f.title)
+    assert unused_var.severity == str(Severity.LOW)  # no security-relevant category
+    assert unused_var.fingerprint.startswith("compiler:-Wunused-variable:")
+
+    # Criterion 3: compiler version recorded alongside the findings.
+    tool_run = StageToolRun.objects.get(mission=mission, stage="BASELINE")
+    assert tool_run.tool_name  # real compiler id (e.g. "GNU", "AppleClang", "Clang")
+    assert tool_run.tool_version and tool_run.tool_version != "unknown"
+
+    # Idempotency: re-running the executor (standing in for a worker retrying the
+    # same claimed job — `Job(mission, kind)` is unique, so a genuine second BASELINE
+    # job for this mission cannot exist; see D-065 §1) must not duplicate rows.
+    ctx2 = _ctx(mission, job, warning_producing_source, tmp_path / "workspace-2")
+    result2 = executor_for(JobKind.BASELINE)(ctx2)
+    assert result2.result["already_recorded"] is True
+    assert (
+        Finding.objects.filter(mission=mission, tool=str(AnalyzerTool.COMPILER_DIAGNOSTIC)).count()
+        == len(findings)
+    )
+    assert StageToolRun.objects.filter(mission=mission, stage="BASELINE").count() == 1
+
+
+@requires_toolchain
+@pytest.mark.slow
+def test_a_clean_baseline_build_records_no_compiler_findings(mission: Mission, tmp_path: Path):
+    """`demo/repositories/pktcfg` builds clean (verified directly in this PR's
+    handoff, `-Wall -Wextra -Wshadow -Wconversion` already on) — zero real findings
+    is the correct, honest result, never a fabricated one."""
+    from contracts.enums import AnalyzerTool
+    from missions.models import Finding, StageToolRun
+
+    walk_to(mission, MissionState.BASELINE)
+    job = _job(mission)
+    ctx = _ctx(mission, job, PKTCFG_SOURCE, tmp_path / "workspace")
+
+    result = executor_for(JobKind.BASELINE)(ctx)
+
+    assert result.result["passed"] is True
+    assert (
+        Finding.objects.filter(mission=mission, tool=str(AnalyzerTool.COMPILER_DIAGNOSTIC)).count()
+        == 0
+    )
+    # The compiler identity is still recorded even with zero findings — #22's own
+    # StageToolRun write for Semgrep does the identical thing on a zero-match scan.
+    tool_run = StageToolRun.objects.get(mission=mission, stage="BASELINE")
+    assert tool_run.tool_version != "unknown"
 
 
 @requires_toolchain

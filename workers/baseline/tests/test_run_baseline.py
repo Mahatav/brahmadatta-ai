@@ -109,6 +109,62 @@ def test_a_red_baseline_from_a_failing_test_is_recorded_not_hidden(
     assert "7" in events[0]["message"] or "1" in events[1]["message"]
 
 
+def test_a_clean_build_records_no_compiler_diagnostics(
+    tmp_path: Path, pktcfg_source: Path
+) -> None:
+    """#23: `demo/repositories/pktcfg` builds clean today, even with `-Wall -Wextra
+    -Wshadow -Wconversion` already on (`CMakeLists.txt`) — verified directly, not
+    assumed. Zero real diagnostics is the correct, honest result for this target, not
+    a sign the parser is broken; `test_the_build_actually_produced_real_diagnostics`
+    below proves the parser positively finds real ones when they exist."""
+    outcome = run_baseline_stage("mission-no-warnings", pktcfg_source, tmp_path / "workspace")
+    assert outcome.passed is True
+    assert outcome.compiler_diagnostics == ()
+    assert outcome.compiler_id != "unknown"
+    assert outcome.compiler_version != "unknown"
+
+
+def test_the_build_actually_produced_real_diagnostics(
+    tmp_path: Path, warning_producing_source: Path
+) -> None:
+    """#23, end to end against a REAL build: `run_baseline_stage` runs the real
+    `cmake --build` once (the D3 gate's own build, not a second one), and
+    `BaselineOutcome.compiler_diagnostics` carries real, structurally parsed
+    diagnostics out of it — file:line:severity, not a text blob. The build itself
+    still passes (warnings are not `-Werror`); a red baseline is not required to
+    observe a real warning."""
+    outcome = run_baseline_stage(
+        "mission-real-warnings", warning_producing_source, tmp_path / "workspace"
+    )
+    assert outcome.passed is True  # warnings alone never fail the D3 gate
+    assert outcome.compiler_id != "unknown"
+    assert outcome.compiler_version != "unknown"
+
+    diagnostics = outcome.compiler_diagnostics
+    assert diagnostics, "expected real compiler diagnostics, found none"
+    assert all(d.file.endswith("src/config.c") for d in diagnostics)
+    assert all(d.severity in ("warning", "error") for d in diagnostics)
+    assert all(d.line > 0 for d in diagnostics)
+
+    by_flag = {d.flag: d for d in diagnostics}
+    # -Wconversion's exact flag name differs by compiler (clang:
+    # -Wimplicit-int-conversion, gcc: -Wconversion) for this specific narrowing —
+    # assert on the two flags that are identical across both real toolchains this
+    # project builds with (macOS AppleClang locally, gcc in the real Linux worker
+    # image), rather than hardcoding one compiler's naming.
+    assert "-Wunused-variable" in by_flag
+    assert by_flag["-Wunused-variable"].message == "unused variable 'diagnostic_probe_unused'"
+    assert any(d.flag and "onversion" in d.flag for d in diagnostics), (
+        f"expected a narrowing-conversion warning, got flags: {sorted(by_flag)}"
+    )
+
+    # as_dict() round-trips into what workers/baseline/dispatch.py will hand to
+    # orchestrator.findings.record_finding — never a raw dataclass past this boundary.
+    outcome_dict = outcome.as_dict()
+    assert len(outcome_dict["compiler_diagnostics"]) == len(diagnostics)
+    assert outcome_dict["compiler_id"] == outcome.compiler_id
+
+
 def test_mission_id_is_carried_through_to_the_report(tmp_path: Path, pktcfg_source: Path) -> None:
     mission_id = "12345678-1234-1234-1234-123456789abc"
     outcome = run_baseline_stage(mission_id, pktcfg_source, tmp_path / "workspace")
