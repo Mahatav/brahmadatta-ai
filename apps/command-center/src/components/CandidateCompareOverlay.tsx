@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { trapTabKey } from '../lib/a11y/focusTrap';
 import type { GateMatrix, GateResult, MissionSnapshot, PatchCandidate, VerificationRecord } from '../lib/events/store';
 import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
 
@@ -42,8 +43,16 @@ export function CandidateCompareOverlay({
   returnFocusRef: React.RefObject<HTMLElement | null>;
 }) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [fullDiffColumn, setFullDiffColumn] = useState<number | null>(null);
 
+  // #56 / D-059 §3.4 — a deliberate, escapable focus trap: `Tab`/`Shift+Tab` cycle only between
+  // the overlay's own focusable controls while it is open (`trapTabKey`, shared with
+  // `ConfirmDialog`); `Escape` always closes and returns focus to whichever control opened the
+  // overlay (`returnFocusRef`, set by the caller before it opens this). Without the trap, Tab
+  // would walk straight through into the Stage Timeline/Bottom Strip controls still mounted
+  // behind the scrim — a real background-focus leak, not the intentional overlay scope §9
+  // requires.
   useEffect(() => {
     if (!open) {
       return undefined;
@@ -52,6 +61,10 @@ export function CandidateCompareOverlay({
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         onClose();
+        return;
+      }
+      if (dialogRef.current) {
+        trapTabKey(dialogRef.current, event);
       }
     }
     document.addEventListener('keydown', onKeyDown);
@@ -74,6 +87,7 @@ export function CandidateCompareOverlay({
   return (
     <div className="bd-overlay-scrim" role="presentation" onClick={onClose}>
       <div
+        ref={dialogRef}
         className="bd-overlay bd-crop"
         role="dialog"
         aria-modal="true"
@@ -244,6 +258,16 @@ function EvidenceColumn({ snapshot }: { snapshot: MissionSnapshot }) {
   );
 }
 
+/**
+ * `.bd-diff__body` (CSS: `max-height` + `overflow-y: auto`) is a genuinely CSS-scrollable
+ * region with no focusable element of its own inside it (plain `<li>` diff lines, no controls).
+ * #56 / D-059 §3.2: a scrollable region with nothing else to tab to is otherwise unreachable by
+ * keyboard — a keyboard user tabbing through the dialog jumps straight from the row above it to
+ * `[ OPEN FULL ]`/`[ ← BACK TO COMPARE ]` below it and can never scroll a long diff. `tabIndex={0}`
+ * makes it a real tab stop; `role="region"` plus its existing `aria-label` names what it holds.
+ * Standard browser behaviour then gives it arrow-key/Page Up/Page Down/Home/End scrolling once
+ * focused — no custom key handling needed or added.
+ */
 function DiffBlock({
   patch,
   policyFailed,
@@ -274,7 +298,12 @@ function DiffBlock({
       {lines.length === 0 ? (
         <p className="bd-panel__empty">diff pending</p>
       ) : (
-        <ol className="bd-diff__body" aria-label={`${patch.id} unified diff`}>
+        <ol
+          className="bd-diff__body"
+          aria-label={`${patch.id} unified diff`}
+          role="region"
+          tabIndex={0}
+        >
           {visible.map((line, index) => (
             <li key={index} className={`bd-diff__line bd-diff__line--${line.kind}`}>
               <span className="bd-diff__gutter">{line.gutter}</span>
