@@ -16143,3 +16143,167 @@ dispatch module should add once it lands) to whoever finishes #22.
 #23 named explicitly in scope). `cybersecurity` review required before merge per this
 record's own security-implications section and this task's explicit instruction; PR not
 self-merged.
+
+## D-151 — #23/PR #278: SEC-A/SEC-B fixes, `Finding.title` redaction bypass and
+`#line`-forged `Finding.file_path`/`line` · 2026-08-24 · `backend-developer` seat
+
+Two real, cybersecurity-confirmed HIGH-severity findings blocking PR #278 (#23,
+compiler warnings as structured findings, D-150). Fixed in place on
+`fix/278-security-findings`, branched from `feat/23-compiler-warnings-findings` (the
+same branch PR #278 is open against — see this record's own "Final approval
+authority" for why this did not open a second PR).
+
+**SEC-A — `Finding.title` bypassed redaction.** `workers/baseline/dispatch.py::
+_finding_kwargs` redacted `sanitizer_report` via `redact_sanitizer_report(diagnostic.
+raw)`, but the pre-fix `_title_for` built `title` straight from `diagnostic.message`
+(raw compiler diagnostic text) truncated to 300 chars, with no redaction pass applied
+anywhere downstream. gcc/clang echo arbitrary TARGET source text verbatim into
+`message` for several real diagnostic kinds — `[[deprecated("...")]]`/
+`__attribute__((deprecated("...")))` reasons, `#warning "..."`, `static_assert(...,
+"...")` — so an untrusted target source file containing
+`__attribute__((deprecated("rotate DATABASE_URL=postgresql://user:pass@host/db")))`
+produced a `title` carrying that credential verbatim, reaching the exported evidence
+bundle (`orchestrator/evidence_export.py`) and the `FINDING_RECORDED` SSE event
+unredacted. Reproduced live against real AppleClang before and after the fix (see
+this PR's handoff).
+
+**SEC-B — `#line` let adversarial target source forge `Finding.file_path`/`line`.**
+The pre-fix `_normalize_file_path` tried `resolved.relative_to(source_dir.resolve())`
+and, on `ValueError` (the path is not under `source_dir`), fell back to trusting the
+raw string anyway (`raw_file.lstrip("/")`) — treating "not resolvable under
+`source_dir`" as a harmless edge case (a system header) rather than a threat. Both gcc
+and clang honour the standard C preprocessor `#line` directive, and target source is
+untrusted: `#line 1 "/etc/passwd"` ahead of `int compute(int limit) { ... }` makes
+`cc -Wall -Wextra` report a real `-Wunused-parameter` warning AT `/etc/passwd:1`,
+which the pre-fix fallback turned into `Finding.file_path="etc/passwd", line=1` —
+an evidence row falsely attributed to an arbitrary attacker-chosen location, capable
+of colliding with (and silently suppressing via same-line dedup) a genuine finding,
+or misdirecting triage away from the real vulnerable line. Reproduced live against
+real AppleClang before and after the fix.
+
+**Fixes.**
+
+* **SEC-A** — `_title_for` (`workers/baseline/dispatch.py`) rebuilt to use
+  structured, compiler-controlled fields only: the diagnostic's own `-W...` flag (a
+  fixed, finite compiler vocabulary, never target source text), severity, the
+  `FindingCategory` this module already derives from the flag, `file_path`, and
+  `line` — never `diagnostic.message`/`.raw`. Mirrors `workers/fuzzing/dispatch.py::
+  _title_for`'s own structured-fields-only contract exactly, rather than adding a
+  second, differently-shaped redaction pass for one more free-text field (the
+  allowlist-not-denylist reasoning `orchestrator/redaction.py`'s own module
+  docstring already gives for why pattern-matching secrets out of open-ended text is
+  the wrong shape of fix). `diagnostic.message`/`.raw` still reach
+  `Finding.sanitizer_report`, unchanged, through the already-reviewed
+  `redact_sanitizer_report` pass.
+* **SEC-B** — `_normalize_file_path` rebuilt to canonicalize BOTH the diagnostic's
+  reported path and `source_dir` (`Path.resolve()`, which also follows symlinks —
+  closing the adjacent variant where a symlink planted inside `source_dir` points
+  back out to a real host path) and require the resolved diagnostic path to
+  genuinely sit under the resolved source root. Returns `None` — never a
+  best-effort guess — when it does not. `_persist_compiler_diagnostics` treats
+  `None` as "never record a `Finding` for this diagnostic": dropping is the chosen
+  mechanism over recording-with-an-unverified-location-flag, because `file_path`/
+  `line` are treated as ground truth by the same-line cross-tool dedup, CORRELATE,
+  and the patch stage's code-slice extraction — a forged location is actively
+  dangerous to those consumers, not merely inaccurate, so no consumer should ever
+  see one. Not silently invisible: the rejection count is still surfaced on the
+  `StageToolRun.flags` row (`unverified-location:<n>`), visible to an operator even
+  though no `Finding` was created.
+
+**False-positive risk considered and tested for.** `#line` is not exclusively an
+attack vector — bison/flex-generated parsers legitimately use it to attribute their
+own diagnostics back to the `.y`/`.l` grammar file they were generated from, and that
+grammar file is itself checked into the target's repository, under `source_dir`. The
+fix's actual test (`source_dir` containment, not "is this a `#line` directive at
+all") accepts that case unchanged: a `#line` target that resolves under `source_dir`
+— including a relative one, joined against `source_dir` before resolving, matching
+how a real generated file's `#line` would name a sibling in-tree file — is recorded
+exactly as any other in-tree diagnostic would be. Proven with a real compiled
+fixture (`legitimate_line_directive_source` /
+`test_a_real_legitimate_line_directive_is_still_recorded`), not asserted from
+reasoning alone.
+
+**Options considered (SEC-B, drop vs. flag-as-unverified).**
+
+1. **Keep the `Finding` but mark its location unverified** (a new field, or a
+   sentinel `file_path`). Rejected: every downstream consumer of `file_path`/`line`
+   (dedup, CORRELATE, patch code-slice) treats them as ground truth today with no
+   "unverified" branch to route to — adding one is a real schema/consumer change
+   across multiple modules this PR does not own, for a case (an escaped location)
+   that is never useful evidence regardless of how it is labelled.
+2. **(Chosen) Drop the diagnostic entirely, count and surface the drop on
+   `StageToolRun.flags`.** No schema change, no new consumer branch, and the one
+   real risk this creates — silently losing a real diagnostic — is mitigated by the
+   count staying visible on the `StageToolRun` row rather than vanishing with no
+   trace anywhere.
+
+**Testing.** Both real PoCs from the cybersecurity report reproduced against real
+AppleClang, confirmed to fail against the pre-fix code and pass against the fix (git
+diff toggled locally in this session, both directions, real `pytest` runs — not
+inferred): `test_title_for_never_carries_raw_diagnostic_message_text` /
+`test_a_real_deprecated_attribute_secret_never_reaches_a_finding_title` (SEC-A);
+`test_normalize_file_path_rejects_a_line_directive_escape` /
+`test_normalize_file_path_rejects_a_symlink_escape` /
+`test_a_line_directive_escaped_diagnostic_is_not_recorded_as_a_finding` /
+`test_a_real_line_directive_escape_is_not_recorded_as_a_finding` (SEC-B); the
+legitimate-`#line` case above is new coverage, not a reproduction (`apps/control-api/
+orchestrator/tests/test_baseline_executor.py`). One pre-existing D-150 test,
+`test_real_compiler_warnings_become_finding_and_stage_tool_run_rows`, asserted a
+`Finding.title` contained a raw identifier name (`diagnostic_probe_unused`) — exactly
+the class of content SEC-A's fix now deliberately excludes from `title` by design;
+updated to select the finding by `fingerprint` prefix instead, matching the new
+title contract rather than the pre-fix one.
+
+Full results (all commands run in this session, real output; a real `python3.12`
+venv with `apps/control-api/requirements.txt`/`requirements-dev.txt` installed —
+the system `python3` here is 3.9, too old for Django 5.2's `>=3.10` floor):
+- `pytest adapters/cpp/tests workers/baseline/tests -q -rs`: 86 passed, 1 skipped
+  (same pre-existing Linux-only ASan/`RLIMIT_AS` skip D-150 already documented) —
+  unaffected by this fix, confirming no regression outside `workers/baseline/
+  dispatch.py`.
+- `pytest orchestrator/tests/test_baseline_executor.py -q` (SQLite test settings):
+  24 passed (D-150's 16, plus 8 new SEC-A/SEC-B tests this record adds).
+- `ruff check workers/baseline/dispatch.py apps/control-api/orchestrator/tests/
+  test_baseline_executor.py`: clean.
+- `mypy workers/baseline/dispatch.py` (`MYPYPATH=apps/control-api`): 13 errors,
+  byte-identical in count to D-150's own documented pre-existing baseline (the
+  `StrEnum`/`JobKind` dict-item family in `orchestrator/executors.py` and
+  `missions/models.py`) — none newly introduced by this fix.
+
+Note on the assignment's literal test command
+(`pytest adapters/cpp/tests workers/baseline/tests orchestrator/tests/
+test_baseline_executor.py -q`): run as two separate invocations, matching how D-150
+itself was actually verified and matching the repository's real layout —
+`orchestrator/tests/` only exists under `apps/control-api/`, with its own
+`pytest.ini` (`DJANGO_SETTINGS_MODULE = config.settings.test`) that only takes effect
+when pytest's rootdir resolution lands there; `adapters/cpp/tests`/`workers/
+baseline/tests` are framework-free and run from the repo root under the root
+`pytest.ini`. A single combined invocation from either directory does not resolve
+all three paths at once given this layout — confirmed directly, not assumed, rather
+than silently reporting a command that was never actually run as-is.
+
+**Cost implications.** None — pure logic changes to functions already on the write
+path; no new dependency, no new subprocess, no schema migration.
+
+**Security implications.** This record's entire subject. Both fixes close the exact
+mechanisms cybersecurity's PoCs demonstrated, verified against the same PoCs, in both
+directions (fail pre-fix, pass post-fix). Per CLAUDE.md's standing rule and this
+task's explicit instruction, this fix is not self-merged — it requires the same (or a
+fresh) `cybersecurity` reviewer to re-confirm both findings are closed before PR #278
+merges.
+
+**Scalability implications.** Negligible — `_normalize_file_path` now does two
+`Path.resolve()` calls instead of one per diagnostic (still bounded by the same
+`JailResult` output cap D-150 already documented); `_title_for` does strictly less
+string work than before (no longer touches `diagnostic.message` at all).
+
+**Recommendation.** Merge the fix commit into `feat/23-compiler-warnings-findings`
+(this session pushed `fix/278-security-findings`, branched from and tracking that
+same remote branch, rather than opening a second PR — the end state this task asked
+for is PR #278 itself carrying both fixes) once `cybersecurity` re-confirms both
+SEC-A and SEC-B are closed. Do not merge PR #278 on this record's own say-so.
+
+**Final approval authority** — CTO (technical; fixes a blocker on work already
+authorized by D-144/D-150). `cybersecurity` re-review is a hard gate before PR #278
+merges, per this task's explicit instruction and CLAUDE.md's standing review-chain
+rule; not self-merged.

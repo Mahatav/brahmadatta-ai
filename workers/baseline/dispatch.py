@@ -66,6 +66,27 @@ tool name/version alongside the findings it produced) — mirroring #22's own
 compiler_diagnostics.py`'s own docstring: a `note:` only ever restates the location of
 the `warning:`/`error:` it is attached to, never a new one.
 
+**Two HIGH-severity findings fixed post-review, both still in this docstring's scope
+(cybersecurity, PR #278; full reasoning lives on each fixed function's own
+docstring):**
+
+* **SEC-A** — `Finding.title` used to build straight from `diagnostic.message` (raw
+  compiler diagnostic text, which echoes arbitrary TARGET source text verbatim for
+  `[[deprecated("...")]]`/`#warning`/`static_assert` diagnostics) with no redaction,
+  reaching the exported evidence bundle and the `FINDING_RECORDED` SSE event
+  unredacted. Fixed in `_title_for` by building the title from structured,
+  compiler-controlled fields only (flag/category/file/line), the same
+  structured-fields-only contract `workers/fuzzing/dispatch.py::_title_for` already
+  uses — never free text, redacted or otherwise.
+* **SEC-B** — `_normalize_file_path` used to trust whatever path a diagnostic
+  reported, including one redirected by an adversarial `#line` directive in
+  untrusted target source (`#line 1 "/etc/passwd"` is honoured verbatim by both gcc
+  and clang), forging `Finding.file_path`/`line` to an arbitrary attacker-chosen
+  location. Fixed by requiring the diagnostic's canonicalized, symlink-resolved path
+  to genuinely sit under `source_dir`'s own canonicalized path before trusting it as
+  evidence; a diagnostic that fails this check is never recorded as a `Finding` (see
+  `_normalize_file_path` and `_persist_compiler_diagnostics`).
+
 ### File-path normalization
 
 A diagnostic's `file` field, as gcc/clang print it, is whatever path the compiler was
@@ -378,23 +399,68 @@ def _persist_report(mission: Mission, outcome: BaselineOutcome) -> BaselineRepor
         return BaselineReport.objects.get(mission=mission)
 
 
-def _normalize_file_path(raw_file: str, source_dir: Path) -> str:
-    """Strip `ctx.source_dir`'s absolute prefix off a compiler-reported path.
+def _normalize_file_path(raw_file: str, source_dir: Path) -> str | None:
+    """Strip `ctx.source_dir`'s absolute prefix off a compiler-reported path, after
+    verifying the path genuinely resolves under `source_dir` — never trusting the
+    string gcc/clang printed at face value.
 
-    gcc/clang print whatever path they were invoked with — an absolute path into the
-    mission's extracted snapshot directory on this stage's own build (see this
-    module's docstring). Never leaving that absolute prefix on a `Finding.file_path`
-    matches `adapters/semgrep/parser.py::_strip_root`'s identical treatment for
-    Semgrep matches, which is what makes the two tools' `file_path` values directly
-    comparable for the same-line dedup below. Falls back to the raw string, stripped
-    of a leading `/`, when the path is not actually under `source_dir` (e.g. a system
-    header) — never raises on a path shape this stage does not control.
+    gcc/clang print whatever path was in effect when the diagnostic fired — normally
+    an absolute path into the mission's extracted snapshot directory on this stage's
+    own build (see this module's docstring), since `adapters/cpp/pipeline.py::
+    _configure_argv` passes `str(detected.source_dir)` to CMake's `-S`. Not leaving
+    that absolute prefix on a `Finding.file_path` matches `adapters/semgrep/
+    parser.py::_strip_root`'s identical treatment for Semgrep matches, which is what
+    makes the two tools' `file_path` values directly comparable for the same-line
+    dedup below.
+
+    **SEC-B (cybersecurity, PR #278).** Both gcc and clang honour a standard C
+    preprocessor `#line` directive — `#line 1 "/etc/passwd"` — and will happily print
+    that attacker-chosen file/line for every diagnostic that follows it in the
+    translation unit, even though target source under `source_dir` is untrusted
+    input this stage never controls. Reproduced live: a target source file
+    containing `#line 1 "/etc/passwd"\\nint compute(int limit) { ... }` makes gcc/
+    clang report a real `-Wall`/`-Wextra` warning AT `/etc/passwd:1`. The previous
+    version of this function treated "not resolvable under `source_dir`" as a
+    harmless edge case (a system header) and fell back to trusting the raw string
+    anyway (`raw_file.lstrip("/")`) — which let an adversarial `#line` forge
+    `Finding.file_path`/`line` to an arbitrary attacker-chosen location. Downstream,
+    `file_path`/`line` are treated as ground truth by dedup (`_line_already_has_a_
+    finding_from_another_tool` below), CORRELATE, and the patch stage's code-slice
+    extraction — a forged location can silently suppress a genuine finding via
+    same-line dedup, or misdirect triage away from the real vulnerable line.
+
+    Fixed by resolving BOTH `raw_file` and `source_dir` to their real, canonical
+    filesystem paths (`Path.resolve()`, which also follows symlinks — closing the
+    obvious variant of the same attack where a symlink planted *inside* `source_dir`
+    points back out to a real host path) and requiring the resolved diagnostic path
+    to sit under the resolved source root. Returns `None`, rather than a
+    best-effort guess, whenever it does not — the caller must not record a `Finding`
+    whose location cannot be verified (see `_persist_compiler_diagnostics`).
+
+    A relative `raw_file` (some generators emit one) is resolved against
+    `source_dir` first, not the current process's cwd — this function runs in the
+    control-api process, well after the build's own `cwd` (`jail.root`, see
+    `adapters/cpp/pipeline.py::run_variant`) has torn down, so "the process cwd
+    when this happens to run" is never a meaningful anchor for a relative path.
+
+    This *does* still accept the legitimate, non-adversarial case of `#line`: a
+    generated parser/lexer (e.g. bison/flex output) that re-points its own
+    diagnostics at the `.y`/`.l` grammar file it was generated from. That grammar
+    file is itself checked into the target's repository, under `source_dir`, so it
+    resolves under the source root exactly like any other in-tree file and is
+    accepted normally — only a `#line` target that escapes `source_dir` entirely is
+    rejected. See `adapters/cpp/tests/test_compiler_diagnostics.py` for both cases
+    exercised against real compiler behaviour.
     """
     try:
-        resolved = Path(raw_file).resolve()
-        return str(resolved.relative_to(source_dir.resolve()))
+        candidate = Path(raw_file)
+        if not candidate.is_absolute():
+            candidate = source_dir / candidate
+        resolved = candidate.resolve()
+        source_root = source_dir.resolve()
+        return str(resolved.relative_to(source_root))
     except ValueError:
-        return raw_file.lstrip("/")
+        return None
 
 
 def _category_for_flag(flag: str | None) -> FindingCategory:
@@ -422,9 +488,43 @@ def _fingerprint(compiler_id: str, flag: str | None, file_path: str, line: int, 
     return f"compiler:{flag or 'unknown'}:{digest}"[:128]
 
 
-def _title_for(diagnostic: CompilerDiagnostic, file_path: str) -> str:
-    label = diagnostic.flag or diagnostic.severity
-    title = f"{label}: {diagnostic.message} ({file_path}:{diagnostic.line})"
+def _title_for(diagnostic: CompilerDiagnostic, category: FindingCategory, file_path: str) -> str:
+    """Built entirely from structured, compiler-controlled fields — the diagnostic's
+    own `-W...` flag (drawn from gcc/clang's fixed, finite flag vocabulary, never
+    target source text), its severity, and the `FindingCategory` this module already
+    derives from that flag — NEVER from `diagnostic.message`.
+
+    **SEC-A (cybersecurity, PR #278).** The previous version of this function built
+    `title` straight from `diagnostic.message` — raw compiler diagnostic text —
+    truncated to `_TITLE_MAX_CHARS` but never run through `redact_sanitizer_report`
+    the way `sanitizer_report` below already is. gcc/clang echo arbitrary TARGET
+    source text verbatim into `message` for several real, common diagnostic kinds:
+    `[[deprecated("...")]]` attribute reasons, `#warning "..."`, and
+    `static_assert(..., "...")` messages all reproduce their literal string argument
+    in the diagnostic. Reproduced live: a target source file containing
+    `[[deprecated("rotate DATABASE_URL=postgresql://user:pass@host/db")]]` produces a
+    diagnostic whose `message` contains that string verbatim — which, built straight
+    into `title` with no redaction, reached the exported evidence bundle
+    (`orchestrator/evidence_export.py`) and the `FINDING_RECORDED` SSE event
+    unredacted.
+
+    Fixed the same way `workers/fuzzing/dispatch.py::_title_for` already avoids this
+    class of bug entirely: build the title from structured fields only, never from
+    attacker-influenced free text, rather than trying to pattern-match secrets out of
+    an open-ended string (the same allowlist-not-denylist reasoning `orchestrator/
+    redaction.py`'s own module docstring gives for why `sanitize_detail` does not try
+    to recognise *unsafe* shapes). `diagnostic.message`/`.raw` still reach
+    `Finding.sanitizer_report` below — through `redact_sanitizer_report`, which
+    already redacts exactly this class of embedded secret (an `ENV_VAR=value`-shaped
+    assignment) — never `Finding.title`, which has no redaction pass applied to it
+    anywhere downstream and must therefore never carry raw target text at all.
+    """
+    label = diagnostic.flag or f"compiler {diagnostic.severity}"
+    if category is not FindingCategory.OTHER:
+        bug = category.value.replace("_", " ").lower()
+        title = f"{bug} ({label}) at {file_path}:{diagnostic.line}"
+    else:
+        title = f"{label} at {file_path}:{diagnostic.line}"
     return title[:_TITLE_MAX_CHARS]
 
 
@@ -439,7 +539,7 @@ def _finding_kwargs(diagnostic: CompilerDiagnostic, file_path: str, compiler_id:
         "line": diagnostic.line,
         "function": None,
         "fingerprint": _fingerprint(compiler_id, diagnostic.flag, file_path, diagnostic.line, diagnostic.column),
-        "title": _title_for(diagnostic, file_path),
+        "title": _title_for(diagnostic, category, file_path),
         # `diagnostic.raw`/`.message` are the compiler's own text, quoting whatever
         # source identifiers (variable/function names) appear on the offending line —
         # free text from the target, same redaction discipline `workers/fuzzing/
@@ -486,13 +586,26 @@ def _persist_compiler_diagnostics(
 
     Returns the number of `Finding` rows actually created (for `ExecutorResult.
     result`), which is not the same number as `len(outcome.compiler_diagnostics)`
-    whenever `note` diagnostics or a same-line dedup skip are present.
+    whenever `note` diagnostics, a same-line dedup skip, or an unverifiable location
+    (SEC-B — see `_normalize_file_path`) are present.
     """
     recorded = 0
+    unverified_location = 0
     for diagnostic in outcome.compiler_diagnostics:
         if diagnostic.severity not in _FINDING_SEVERITIES:
             continue
         file_path = _normalize_file_path(diagnostic.file, source_dir)
+        if file_path is None:
+            # SEC-B: the diagnostic's reported location does not verifiably resolve
+            # under `source_dir` (a real system header, or an adversarial `#line`
+            # escape — see `_normalize_file_path`'s own docstring). Never recorded as
+            # a `Finding`: `file_path`/`line` are treated as ground truth by dedup,
+            # CORRELATE, and the patch stage, and a forged location is actively
+            # dangerous there, not merely inaccurate. Not silently invisible either —
+            # counted here and surfaced on the `StageToolRun` row below, so an
+            # operator can see diagnostics existed that this stage declined to trust.
+            unverified_location += 1
+            continue
         if _line_already_has_a_finding_from_another_tool(mission, file_path, diagnostic.line):
             continue
         record_finding(
@@ -511,7 +624,11 @@ def _persist_compiler_diagnostics(
             tool_name=outcome.compiler_id,
             tool_version=outcome.compiler_version,
             image_digest=None,  # subprocess-jail path is unpinned — see toolchain.py
-            flags=[f"diagnostics:{len(outcome.compiler_diagnostics)}", f"findings:{recorded}"],
+            flags=[
+                f"diagnostics:{len(outcome.compiler_diagnostics)}",
+                f"findings:{recorded}",
+                f"unverified-location:{unverified_location}",
+            ],
             artifact_refs=[],
             started_at=outcome.recorded_at,
             finished_at=outcome.recorded_at,
