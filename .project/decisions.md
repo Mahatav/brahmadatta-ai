@@ -16426,3 +16426,139 @@ D-144/PR #275's own builder rather than decided unilaterally — this record is 
 ruling, not self-approved; CTO review requested before Question 1's endpoint/executor or
 Question 2's BASELINE extension is staffed against it, per COMPANY.md §2's review chain:
 software-architect spec → reviewed by CTO).
+---
+
+## D-152 — `#40` renewed-fuzzing gate built for real: bounded libFuzzer re-check
+against the patched build, as its own row in the gate matrix · 2026-08-24 ·
+`backend-developer` seat, under D-144's authorization
+
+**Context.** `#40` asked for the strongest anti-overfit argument the product's story
+has — "how do you know the patch isn't just overfit to one input" — as a real,
+disclosed gate rather than the permanent `NOT_RUN`/"cut" placeholder
+`contracts.verdict.GateMatrix.renewed_fuzzing` and `OPTIONAL_GATES` had carried since
+the gate matrix's own D-048 freeze. D-086 (2026-08-19) reopened it from `CUT`
+contingent on CTO confirmation that it was "genuinely cheap now" — I read the full
+decision log before starting and found no entry anywhere recording that the CTO ever
+actually gave that confirmation; D-144 (2026-08-24, direct CEO instruction) supersedes
+D-086's sequencing and gating unconditionally for every named `CUT` issue including
+`#40`, so I proceeded on D-144's authority and note the D-086 gap here rather than
+treating it as satisfied.
+
+**Decision.** Reuse the existing, already-reviewed fuzzing campaign runner
+(`adapters.cpp.fuzzing.run_libfuzzer_campaign` — the same function `JobKind.FUZZ`'s
+discovery campaign calls) against the patched worktree `run_verification` already
+produces mid-call, rather than building a second fuzzing mechanism. Concretely:
+
+* `orchestrator/verification.py` gained `RenewedFuzzConfig` (a `container_policy:
+  ContainerJailPolicy | None`, a bounded `budget_seconds`, and an injectable
+  `campaign_runner` for tests — same shape as the existing `CommandRunner`/`runner=`
+  pattern the compile/reproducer/regression gates already use) and `_run_renewed_fuzz`,
+  called from inside `run_verification`'s own `with Jail.create(...)` block — after the
+  patched build compiles, independent of whether `REPRODUCER_ELIMINATED`/
+  `REGRESSION_PRESERVED` themselves passed — so `verify_root` (the copy with the
+  candidate diff already applied) still exists on disk for
+  `run_libfuzzer_campaign`'s own `shutil.copytree` to read before the `Jail` tears it
+  down (mirrors D-106's identical concern for the original FUZZ path's crash-artifact
+  copy-out).
+* Every early-return branch in `run_verification` (`git apply` failed, `cmake
+  configure` failed, `cmake --build` failed) now states an explicit
+  `renewed_fuzzing=_not_run(...)` reason instead of falling through to
+  `GateMatrix`'s field default (`"Not run: cut from the seven-day build..."`), which
+  stopped being an accurate reason for this specific gate the moment this PR landed —
+  `STATIC_DELTA` still uses that default correctly, since it is genuinely still cut.
+* Outcomes are `PASS` (0 new crashes), `FAIL` (≥1 new crash — flips `derive_verdict`'s
+  optional-gate branch to `REJECTED`, unchanged logic, now live instead of dead code
+  for this gate), or `NOT_RUN` (no `SANDBOX_FUZZ_IMAGE` configured, the harness itself
+  failed to build/run against the patched source, or the sandbox was unavailable) —
+  never `ERROR`, matching this module's own existing local convention (no gate in this
+  file has ever produced `GateStatus.ERROR`) rather than inventing the first one.
+  `NOT_RUN` on this optional gate never affects the verdict, by the pre-existing
+  `derive_verdict` contract — an infra gap must never downgrade or silently pass a
+  candidate.
+* `contracts/schemas/missions.py::MissionPolicy` gained `renewed_fuzz_seconds` (default
+  120s, `ge=0, le=3600`) — deliberately much smaller than `fuzz_seconds`' 1800s
+  open-ended discovery default, per the issue's own "bounded budget... targeted
+  re-check, not open-ended discovery" instruction. `0` disables the campaign for a
+  mission but the gate still runs and discloses `NOT_RUN` with a reason, never silently
+  omitted. This is the "minor API contract detail" backend-developer's role brief
+  authorizes adding directly, documented here since this repository has no separate
+  `04-api-plan.md` — the generated `packages/schemas/openapi.json` (regenerated and
+  re-committed) plus `apps/command-center/src/lib/api/schema.d.ts` (regenerated,
+  `npm run generate:api`) are this repository's actual frozen contract, and both are
+  current as of this record.
+* `orchestrator/verify_dispatch.py` gained `_renewed_fuzz_config_for(mission)`,
+  building the real `ContainerJailPolicy` from `settings.SANDBOX_FUZZ_IMAGE` and the
+  mission's own `MissionPolicy.sandbox`/`renewed_fuzz_seconds` — same reasoning as
+  `workers/fuzzing/dispatch.py::_container_policy` for the discovery campaign,
+  independently applied rather than importing that private helper (`VERIFY` and `FUZZ`
+  are different executors with different lifecycles).
+* The Command Center needed **no code change** — `apps/command-center/src/components/
+  VerdictPanel.tsx`'s five-row gate matrix (`GATE_ORDER`/`GATE_TITLE`, "RENEWED
+  FUZZING") was already fully data-driven off `GateMatrix.renewed_fuzzing`, reserved
+  from first paint per `docs/09-company/04-design-system.md` §6.4.3's own build note.
+  Confirmed directly: `npm run check` (all eleven scripted checks) and `tsc --noEmit`
+  both pass unmodified against the regenerated schema.
+
+**Two deliberately-constructed verification cases, both driven for real** (no
+`ScriptedRunner`, no mocked `campaign_runner` — real `git apply`, real
+`cmake`/`ctest`, real `packages.sandbox.Jail`, real `packages.sandbox.container.
+ContainerJail` running the real, freshly built `brahmadatta-fuzz-toolchain` image),
+against `demo/repositories/pktcfg`:
+
+* **The correct patch** (`candidate-a-correct-bounds-fix.patch`) survives: compile,
+  reproducer, regression, and a real 60-second renewed-fuzz campaign all `PASS` —
+  10,585,218 real executions, 0 new crashes — mission verdict `Verified`.
+* **A new, deliberately-bad patch** (`patches/candidate-d-overfit-single-input-fix.
+  patch`, added by this PR) special-cases the literal-tab sizing fix to `len == 3` —
+  the exact byte length of the one committed reproducer. It genuinely eliminates that
+  reproducer and passes the full regression suite (the literal-tab path has no
+  baseline unit test — see `demo/repositories/pktcfg/README.md`), so it would have
+  been `Verified` under the pre-#40 three-gate matrix. A real renewed-fuzz campaign
+  against its own real patched build rediscovers the same bug class at a different
+  literal-tab length in 6 executions (0.2s) — `RENEWED_FUZZING: FAIL` — and the
+  verdict is `Rejected`, not `Verified`. `corpus/seed-literal-tab.bin` (added by this
+  PR, a structurally valid PKTC packet with a 7-byte literal-tab value) is what made
+  this fast and deterministic to demonstrate by hand; verified directly with a
+  standalone `pktcfg_replay` run before relying on the fuzzer to find it (a real ASan
+  `heap-buffer-overflow` at `decode.c:161`, independent of any fuzzing at all).
+
+**Tests.** `orchestrator/tests/test_renewed_fuzz_gate.py` (12 cases, mocked
+`campaign_runner`, no Docker needed — PASS/FAIL/NOT_RUN for every branch, the "runs
+even when regression already failed" disclosure property, and the standing
+provenance-blindness checks) and `orchestrator/tests/test_renewed_fuzz_config_wiring.py`
+(5 cases, real Django DB, mission-policy wiring) run in every default `pytest` pass.
+`orchestrator/tests/test_renewed_fuzz_gate_real_e2e.py` (2 cases, opt-in via
+`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1`, mirrors the two pre-existing opt-in real-Docker
+test files' own gating exactly) is the real proof above — both passed, real output
+captured in this PR's handoff. Full backend suite: 762 passed, 22 skipped (toolchain-
+or opt-in-gated), 1 pre-existing unrelated failure deselected (`test_patch_generate_
+executor.py`'s model-gateway sidecar test, confirmed failing identically on a clean
+`origin/main` checkout before this branch's changes — not caused by this work).
+Command Center: `npm run check` and `tsc --noEmit` both green.
+
+**Security implications.** No new attack surface beyond what `FUZZ`'s existing
+`ContainerJail` isolation (D-024) already carries — `run_libfuzzer_campaign` is the
+identical, already-reviewed function, and this PR does not touch
+`packages/sandbox/container.py`. The one new input this gate adds — a
+`SANDBOX_FUZZ_IMAGE`-pinned campaign now also runs during `VERIFY`, not only
+`STRESS_TEST` — runs against source that already passed `VERIFY`'s own `git apply`/
+compile step inside the pre-existing `Jail`, so it is not a new code-execution trust
+boundary, only a second, later place the same trust boundary is exercised. Routed to
+`cybersecurity` for review before merge per `CLAUDE.md`'s standing rule ("verification
+gates" are named explicitly).
+
+**Scalability implications.** Bounded by design: `renewed_fuzz_seconds` defaults to
+120s (vs. `fuzz_seconds`' 1800s), and is a per-mission `MissionPolicy` field an
+operator can lower to `0` (disabling the campaign, gate discloses `NOT_RUN`) if VERIFY
+throughput becomes a concern. Runs once per policy-accepted candidate (same fan-out
+`VERIFY` already has), not once per mission.
+
+**Cost implications.** None beyond CPU/wall-clock already budgeted for `FUZZ` — reuses
+the same pinned image, same container isolation, same host. No new external
+dependency, no new paid service.
+
+**Recommendation.** Merge once `cybersecurity` clears the review below.
+
+**Final approval authority** — CTO for the technical call (already satisfied by D-144
+superseding D-086's confirmation gate, per this record's own context section); normal
+per-PR `cybersecurity` review still required before merge, per `CLAUDE.md`.

@@ -70,6 +70,19 @@ class MissionPolicy(StrictSchema):
     sandbox: SandboxPolicy = Field(default_factory=SandboxPolicy)
     patch: PatchPolicy = Field(default_factory=PatchPolicy)
     fuzz_seconds: int = Field(default=1800, ge=0, le=43200)
+    renewed_fuzz_seconds: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        description="Budget for VERIFY's RENEWED_FUZZING gate (#40): a bounded, "
+        "targeted re-check against the patched build, deliberately much smaller than "
+        "fuzz_seconds' open-ended discovery budget. 0 disables the campaign for this "
+        "mission (the gate still runs and is disclosed, as NOT_RUN with a reason — "
+        "see orchestrator/verification.py — never silently omitted). Added by "
+        "#40/D-144 — not present in the original architecture spec's MissionPolicy "
+        "listing, documented here as the addition it is (backend-developer's "
+        "minor-contract-detail authority per its own role brief).",
+    )
     reproducer_replay_attempts: int = Field(
         default=5,
         ge=1,

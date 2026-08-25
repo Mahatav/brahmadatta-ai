@@ -1257,6 +1257,12 @@ export interface components {
              */
             patch_generation_attempts: number;
             /**
+             * Renewed Fuzz Seconds
+             * @description Budget for VERIFY's RENEWED_FUZZING gate (#40): a bounded, targeted re-check against the patched build, deliberately much smaller than fuzz_seconds' open-ended discovery budget. 0 disables the campaign for this mission (the gate still runs and is disclosed, as NOT_RUN with a reason — see orchestrator/verification.py — never silently omitted). Added by #40/D-144 — not present in the original architecture spec's MissionPolicy listing, documented here as the addition it is (backend-developer's minor-contract-detail authority per its own role brief).
+             * @default 120
+             */
+            renewed_fuzz_seconds: number;
+            /**
              * Reproducer Replay Attempts
              * @description How many times a minimized input must replay from a clean build before `reproducible` is set.
              * @default 5

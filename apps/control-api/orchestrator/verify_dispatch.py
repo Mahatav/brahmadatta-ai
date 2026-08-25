@@ -105,6 +105,7 @@ from django.utils import timezone
 from authorization.store import path_for as artifact_path_for
 from contracts.enums import ErrorCode, MissionState, PatchPolicyStatus
 from contracts.errors import ContractError
+from contracts.schemas.missions import MissionPolicy
 from contracts.verdict import GateMatrix
 from missions.models import (
     BaselineReport,
@@ -122,7 +123,17 @@ from orchestrator.executors import (
     register_executor,
     register_transition_policy,
 )
-from orchestrator.verification import VerificationBaseline, run_verification
+from orchestrator.verification import RenewedFuzzConfig, VerificationBaseline, run_verification
+from packages.sandbox.container import ContainerJailPolicy
+
+#: Wall-clock buffer on top of the renewed-fuzz budget for configure, build, and the
+#: campaign's own graceful exit — the same fixed value and reasoning
+#: `workers/fuzzing/dispatch.py`'s `_CONTAINER_WALL_CLOCK_BUFFER_SECONDS` uses for the
+#: original discovery campaign's `ContainerJailPolicy.wall_clock_seconds`. Kept as its
+#: own constant here rather than importing that one: it is deliberately not coupled to
+#: `JobKind.FUZZ`'s dispatch module, and #40's own budget is a different, smaller
+#: number (`MissionPolicy.renewed_fuzz_seconds`, not `fuzz_seconds`).
+_RENEWED_FUZZ_WALL_CLOCK_BUFFER_SECONDS = 180.0
 
 #: Sentinel path handed to `run_verification` when no reproducer artifact can be
 #: resolved for this candidate's finding. `run_verification`'s own reproducer gate
@@ -209,6 +220,7 @@ def _verify_executor(ctx: ExecutorContext) -> ExecutorResult:
 
     reproducer_path = _resolve_reproducer_path(ctx, patch)
     baseline = _baseline_for(mission)
+    renewed_fuzz = _renewed_fuzz_config_for(mission)
 
     started_at = timezone.now()
     try:
@@ -217,6 +229,7 @@ def _verify_executor(ctx: ExecutorContext) -> ExecutorResult:
             patch.diff,
             reproducer_path,
             baseline,
+            renewed_fuzz=renewed_fuzz,
         )
     except Exception as exc:  # noqa: BLE001 - an infra fault, never a verdict
         return ExecutorResult(
@@ -296,6 +309,47 @@ def _baseline_for(mission: Mission) -> VerificationBaseline:
     if report is None or not report.tests_total:
         return VerificationBaseline()
     return VerificationBaseline(expected_regression_tests=report.tests_total)
+
+
+def _renewed_fuzz_config_for(mission: Mission) -> RenewedFuzzConfig:
+    """#40 — build the `RENEWED_FUZZING` gate's config from this mission's own policy.
+
+    Mirrors `workers/fuzzing/dispatch.py::_container_policy`'s image/runtime/cpu/memory
+    sizing exactly (same `SANDBOX_FUZZ_IMAGE` setting, same `MissionPolicy.sandbox`
+    fields) rather than importing that private helper — `VERIFY` and `FUZZ` are
+    different executors with different lifecycles and this keeps the coupling to "same
+    reasoning, independently applied" instead of a cross-module private import. Two
+    honest "not configured" outcomes, both routed to `container_policy=None` so
+    `_run_renewed_fuzz` discloses `NOT_RUN` rather than raising:
+
+    * `SANDBOX_FUZZ_IMAGE` unset — no deployment-pinned image to fuzz with.
+    * `MissionPolicy.renewed_fuzz_seconds == 0` — the mission explicitly asked for no
+      renewed-fuzz budget.
+    """
+    mission_policy = _mission_policy(mission)
+    budget_seconds = mission_policy.renewed_fuzz_seconds
+    image = getattr(settings, "SANDBOX_FUZZ_IMAGE", "") or ""
+    if not image or budget_seconds <= 0:
+        return RenewedFuzzConfig(container_policy=None, budget_seconds=budget_seconds)
+
+    sandbox = mission_policy.sandbox
+    runtime = sandbox.runtime if sandbox.runtime in ("docker", "podman") else "docker"
+    container_policy = ContainerJailPolicy(
+        image=image,
+        runtime=runtime,
+        cpu_limit=float(sandbox.cpu_limit),
+        memory_mb=sandbox.memory_mb,
+        wall_clock_seconds=float(budget_seconds) + _RENEWED_FUZZ_WALL_CLOCK_BUFFER_SECONDS,
+    )
+    return RenewedFuzzConfig(
+        container_policy=container_policy,
+        budget_seconds=budget_seconds,
+        mission_ref=f"renewed-fuzz-{mission.id}",
+    )
+
+
+def _mission_policy(mission: Mission) -> MissionPolicy:
+    return MissionPolicy.model_validate(mission.policy or {})
 
 
 def _write_gate_matrix_artifact(ctx: ExecutorContext, patch_id, gates: GateMatrix) -> str:
