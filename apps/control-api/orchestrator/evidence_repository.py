@@ -151,6 +151,7 @@ def _finding_summary(row: Finding) -> FindingSummary:
             "function": row.function,
         },
         fingerprint=row.fingerprint,
+        crash_count=row.crash_count,
         reproducible=row.reproducible,
         detected_at=row.detected_at,
         title=row.title,

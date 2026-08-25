@@ -32,6 +32,25 @@ not produce a second `Finding` row for the same underlying crash on retry, and a
 `FUZZ` job's own `MAX_ATTEMPTS_BY_KIND` of 2 means a second attempt genuinely can
 rediscover the same defect.
 
+## Cluster counts (#30)
+
+A rediscovery of an existing `(mission, fingerprint)` pair is not a pure no-op: it is
+real evidence that the same root cause crashed again, so `Finding.crash_count`
+increments by one every time this function is called for a fingerprint that already
+has a row -- whether the pre-check below finds it, or the `IntegrityError` race
+fallback does. This is the "so a hundred crashes on one root cause read as one
+finding" half of #30's acceptance criteria: `fingerprint` (see `workers.fuzzing.
+dispatch._fingerprint`, derived from the sanitizer's stack signature) is the
+dedup key that decides *whether* two crashes cluster, and `crash_count` is the number
+that says *how many* raw crashes clustered into this row. No new `MissionEvent` is
+emitted on a rediscovery -- `FINDING_RECORDED` still fires exactly once per
+fingerprint (existing callers, e.g. `orchestrator/tests/test_findings.py::
+test_record_finding_dedupes_by_mission_and_fingerprint`, assert exactly that), and
+nothing downstream currently consumes a per-crash event stream; the count is
+readable through the normal read path (`FindingSummary.crash_count`,
+`evidence_repository._finding_summary`) instead of a new event type. Revisit if a UI
+panel needs to animate a cluster growing live rather than reading it on refresh.
+
 SEC-42 (#176) / D-083 §4 / D-086: `Finding` now carries a real database constraint on
 `(mission, fingerprint)` (`finding_mission_fingerprint_unique`, `missions/models.py`,
 replacing the old non-unique `finding_fp_idx`), matching `BaselineReport`'s
@@ -78,6 +97,7 @@ from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 
 from contracts.enums import (
@@ -93,6 +113,20 @@ from missions.models import Finding, Mission, Reproducer
 from orchestrator import events
 
 __all__ = ["record_finding", "record_reproducer"]
+
+
+def _bump_crash_count(finding: Finding) -> Finding:
+    """Record one more raw crash occurrence clustered into `finding` (#30).
+
+    Called under the mission row lock `record_finding` already holds (both call
+    sites), so a plain `F("crash_count") + 1` update is race-free for the normal
+    case; it is still used (rather than a Python `+= 1`) because it also protects the
+    `IntegrityError` fallback, which reads `finding` from a fresh query rather than
+    from a row this transaction already holds a lock on.
+    """
+    Finding.objects.filter(pk=finding.pk).update(crash_count=F("crash_count") + 1)
+    finding.refresh_from_db(fields=["crash_count"])
+    return finding
 
 
 def record_finding(
@@ -133,7 +167,7 @@ def record_finding(
 
         existing = Finding.objects.filter(mission=mission, fingerprint=fingerprint).first()
         if existing is not None:
-            return existing
+            return _bump_crash_count(existing)
 
         schema = FindingSummary(
             id=uuid.uuid4(),
@@ -178,8 +212,11 @@ def record_finding(
             # module's docstring, "Idempotency"). Report *their* row, not ours, and
             # emit no event — the winning call already emitted one. The savepoint
             # above has already been rolled back by the time we get here, so this
-            # query runs against a clean transaction state.
-            return Finding.objects.get(mission=mission, fingerprint=fingerprint)
+            # query runs against a clean transaction state. This call is itself real
+            # evidence of a rediscovered crash, so it still counts toward the cluster
+            # (#30) even though it lost the race to create the row.
+            winner = Finding.objects.get(mission=mission, fingerprint=fingerprint)
+            return _bump_crash_count(winner)
 
         events.emit(
             mission,

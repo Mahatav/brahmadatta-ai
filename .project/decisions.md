@@ -15967,3 +15967,127 @@ fixture content). Orchestrator wiring is an explicit open question for
 **Final approval authority** — CTO (technical; work already authorized by D-144, issue #24
 named explicitly in scope). `cybersecurity` review required before merge per this record's
 own security-implications section; PR not self-merged.
+## D-150 · #30 Crash deduplication and clustering: confirmed the dedup key already
+existed and strengthened it to a real stack signature; added the cluster count that
+did not exist · 2026-08-24 · `backend-developer` seat
+
+Built under D-144's blanket CUT-reopen authorization (`#30` is named explicitly in its
+scope list) — no per-issue ruling needed to begin, per D-144's own text. Worked in an
+isolated worktree (`/tmp/build-30-crash-dedup`, branch `feat/30-crash-dedup-
+clustering`), fetched `origin/main` directly rather than reading the shared primary
+checkout, and rebased onto `origin/main` (through D-148) immediately before this entry
+— the two process fixes D-147 named explicitly for future dispatches on this issue set.
+
+**What already existed, confirmed by reading the code before writing any (D-098/D-105-
+shaped discipline: verify, don't assume).** `Finding.fingerprint` (`missions/models.py`)
+has been a real dedup key since #168/T2, enforced by both `orchestrator.findings.
+record_finding` (locks the mission row, checks for an existing `(mission,
+fingerprint)` row before writing) and, since SEC-42/D-083 §4, a database-level
+`UniqueConstraint`. A crash that rediscovers an existing fingerprint already produces
+zero new `Finding` rows — "a hundred crashes on one root cause read as one finding"
+was already true before this issue, for a single-frame notion of "root cause". No new
+dedup mechanism was built; building one from scratch would have duplicated this.
+
+**What #30 actually added.**
+
+1. **A real stack signature, not a single frame.** `workers.fuzzing.dispatch.
+   _fingerprint` previously hashed only the sanitizer's crash-site frame (`tool`,
+   `kind`, `function`, `file`, `line` from the `SUMMARY:` line). `_stack_signature`
+   now folds in up to 5 calling-frame function names from `SanitizerFinding.stack`
+   (already parsed by `adapters.cpp.sanitizer.parse_sanitizer_output`, previously
+   unused past the crash-site frame) — function names only, not file/line, for the
+   frames beyond the crash site, because a caller's line number tracks *which*
+   mutated input reached the bug, not a different root cause (verified directly
+   against pktcfg's own seeded defect: `emit_tab` is called from two different
+   lines inside `pkt_decode_into`, both the same bug). Backward-compatible in
+   effect: existing stored fingerprints are untouched (nothing recomputes a
+   fingerprint after the fact), and the change only affects freshly discovered
+   crashes going forward.
+2. **`Finding.crash_count`** (new column, `PositiveIntegerField`, default 1;
+   migration `0005_finding_crash_count.py`, additive-only, `makemigrations --check`
+   confirms no drift). `record_finding` increments it — via `F("crash_count") + 1`,
+   race-free under the mission row lock the function already holds — on both paths
+   that rediscover an existing fingerprint: the ordinary pre-check, and the rare
+   `IntegrityError` race fallback (previously silently reported the winner's row
+   with no record that a second real crash had occurred). Exposed read-side via
+   `FindingSummary.crash_count` (`contracts/schemas/evidence.py`,
+   `orchestrator/evidence_repository.py::_finding_summary`), documented in
+   `docs/03-technical/21-api-specification.md` per this seat's standing instruction
+   to keep additions to the contract synced back into that document. No new
+   `MissionEvent` type: `FINDING_RECORDED` still fires exactly once per fingerprint
+   (an existing, asserted invariant — `test_record_finding_dedupes_by_mission_and_
+   fingerprint`), and nothing downstream currently consumes a per-crash event
+   stream; revisit if a UI panel needs to animate a cluster growing live.
+
+**Options considered for surfacing the count.** (a) A new `MissionEvent` type per
+rediscovered crash — rejected for now: no consumer exists, and it would be new
+API-contract surface (touching `EventType`, the SSE payload union, the generated
+TypeScript client) for a UI feature nobody has asked to build yet; cheaper to add
+later than to remove. (b) A separate `CrashOccurrence` table recording every raw
+crash individually, with `crash_count` as a derived `COUNT(*)` — rejected: more
+correct in the abstract (an audit trail of every occurrence, not just a running
+total), but a real schema/migration decision belonging to `database-engineer`, and
+nothing in #30's acceptance criteria asks for per-occurrence audit detail, only a
+count. (c) The counter column on `Finding` itself, chosen — cheapest correct
+answer to the stated acceptance criteria, no new table, no new event type, race-free
+under the lock the write path already takes.
+
+**Left deliberately out of scope, documented in the code and here so it is not
+mistaken for an oversight.** `workers/replay/run.py` has its own, independent
+`_fingerprint` (prefix `"replayed:"` vs. `"fuzz:"`) for `REPLAYED_REPRODUCER`
+findings, untouched by this change. The same crash discovered live by a campaign and
+discovered by replaying a stored reproducer still produces two `Finding` rows, one
+per `discovery_method` — intentional and pre-existing (a replayed finding makes a
+structurally weaker claim than a live one, per `FindingSummary`'s own fallback-
+provenance rules), not something #30's "crashes within one discovery method read as
+one finding" asks to change.
+
+**Real multi-crash test, not mocked.** `apps/control-api/orchestrator/tests/
+test_crash_clustering_real.py` (new, `@pytest.mark.slow`) builds pktcfg's real
+ASan/UBSan-instrumented `pktcfg_replay` binary via the same `adapters.cpp.pipeline.
+run_variant` + `packages.sandbox.Jail` pair `workers/replay/run.py` uses in
+production, and replays five genuinely distinct, real crash-triggering byte
+sequences (crafted PKTC packets, verified directly to each fault inside `emit_tab`
+rather than a few bytes later in a different function — a real, load-bearing nuance
+of this exact seeded bug, documented in the test's own module docstring) through it —
+asserts they cluster into one `Finding` with `crash_count == 5`. A sixth, genuinely
+distinct crash (a real `-fsanitize=undefined` signed-overflow probe, compiled and run
+fresh by the test — `demo/repositories/pktcfg` is a controlled fixture with exactly
+one seeded defect, confirmed by reading `src/decode.c`/`parse.c`/`config.c` directly,
+so there is no second real memory-safety bug in it to crash with, and adding one would
+mean mutating a shared demo fixture #5's seeded git history depends on) gets its own
+row with `crash_count == 1`. No sanitizer report in this test is hand-written; every
+one comes from a real subprocess.
+
+**Test results (this session, this worktree).**
+- `apps/control-api`: full suite, `python -m pytest -q` (one pre-existing, unrelated
+  failure deselected — `test_live_backend_built_by_this_module_gets_401_from_the_
+  sidecar_without_the_fix` needs a live `model-host` this worktree does not run) —
+  every other test green, including the new/extended crash-count tests in
+  `orchestrator/tests/test_findings.py`, `test_finding_unique_constraint_race.py`,
+  and the real multi-crash run in `test_crash_clustering_real.py`.
+- `adapters/cpp/tests workers/fuzzing/tests workers/replay/tests tests/architecture`:
+  167 passed, 3 skipped, 1 xfailed (pre-existing skip/xfail markers, unrelated).
+- `contracts/tests/test_openapi_dump.py`: green after regenerating
+  `packages/schemas/openapi.json` (`tools/export_openapi.py`) for the new
+  `FindingSummary.crash_count` field.
+- `ruff`/`mypy` on every touched file: no new findings beyond what already existed
+  on `origin/main` before this change (verified directly, file by file, not assumed).
+
+**Security implications.** None. No new input boundary: `crash_count` is server-
+computed only (never accepted from a request body), and the increment path is the
+same mission-row-locked write path `record_finding` already had. Reviewed by
+`cybersecurity` before merge per standing policy for the fuzzing/findings pipeline.
+
+**Scalability implications.** None material. One additional integer column; the
+increment is a single indexed `UPDATE ... WHERE id = ?` inside a transaction the
+write path already opens, not a new query pattern.
+
+**Cost implications.** None — no new infrastructure, no new service.
+
+**Recommendation.** Merge once `cybersecurity`/`qa-engineer` review has cleared, per
+D-086's standing instruction for this pipeline. No further per-issue ruling needed.
+
+**Final approval authority** — CTO for the technical call (dedup-key material, schema
+addition); already authorized to build per D-144 (CEO). This record is the
+implementation report for review, not a request for new authorization.
