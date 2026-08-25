@@ -30,6 +30,21 @@ turned into `passed=False` with the failure detail attached — never re-raised 
 function, and never silently reported as a pass. This is the direct implementation of
 #17's second acceptance criterion and the role file's rule 2: *"A baseline that was never
 green is a finding, not a blocker to hide."*
+
+## Compiler diagnostics (#23, D-144)
+
+`BaselineOutcome.compiler_diagnostics` is `adapters.cpp.compiler_diagnostics.
+parse_compiler_diagnostics` run against the SAME `cmake --build` invocation's captured
+stdout/stderr this stage already runs for the D3 gate — never a second build just to see
+warnings. Populated whenever the build step itself completed (every case except a
+DETECT/PROBE_TOOLCHAIN/CONFIGURE failure, where no compiler ever ran), along with the
+compiler identity `read_compiler_identity` already recorded for that same build
+(`compiler_id`/`compiler_version`, reused from `build_result.toolchain`, not re-probed).
+Turning these into `Finding`/`StageToolRun` rows — including the cross-tool dedup #23's
+own acceptance criterion asks for — is `workers/baseline/dispatch.py`'s job, the same
+Django-aware boundary that already turns `BaselineOutcome` into a `BaselineReport` row;
+this module stays framework-free (see the compiler-toolchain-engineer role file and the
+D-026 boundary this package's other modules already document).
 """
 
 from __future__ import annotations
@@ -41,6 +56,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from adapters.cpp.compiler_diagnostics import CompilerDiagnostic, parse_compiler_diagnostics
 from adapters.cpp.detect import BuildSystem, detect
 from adapters.cpp.errors import AdapterError, BuildStep, StepFailure, ToolchainError
 from adapters.cpp.pipeline import BuildResult, run_variant
@@ -100,6 +116,16 @@ class BaselineOutcome:
     `passed` is a computed property, not a stored field — same rule as the contract
     schema, so the outcome cannot be constructed with a `passed=True` that disagrees with
     its own counts.
+
+    `compiler_diagnostics`/`compiler_id`/`compiler_version` (#23): structurally parsed
+    out of the SAME build invocation this stage already runs for the D3 gate — no
+    second build. Populated whenever the build step itself completed (`build_result is
+    not None` in `run_baseline_stage`, i.e. every case except DETECT/PROBE_TOOLCHAIN/
+    CONFIGURE/BUILD failing outright), which is the compiler-version-and-diagnostics
+    identity `read_compiler_identity` (`adapters/cpp/toolchain.py`) already recorded as
+    part of `build_result.toolchain` — reused here, not re-probed. `compiler_id`/
+    `compiler_version` are `"unknown"` only in the one case where the build step itself
+    never ran (a `DETECT`/`PROBE_TOOLCHAIN`/`CONFIGURE` failure) — never fabricated.
     """
 
     mission_id: str
@@ -116,6 +142,9 @@ class BaselineOutcome:
     isolation_unprotected_against: tuple[str, ...] = field(default=ISOLATION_UNPROTECTED_AGAINST)
     failure: BaselineFailureDetail | None = None
     log_ref: str | None = None
+    compiler_diagnostics: tuple[CompilerDiagnostic, ...] = ()
+    compiler_id: str = "unknown"
+    compiler_version: str = "unknown"
 
     @property
     def passed(self) -> bool:
@@ -142,6 +171,9 @@ class BaselineOutcome:
             "isolation_mode": self.isolation_mode,
             "isolation_unprotected_against": list(self.isolation_unprotected_against),
             "failure": self.failure.as_dict() if self.failure else None,
+            "compiler_diagnostics": [d.as_dict() for d in self.compiler_diagnostics],
+            "compiler_id": self.compiler_id,
+            "compiler_version": self.compiler_version,
         }
 
 
@@ -210,11 +242,27 @@ def run_baseline_stage(
     failure: BaselineFailureDetail | None = None
     adapter_name = "UNKNOWN"
     log_ref: str | None = None
+    compiler_diagnostics: tuple[CompilerDiagnostic, ...] = ()
+    compiler_id = "unknown"
+    compiler_version = "unknown"
 
     with Jail.create(jail_policy, parent=workspace) as jail:
         try:
             build_result = run_variant(source, jail, Variant.BASELINE)
             adapter_name = build_result.detected.build_system.value
+            # #23: structurally parse the compiler diagnostics out of the SAME
+            # `cmake --build` invocation the D3 gate already ran — while the jail is
+            # still open, since `build_result.build.stdout`/`.stderr` (a `JailResult`)
+            # do not survive past the `with` block any more than `build_dir` does (see
+            # this module's own docstring and `adapters/cpp/pipeline.py`'s). Reuses the
+            # compiler identity `run_variant` already read out of the CMake-generated
+            # build tree (`read_compiler_identity`, `adapters/cpp/toolchain.py`) rather
+            # than probing the compiler a second time.
+            compiler_diagnostics = parse_compiler_diagnostics(
+                build_result.build.stdout + "\n" + build_result.build.stderr
+            )
+            compiler_id = build_result.toolchain.compiler_id
+            compiler_version = build_result.toolchain.compiler_version
             # Copy the one artifact worth keeping out of the jail before it tears down.
             # Everything else in BaselineOutcome is already-extracted data
             # (CTestSummary's counts), not a path into the jail.
@@ -224,6 +272,15 @@ def run_baseline_stage(
         except StepFailure as exc:
             failure = _failure_from_step_failure(exc)
             adapter_name = _adapter_name_or_unknown(source)
+            # A BUILD-step failure still carries whatever the compiler printed before
+            # the fatal error, but only the truncated tail `StepFailure.detail` kept
+            # (`adapters/cpp/pipeline.py`'s own `stderr[-2000:]`) — the full transcript
+            # does not survive past this jail closing. Parsed on a best-effort basis;
+            # `compiler_id`/`compiler_version` stay "unknown" here (`read_
+            # compiler_identity` never ran — `run_variant` raises before reaching it on
+            # a BUILD failure), an honest gap rather than a fabricated identity.
+            if exc.step is BuildStep.BUILD:
+                compiler_diagnostics = parse_compiler_diagnostics(failure.detail)
         except (ToolchainError, AdapterError) as exc:
             step = (
                 BuildStep.PROBE_TOOLCHAIN if isinstance(exc, ToolchainError) else BuildStep.DETECT
@@ -246,6 +303,9 @@ def run_baseline_stage(
             recorded_at=recorded_at,
             snapshot=snapshot,
             log_ref=log_ref,
+            compiler_diagnostics=compiler_diagnostics,
+            compiler_id=compiler_id,
+            compiler_version=compiler_version,
         )
 
     # Configure, build, or toolchain probing did not complete. Recorded as a red baseline
@@ -271,6 +331,9 @@ def run_baseline_stage(
         adapter=adapter_name,
         recorded_at=recorded_at,
         snapshot=snapshot,
+        compiler_diagnostics=compiler_diagnostics,
+        compiler_id=compiler_id,
+        compiler_version=compiler_version,
         log_ref=None,  # no durable artifact for a configure/build failure — see `failure.detail`
         failure=failure,
     )

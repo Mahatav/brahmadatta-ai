@@ -242,11 +242,24 @@ class DiscoveryMethod(StrEnum):
     fuzzer discovered it". The other two are honest and weaker: the seven-day plan
     already names direct harnessing as the *starting* position rather than the
     fallback, and #83 adds reproducer replay under that.
+
+    `STATIC_ANALYSIS` (#23, D-144) is a fourth, independent claim: a finding surfaced
+    by reading source text (or, for #23 specifically, a compiler's own diagnostic
+    output from a real build) with no execution and no crash involved — never
+    conflated with `FUZZING_CAMPAIGN`, which specifically claims a dynamic run found
+    it. Named and valued identically to what #22 (Semgrep integration, CUT-milestone,
+    also authorized by D-144) independently adds for the same reason, on its own
+    not-yet-merged branch as of this writing — see `workers/baseline/dispatch.py`'s
+    module docstring for the coordination note on that overlap. If #22 lands first,
+    this becomes a trivial duplicate-member merge conflict to resolve by keeping one
+    copy; the string value either author picked is identical, so no downstream data is
+    at risk either way.
     """
 
     FUZZING_CAMPAIGN = "FUZZING_CAMPAIGN"
     DIRECT_HARNESS = "DIRECT_HARNESS"
     REPLAYED_REPRODUCER = "REPLAYED_REPRODUCER"
+    STATIC_ANALYSIS = "STATIC_ANALYSIS"
 
 
 class EvidenceSource(StrEnum):
