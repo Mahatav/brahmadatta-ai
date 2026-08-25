@@ -33,13 +33,14 @@
         "type": "object"
       },
       "AnalyzerTool": {
-        "description": "Tools that may produce a finding. Semgrep is CUT for the seven-day build\n(P1-2) and is absent deliberately — adding it back is a scope decision.",
+        "description": "Tools that may produce a finding.\n\n`SEMGREP` was CUT for the seven-day build (P1-2, #22) and absent deliberately —\nD-144 (.project/decisions.md, 2026-08-24) reopened the full `CUT` milestone by\ndirect CEO/user ruling, naming #22 explicitly. `workers.static_analysis.dispatch`\nis the real, registered `JobKind.ANALYZE` executor that produces findings tagged\nwith this member; see that module's docstring.",
         "enum": [
           "COMPILER_DIAGNOSTIC",
           "ADDRESS_SANITIZER",
           "UNDEFINED_BEHAVIOUR_SANITIZER",
           "LIBFUZZER",
-          "CTEST"
+          "CTEST",
+          "SEMGREP"
         ],
         "title": "AnalyzerTool",
         "type": "string"
@@ -412,7 +413,7 @@
         "type": "object"
       },
       "DiscoveryMethod": {
-        "description": "How a finding came to exist. Required on every finding; no default.\n\n`FUZZING_CAMPAIGN` is the strongest claim and the only one that supports \"our\nfuzzer discovered it\". The other two are honest and weaker: the seven-day plan\nalready names direct harnessing as the *starting* position rather than the\nfallback, and #83 adds reproducer replay under that.\n\n`STATIC_ANALYSIS` (#23, D-144) is a fourth, independent claim: a finding surfaced\nby reading source text (or, for #23 specifically, a compiler's own diagnostic\noutput from a real build) with no execution and no crash involved — never\nconflated with `FUZZING_CAMPAIGN`, which specifically claims a dynamic run found\nit. Named and valued identically to what #22 (Semgrep integration, CUT-milestone,\nalso authorized by D-144) independently adds for the same reason, on its own\nnot-yet-merged branch as of this writing — see `workers/baseline/dispatch.py`'s\nmodule docstring for the coordination note on that overlap. If #22 lands first,\nthis becomes a trivial duplicate-member merge conflict to resolve by keeping one\ncopy; the string value either author picked is identical, so no downstream data is\nat risk either way.",
+        "description": "How a finding came to exist. Required on every finding; no default.\n\n`FUZZING_CAMPAIGN` is the strongest claim and the only one that supports \"our\nfuzzer discovered it\". The other two are honest and weaker: the seven-day plan\nalready names direct harnessing as the *starting* position rather than the\nfallback, and #83 adds reproducer replay under that.\n\n`STATIC_ANALYSIS` (#22 and #23, both D-144) is a fourth, independent claim: a\nfinding surfaced by reading source text — either a static analyzer\n(`AnalyzerTool.SEMGREP`, #22) or a compiler's own diagnostic output from a real\nbuild (`AnalyzerTool.COMPILER_DIAGNOSTIC`, #23) — with no execution and no crash\ninvolved, never conflated with `FUZZING_CAMPAIGN`, which specifically claims a\ndynamic run found it. #22 and #23 independently added this exact member (same\nname, same string value) while working concurrently on separate branches; #23\nmerged first (D-153), #22 merges into an already-existing member here rather than\nadding a second one — no downstream data was ever at risk, since both authors\npicked the identical value.",
         "enum": [
           "FUZZING_CAMPAIGN",
           "DIRECT_HARNESS",

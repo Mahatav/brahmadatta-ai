@@ -154,6 +154,8 @@ def test_kinds_none_preserves_the_pre_d073_behavior_of_claiming_across_every_kin
 def test_default_worker_kinds_excludes_fuzz_and_minimize():
     assert JobKind.FUZZ not in queue.DEFAULT_WORKER_KINDS
     assert JobKind.MINIMIZE not in queue.DEFAULT_WORKER_KINDS
+    # #22, D-144: ANALYZE opens a ContainerJail too (Semgrep) — same D-036 reasoning.
+    assert JobKind.ANALYZE not in queue.DEFAULT_WORKER_KINDS
 
 
 def test_default_worker_kinds_is_every_other_kind_with_nothing_forgotten():
@@ -165,5 +167,10 @@ def test_default_worker_kinds_is_every_other_kind_with_nothing_forgotten():
     assert queue.DEFAULT_WORKER_KINDS & queue.FUZZ_ONLY_KINDS == frozenset()
 
 
-def test_fuzz_only_kinds_is_exactly_fuzz_and_minimize():
-    assert queue.FUZZ_ONLY_KINDS == frozenset({JobKind.FUZZ, JobKind.MINIMIZE})
+def test_fuzz_only_kinds_is_exactly_fuzz_minimize_and_analyze():
+    """#22, D-144: `JobKind.ANALYZE` opens a `ContainerJail` exactly like `FUZZ`/
+    `MINIMIZE` do (`workers.static_analysis.dispatch`, Semgrep in `--network none`) —
+    added to the container-runtime-only set. See `orchestrator/queue.py`'s own
+    docstring on `FUZZ_ONLY_KINDS` for why the name is kept despite now being
+    imprecise."""
+    assert queue.FUZZ_ONLY_KINDS == frozenset({JobKind.FUZZ, JobKind.MINIMIZE, JobKind.ANALYZE})

@@ -49,18 +49,22 @@ commands.run_worker` for the CLI half.
    exactly where it is for the next tick to retry — never raised into the caller,
    since one mission's stale authorization must not stop every other mission's tick
    from running.
-5. `advance_through_triage` — `TRIAGE` has no `JobKind` (architecture spec §2.5: a
-   near-stub, "must emit `STAGE_STARTED`, then a `LOG` event ... then
-   `STAGE_COMPLETED`", "must not fabricate a finding count"). Nothing about that
-   requires a sandboxed worker, so T0 drives it directly rather than leaving a mission
-   stuck in `TRIAGE` — the exact shape of bug #168 itself, one stage later. Flagged
-   for T3 (owns `CORRELATE`, and per D-062's task breakdown is adjacent to this) to
-   review and replace if a different design is wanted; nothing about the frozen
-   transition table changes either way (`TRIAGE -> STRESS_TEST` is already legal).
-6. `ensure_jobs_enqueued` — for every mission now sitting in a job-backed state with
+5. `ensure_jobs_enqueued` — for every mission now sitting in a job-backed state with
    no `Job` row yet for that state's kind, enqueue one.
 
-Steps 3–6 each iterate every non-terminal mission and are independently idempotent —
+`TRIAGE` (#22, D-144): used to have no `JobKind` at all — architecture spec §2.5
+described it as a near-stub, "must emit `STAGE_STARTED`, then a `LOG` event ... then
+`STAGE_COMPLETED`", "must not fabricate a finding count" — driven directly by a T0
+function (`advance_through_triage`) rather than through the job queue, because
+Semgrep was `CUT` (P1-2, #22) and nothing else needed a sandboxed worker for this
+stage. D-144 reopened #22; `TRIAGE` is now job-backed like every other stage
+(`JOB_BACKED_STATES[MissionState.TRIAGE] == JobKind.ANALYZE`,
+`workers.static_analysis.dispatch` real executor + transition policy) and
+`advance_through_triage`/`_emit_triage_stub_events` are removed — nothing about the
+frozen transition table changed (`TRIAGE -> STRESS_TEST` was already legal, see
+`contracts/state_machine.py`), only how `TRIAGE` is reached.
+
+Steps 3–5 each iterate every non-terminal mission and are independently idempotent —
 a crash between any two steps, or between any two missions within one step, leaves
 nothing to undo on the next tick (architecture spec §3.3.2: "Every process is
 restartable with no loss").
@@ -76,7 +80,7 @@ from uuid import UUID
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from contracts.enums import EventStatus, EventType, MissionStage, MissionState, Severity
+from contracts.enums import EventType, MissionState, Severity
 from contracts.errors import ContractError
 from missions.models import Job, JobKind, JobState, MAX_ATTEMPTS_BY_KIND, Mission
 from orchestrator import events, transitions
@@ -91,7 +95,24 @@ logger = logging.getLogger("orchestrator.queue")
 #: only thing anywhere in this system given container-runtime access. This constant is
 #: the single source of truth for "which kinds can only run on fuzz-worker"; everything
 #: else in this module derives from it rather than restating the pair.
-FUZZ_ONLY_KINDS: frozenset[JobKind] = frozenset({JobKind.FUZZ, JobKind.MINIMIZE})
+#:
+#: `JobKind.ANALYZE` (#22, D-144) added here for the same reason `FUZZ`/`MINIMIZE`
+#: are: `workers.static_analysis.dispatch` opens a `ContainerJail` exactly like
+#: `workers.fuzzing.dispatch` does (D-024's `--network none` isolation for Semgrep
+#: reading target source, the same untrusted-input posture as the fuzz harness). The
+#: name `FUZZ_ONLY_KINDS` is now imprecise (this is really "container-runtime-only
+#: kinds") — kept rather than renamed in this change to avoid an unrelated rename
+#: across `infrastructure/scripts/run-fuzz-worker.sh`,
+#: `missions/management/commands/print_fuzz_kinds.py`, and the tests that pin this
+#: exact name (`test_fuzz_only_kinds_shell_drift.py`,
+#: `test_print_fuzz_kinds_command.py`); flagged as real naming debt for a follow-up,
+#: not silently perpetuated. `run-fuzz-worker.sh` needs no change: it derives its
+#: `--kinds` argument from this constant at invocation time (#203,
+#: `manage.py print_fuzz_kinds`), so `fuzz-worker` claims `ANALYZE` jobs automatically
+#: the moment this line lands.
+FUZZ_ONLY_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.FUZZ, JobKind.MINIMIZE, JobKind.ANALYZE}
+)
 
 #: The kind set a `worker` process claims when `--kinds` is not passed on `manage.py
 #: run_worker` (D-073 task 1). Computed as "every `JobKind` except the fuzz-only ones"
@@ -140,6 +161,7 @@ DEFAULT_WORKER_KINDS: frozenset[JobKind] = frozenset(JobKind) - FUZZ_ONLY_KINDS
 #: mission; verified safe under real, not just sequential, double-invocation).
 JOB_BACKED_STATES: dict[MissionState, JobKind] = {
     MissionState.BASELINE: JobKind.BASELINE,
+    MissionState.TRIAGE: JobKind.ANALYZE,
     MissionState.STRESS_TEST: JobKind.FUZZ,
     MissionState.CORRELATE: JobKind.CORRELATE,
     MissionState.PATCH: JobKind.PATCH_GENERATE,
@@ -631,7 +653,7 @@ def dispatch_terminal_jobs(*, trace_id: str = "orchestrator-tick", now=None) -> 
 
 
 # ------------------------------------------------------------------------------------
-# VALIDATING -> BASELINE, and the TRIAGE stub
+# VALIDATING -> BASELINE
 # ------------------------------------------------------------------------------------
 
 
@@ -662,60 +684,6 @@ def advance_out_of_validating(*, trace_id: str = "orchestrator-tick", now=None) 
     return advanced
 
 
-def advance_through_triage(*, trace_id: str = "orchestrator-tick", now=None) -> list[UUID]:
-    """`TRIAGE` has no `JobKind` (architecture spec §2.5). Emit the three events its
-    "hollow stage" contract requires, then transition straight to `STRESS_TEST`.
-
-    See this module's docstring for why T0 drives this directly rather than leaving
-    it for a future `JobKind`, and why that is flagged for T3's review rather than
-    treated as settled.
-    """
-    now = now or timezone.now()
-    advanced: list[UUID] = []
-    for mission_id in Mission.objects.filter(
-        state=str(MissionState.TRIAGE)
-    ).values_list("id", flat=True):
-        try:
-            _emit_triage_stub_events(mission_id, trace_id=trace_id, now=now)
-            transitions.transition(
-                mission_id,
-                MissionState.STRESS_TEST,
-                trace_id=trace_id,
-                reason="orchestrator: no static analyzers configured in this build",
-                now=now,
-            )
-            advanced.append(mission_id)
-        except ContractError:
-            continue
-    return advanced
-
-
-def _emit_triage_stub_events(mission_id: UUID, *, trace_id: str, now) -> None:
-    with transaction.atomic():
-        mission = Mission.objects.select_for_update().get(pk=mission_id)
-        for event_type, status, message in (
-            (EventType.STAGE_STARTED, EventStatus.RUNNING, "TRIAGE started"),
-            (
-                EventType.LOG,
-                EventStatus.RUNNING,
-                "No static analyzers configured in this build — see the gate matrix.",
-            ),
-            (EventType.STAGE_COMPLETED, EventStatus.SUCCEEDED, "TRIAGE completed"),
-        ):
-            events.emit(
-                mission,
-                event_type,
-                message,
-                {"kind": "triage_stub"},
-                trace_id=trace_id,
-                stage=MissionStage.ANALYZE,
-                state=MissionState.TRIAGE,
-                status=status,
-                severity=Severity.INFO,
-                timestamp=now,
-            )
-
-
 # ------------------------------------------------------------------------------------
 # The tick
 # ------------------------------------------------------------------------------------
@@ -732,7 +700,6 @@ def tick(*, trace_id: str = "orchestrator-tick", now=None) -> dict[str, list]:
         "reaped_deadlines": reap_missed_deadlines(now=now),
         "dispatched": dispatch_terminal_jobs(trace_id=trace_id, now=now),
         "advanced_from_validating": advance_out_of_validating(trace_id=trace_id, now=now),
-        "advanced_through_triage": advance_through_triage(trace_id=trace_id, now=now),
         "enqueued": ensure_jobs_enqueued(now=now),
     }
     return result

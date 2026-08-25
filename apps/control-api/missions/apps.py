@@ -31,3 +31,4 @@ class MissionsConfig(AppConfig):
         )
         from workers.baseline import dispatch  # noqa: F401
         from workers.fuzzing import dispatch as fuzzing_dispatch  # noqa: F401
+        from workers.static_analysis import dispatch as analyze_dispatch  # noqa: F401

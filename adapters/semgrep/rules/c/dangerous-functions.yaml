@@ -1,0 +1,127 @@
+rules:
+  - id: brahmadatta-c-dangerous-string-copy
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      Use of a C string function with no built-in bounds checking
+      (strcpy/strcat/gets/sprintf/vsprintf). A source or destination that is not
+      provably sized against every possible input is a classic stack/heap buffer
+      overflow (CWE-120, CWE-242). Prefer the bounded form (strncpy/strncat/
+      fgets/snprintf) and verify the size argument against the real destination
+      capacity, not a guess.
+    metadata:
+      cwe: CWE-120
+      owasp: A03:2021
+      category: security
+      confidence: HIGH
+      references:
+        - https://cwe.mitre.org/data/definitions/120.html
+      brahmadatta_category: OTHER
+      brahmadatta_severity: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: strcpy(...)
+          - pattern: strcat(...)
+          - pattern: gets(...)
+          - pattern: sprintf(...)
+          - pattern: vsprintf(...)
+
+  - id: brahmadatta-c-format-string-non-literal
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      printf-family call whose format-string argument is not a string literal.
+      If any part of that value can be influenced by parsed input, this is a
+      format-string vulnerability (CWE-134): an attacker-controlled `%n`/`%s`
+      can write to arbitrary memory or read past the end of the argument list.
+      Always pass a literal format string and put the variable in the argument
+      list instead (`printf("%s", value)`, never `printf(value)`).
+    metadata:
+      cwe: CWE-134
+      owasp: A03:2021
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://cwe.mitre.org/data/definitions/134.html
+      brahmadatta_category: OTHER
+      brahmadatta_severity: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: printf($FMT, ...)
+          - pattern: fprintf($STREAM, $FMT, ...)
+          - pattern: syslog($PRIO, $FMT, ...)
+      - metavariable-pattern:
+          metavariable: $FMT
+          patterns:
+            - pattern-not: "\"...\""
+
+  - id: brahmadatta-c-malloc-arithmetic-size
+    languages: [c, cpp]
+    severity: WARNING
+    message: >-
+      malloc()/calloc() sized from an arithmetic expression computed on this
+      line (addition or multiplication) rather than a bare constant, sizeof(),
+      or a size already validated upstream. If either operand is influenced by
+      parsed input and can wrap, the allocation can come out smaller than the
+      code that fills it assumes -- a classic integer-overflow-to-buffer-
+      overflow (CWE-190 -> CWE-122). Verify the operands cannot overflow (or
+      are already range-checked) before trusting this allocation's size.
+    metadata:
+      cwe: CWE-190
+      owasp: A03:2021
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://cwe.mitre.org/data/definitions/190.html
+      brahmadatta_category: INTEGER_OVERFLOW
+      brahmadatta_severity: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: malloc($A + $B)
+          - pattern: malloc($A * $B)
+          - pattern: calloc($A + $B, $C)
+
+  - id: brahmadatta-c-memcpy-review-bounds
+    languages: [c, cpp]
+    severity: INFO
+    message: >-
+      memcpy()/memmove() call. Not a defect by itself, but every one of these
+      is worth a manual pass to confirm the length argument can never exceed
+      the destination buffer's real, currently-allocated capacity for any
+      input the source data can take -- the single most common root cause
+      behind a heap/stack buffer overflow in C (CWE-787).
+    metadata:
+      cwe: CWE-787
+      category: security
+      confidence: LOW
+      references:
+        - https://cwe.mitre.org/data/definitions/787.html
+      brahmadatta_category: OTHER
+      brahmadatta_severity: LOW
+    patterns:
+      - pattern-either:
+          - pattern: memcpy(...)
+          - pattern: memmove(...)
+
+  - id: brahmadatta-c-command-injection
+    languages: [c, cpp]
+    severity: ERROR
+    message: >-
+      system()/popen() invokes a shell. If any part of the command string can
+      be influenced by parsed input, this is OS command injection (CWE-78).
+      Avoid a shell entirely (exec* family with an argv array) or, at minimum,
+      prove the command string is built only from fixed, non-attacker-reachable
+      literals.
+    metadata:
+      cwe: CWE-78
+      owasp: A03:2021
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://cwe.mitre.org/data/definitions/78.html
+      brahmadatta_category: OTHER
+      brahmadatta_severity: CRITICAL
+    patterns:
+      - pattern-either:
+          - pattern: system(...)
+          - pattern: popen(...)

@@ -260,6 +260,16 @@ SANDBOX_POLICY = {
 # by `adapters.cpp.toolchain.require_pinned` regardless of what is set here.
 SANDBOX_FUZZ_IMAGE = env.get_str("SANDBOX_FUZZ_IMAGE", "")
 
+# `ContainerJailPolicy.image` for `JobKind.ANALYZE` (#22, D-144) — same "no safe
+# default" reasoning as `SANDBOX_FUZZ_IMAGE` above. Blank by default;
+# `workers/static_analysis/dispatch.py` refuses to start a Semgrep scan without it
+# (reported as an ordinary `infra_failure` job result, never an unhandled exception).
+# Must be a digest-pinned reference (`name@sha256:...`); an unpinned tag is refused by
+# `adapters.semgrep.errors.require_pinned` regardless of what is set here. Built from
+# `infrastructure/compose/images/analyze-toolchain.Dockerfile` via
+# `infrastructure/scripts/build-analyze-image.sh`.
+SANDBOX_ANALYZE_IMAGE = env.get_str("SANDBOX_ANALYZE_IMAGE", "")
+
 # --- Snapshot ingestion (#18) ---------------------------------------------------
 #
 # Content-addressed artifact store: ARTIFACT_ROOT/<sha256[0:2]>/<sha256>, mode 0600,
