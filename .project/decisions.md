@@ -15967,6 +15967,7 @@ fixture content). Orchestrator wiring is an explicit open question for
 **Final approval authority** — CTO (technical; work already authorized by D-144, issue #24
 named explicitly in scope). `cybersecurity` review required before merge per this record's
 own security-implications section; PR not self-merged.
+
 ## D-150 · #30 Crash deduplication and clustering: confirmed the dedup key already
 existed and strengthened it to a real stack signature; added the cluster count that
 did not exist · 2026-08-24 · `backend-developer` seat
@@ -16091,3 +16092,305 @@ D-086's standing instruction for this pipeline. No further per-issue ruling need
 **Final approval authority** — CTO for the technical call (dedup-key material, schema
 addition); already authorized to build per D-144 (CEO). This record is the
 implementation report for review, not a request for new authorization.
+
+---
+
+## D-151 — TRIAGE/ANALYZE composition after #22/#23/#24: bisect stays a separate,
+operator-triggered capability, not part of every mission's automatic pipeline; compiler
+warnings (#23) compose as a second sub-step inside the one `JobKind.ANALYZE` job, not a
+second stage or a second job kind · 2026-08-24 · `software-architect`, ruling on the
+question #24's own builder (D-149/PR #275) explicitly declined to answer unilaterally
+
+Written from a real `git fetch origin main` into an isolated worktree
+(`/tmp/architect-triage-composition`, branch `docs/triage-analyze-composition`), per the
+D-147 process lesson. Read `orchestrator/queue.py`, `contracts/state_machine.py`,
+`workers/static_analysis/{run,dispatch}.py` (PR #274, OPEN, Semgrep/#22, pending
+`cybersecurity` review), `workers/git_analysis/{bisect_step,bisect_run}.py` (PR #275,
+**merged onto `main` mid-session** as `36f6e05`, #24), `workers/baseline/{run,dispatch}.py`
+(#17/T1), `missions/models.py`, `orchestrator/{events,findings,transitions}.py`, `#5`'s
+answer key and `#63`'s closed CEO ruling, and `docs/09-company/01-vision-and-p0-cut.md`'s
+own "demo scenario 2" framing, before writing this. `gh issue view {22,23,24,25,26,63}
+--comments` read in full (no comment threads on any of #22-26; #63's own body is the
+closed ruling). No PR exists yet for #23 as of this writing — no branch, no open PR — so
+this is a target spec for its future builder, not a review of built code.
+
+### Question 1 — does `git bisect` run automatically in every mission's TRIAGE/ANALYZE
+stage, or is it separate and explicitly triggered?
+
+**Decision: separate and explicitly triggered. Never automatic, and not part of
+`JOB_BACKED_STATES`/the tick loop's dispatch for any mission.**
+
+**Why, checked against the real schema, not assumed:**
+
+1. **A live/arbitrary mission has no "good" reference commit anywhere in the data
+   model.** Read `missions/models.py` in full: `Mission` has `repository_ref`;
+   `Authorization` has `repository_ref`/`snapshot_sha256`; `Snapshot` has exactly one
+   `commit_sha` — the single commit the mission ingested and is testing (the *bad* side
+   of a hypothetical bisect range, if the target is in fact regressed). Nothing records a
+   known-good ancestor. `git bisect` needs two endpoints; this system currently ingests
+   one. Making bisect automatic for every mission means inventing and collecting a new
+   input (a known-good ref, presumably operator-supplied at authorize/ingest time) that
+   does not exist today — that is new scope, not composition of what's already built.
+2. **It answers a different question than TRIAGE/ANALYZE's other two tenants.** Semgrep
+   and compiler warnings both answer "is this build, as authorized, currently exhibiting
+   a defect" — deterministic, source-local, needs nothing but the one snapshot already in
+   hand. Bisect answers "which commit, among many the mission never asked about, first
+   introduced a defect" — needs a *range* of history the mission's authorization/snapshot
+   was never scoped to search. `docs/09-company/01-vision-and-p0-cut.md` §3 already drew
+   this line before D-144 reopened anything: "Scenario 2 (bisect) ... additive, not
+   load-bearing," and #63's closed ruling (still the only prior deliberate decision on
+   this exact question, not overturned by D-144's text — D-144 reopens the *capability*,
+   #22-#26 by issue number, it does not say bisect becomes a mandatory pipeline stage)
+   recommended, if reinstated: "No new UI panel... a stage-timeline row... not a
+   dedicated stage." D-144 does not instruct otherwise, and nothing about un-cutting #24
+   as a capability implies wiring it into the mandatory path every mission takes.
+3. **It is long-running and explicitly scoped as an off-critical-path job even in the
+   issue that built it.** #24's own body: "Bisect runs are long — a good end-of-shift
+   job" and "Not on the pack's own critical path." Putting an `O(log N)`-step, per-step
+   sandboxed-build-and-replay search into the mandatory TRIAGE path that every mission
+   blocks on before `STRESS_TEST` would materially change every mission's latency for a
+   capability the product's own cut-scope doc calls additive.
+4. **#24's own builder reached the identical conclusion from the code side**, for a third,
+   independent reason: "a live mission's 'good' baseline commit is not automatically
+   known the way #5's fixture's is" (PR #275 description) — and correctly refused to
+   guess rather than wire it in either automatically or arbitrarily. This ruling confirms
+   that refusal was right, not just cautious.
+
+None of this closes the door on bisect becoming automatic later — if a future mission
+policy adds a real "known-good ref" field and the schedule affords a bisect budget per
+mission, that is a legitimate future CTO-level scope change. It is not what #24 built, and
+is not implied by D-144.
+
+### Where bisect actually gets triggered from, today and going forward
+
+**Today (post-#275 merge):** nowhere, on a live mission. `workers/git_analysis/bisect_run.py`
+is a real, tested, standalone driver (`run_git_bisect`, 42 passing tests, verified live
+against `demo/repositories/pktcfg`'s seeded history landing on the documented commit
+`114383dd517e49e1285b53608184cb744adb2aaa`) callable directly — by a script, a
+`manage.py` command, or a human — against any real git checkout with a known good/bad
+pair. It is not reachable from any mission's lifecycle, any API endpoint, or any queue
+kind. `emit_bisect_events()` shapes event envelopes but nothing calls
+`orchestrator.events.emit()` with them (see Question 3 below) — no bisect event has ever
+reached a real `MissionEvent` row or the SSE stream.
+
+**Target design for the wiring, when staffed** (this is the spec for that future PR —
+not built in this session; see "What was and wasn't built" below):
+
+- **New `JobKind.BISECT`.** Deliberately **excluded** from `JOB_BACKED_STATES`
+  (`orchestrator/queue.py`) — `ensure_jobs_enqueued` must never auto-create one for any
+  mission. Its `TransitionPolicy` (`register_transition_policy(JobKind.BISECT)`) always
+  returns `None`: bisect never drives `Mission.state`. A mission can reach `VERIFIED` with
+  zero `BISECT` jobs ever created, exactly as today.
+- **Claimed by the plain `worker` process, not `fuzz-worker`.** `bisect_step.py` runs
+  each step through `packages.sandbox.Jail` (the bare-metal jail), not
+  `packages.sandbox.container.ContainerJail` — no Docker socket, no `--network none`
+  container flags. `JobKind.BISECT` belongs in `DEFAULT_WORKER_KINDS`
+  (`FUZZ_ONLY_KINDS` untouched), unlike `JobKind.ANALYZE` which does need the
+  container-runtime fleet for Semgrep.
+- **Enqueued only from a new, explicit operator action** — a new endpoint (e.g. `POST
+  /api/v1/missions/{id}/bisect`, alongside the existing `preflight`/`start`/`pause`
+  mission-lifecycle routers `#154` already built) taking `good_commit` (operator-supplied
+  every time — no field exists to default it from) and an optional `bad_commit` (default:
+  the mission's own `Snapshot.commit_sha`, the one real "commit under test" field that
+  already exists) and calling `enqueue_job` directly, the same low-level function every
+  other kind already uses, just from a new call site instead of the tick loop's automatic
+  one.
+- **A real, disclosed gap this leaves even once built: check-command resolution.**
+  `run_git_bisect` takes `check_argv` as a caller-supplied list — it does not know how to
+  test an arbitrary authorized repository for regression. The only real check command
+  anywhere in this codebase is `demo/repositories/pktcfg-bisect-check.sh`, hand-built for
+  the #5 fixture's own adapter. There is no generic "derive a check command for any
+  C/C++ target's reproducer" resolver. Until one exists, **bisect is real and tested but
+  only meaningfully invokable against the pre-seeded #5 fixture** — not "any authorized
+  mission" in practice, regardless of the endpoint above existing. This is not a
+  reason to leave it unwired (the endpoint is still real value for #5's own demo
+  scenario 2), but #26's builder and anyone selling "bisect works on any mission" must
+  not overclaim it.
+- **Persistence and events**: a `workers/git_analysis/dispatch.py` executor, in the exact
+  shape `workers/baseline/dispatch.py`/`workers/static_analysis/dispatch.py` already
+  establish (`@register_executor(JobKind.BISECT)` calling `run_git_bisect`, persisting a
+  result row, then calling `orchestrator.events.emit()` once per entry
+  `emit_bisect_events()` already produces — see Question 3, this is the missing link
+  PR #275 correctly stopped short of). Whether the persisted row is a new `BisectReport`
+  model or reuses `StageToolRun`/`Finding` is a database-engineer call, not decided here.
+
+### Question 2 — the real, current shape of TRIAGE/ANALYZE after #22/#23
+
+**As of this writing:** `MissionState.TRIAGE` / `MissionStage.ANALYZE` is backed by
+**exactly one `JobKind.ANALYZE`** (`orchestrator/queue.py::JOB_BACKED_STATES`), which
+currently runs **only Semgrep** (PR #274, OPEN — merged onto neither `main` nor this
+worktree yet, pending required `cybersecurity` review; `advance_through_triage`/
+`_emit_triage_stub_events` are removed by that PR, not yet on `main`). `#23` has no code
+anywhere yet (no branch, no PR).
+
+**Decision: #23 composes as a second sub-step inside the SAME `JobKind.ANALYZE` job —
+one job, two ordered internal steps, one `StageToolRun` row per tool, one
+`FINDING_RECORDED` event per finding, one `TRIAGE -> STRESS_TEST` transition. Not a
+second `JobKind`, not a second mission state.**
+
+**Ordering, and why it's fixed, not a free choice:** Semgrep runs first, compiler-warning
+parsing runs second, in the same job execution. #23's own acceptance criterion #2
+("Deduplicated against Semgrep findings on the same line") is only satisfiable if
+Semgrep's matches already exist — in memory (`AnalyzeOutcome.matches`, already computed
+by the time `_persist_outcome` runs, per `workers/static_analysis/dispatch.py`) or in the
+DB (`Finding.objects.filter(mission=..., tool=AnalyzerTool.SEMGREP)`) — before the
+compiler-warning step decides which warnings survive. Reversing the order makes AC2
+unimplementable without a second pass.
+
+**Concretely, for #23's implementer:**
+
+- Extend `_analyze_executor`/`_persist_outcome`
+  (`workers/static_analysis/dispatch.py`): after the existing Semgrep sub-step completes
+  and its matches are known, run a new compiler-warnings sub-step; drop any warning whose
+  `(file_path, line)` exactly matches a Semgrep match already found; write one
+  `StageToolRun(mission=..., stage=ANALYZE, tool_name="compiler_warnings")` row (a second
+  row — `StageToolRun` carries no per-mission unique constraint, confirmed in
+  `workers/static_analysis/dispatch.py`'s own "Idempotency" docstring, which states this
+  explicitly for exactly this reason) and one `Finding` per surviving warning
+  (`tool=AnalyzerTool.COMPILER_DIAGNOSTIC` — **already exists** in
+  `contracts/enums.py`, no enum change needed; `discovery_method=
+  DiscoveryMethod.STATIC_ANALYSIS`).
+- **Idempotency must check for both rows, not one.** `_existing_stage_tool_run`
+  currently only checks `tool_name="semgrep"`. #23 must extend that check so a crash
+  between the two sub-steps (Semgrep persisted, compiler-warnings not yet) resumes the
+  missing half on retry rather than either re-running Semgrep needlessly or reporting a
+  phantom full success. This is the same "not supposed to be possible is not the same as
+  structurally prevented" discipline (D-061 §3) every other stage's dispatch module
+  already states explicitly for itself.
+- **A real, disclosed blocker #23 will hit immediately, checked directly against the
+  code, not assumed:** the issue's own text says #23 "plugs into the BASELINE stage's
+  already-captured compiler output." **That is not true of the code as it exists.**
+  Traced end to end: `adapters/cpp/pipeline.py::BuildResult.captured_stdout`/
+  `captured_stderr` do hold the real compiler output in memory during a successful
+  configure+build — but `workers/baseline/run.py::run_baseline_stage` never threads
+  either field into `BaselineOutcome` (its `as_dict()` has no such key), and
+  `workers/baseline/dispatch.py::_persist_report` only ever ingests the CTest JUnit XML
+  as a durable `Artifact` (`BASELINE_LOG_ARTIFACT_KIND = "baseline_ctest_junit"`) — the
+  `Jail`'s scratch directory, including anything a passing build wrote, is deleted the
+  moment its `with` block exits (D-053/D-054, restated in `run_baseline_stage`'s own
+  docstring). **On a passing baseline, compiler output does not survive past the
+  BASELINE job today.** #23 needs BASELINE extended first (or alongside): thread
+  `captured_stdout`/`captured_stderr` through `BaselineOutcome`, ingest them as a second
+  durable `Artifact` (e.g. `kind="baseline_compiler_log"`) via the exact
+  `store.ingest_from_path`/`_log_ref_artifact` pattern already established for the JUnit
+  XML — no new `BaselineReport` column required, `Artifact` is already a generic
+  per-mission store. This touches `adapters/cpp/pipeline.py` (compiler-toolchain-engineer
+  territory) and `workers/baseline/*` (backend-developer territory), and must be staffed
+  and land before or alongside #23's own parser — flagging this now so #23 is not
+  staffed as "just write a parser" and then discovers there is nothing to parse.
+
+**Alternative composition considered and rejected:** a second `JobKind.COMPILER_WARNINGS`,
+sequenced after `ANALYZE` within `TRIAGE`. Rejected because `JOB_BACKED_STATES` is a
+one-`MissionState`-to-one-`JobKind` map today (`orchestrator/queue.py`); making one
+state dispatch two sequential kinds needs either (a) real queue-engine surgery
+(`ensure_jobs_enqueued`/`dispatch_terminal_jobs` would need to learn to sequence within a
+state — a cross-cutting change affecting every other stage's assumptions, not proportional
+to what #23 needs), or (b) a new intermediate `MissionState` (e.g. `TRIAGE_COMPILER`),
+which architecture spec §2.6 already reserves as CTO-only ("adding, removing or renaming
+a `MissionState`... those are CTO calls"). The chosen composition (one job, ordered
+sub-steps) mirrors the precedent `orchestrator/queue.py`'s own comment already states for
+`SANITIZER_BUILD`/`MINIMIZE` inside `STRESS_TEST`: "sub-steps of the stage's own work...
+composing them is [the implementer's] call — enqueue directly, or run inline inside the
+[stage] executor... not something [`JOB_BACKED_STATES`] should guess at."
+
+### Question 3 — where #25's and #26's builders should look for the event stream
+
+**#25 (analysis rail — findings by severity/dependency/compiler health):** subscribe to
+the mission's real event stream and aggregate `EventType.FINDING_RECORDED` events
+(`orchestrator/findings.py::record_finding`, one per `Finding` row, already real and
+already fires for every Semgrep match today on PR #274's branch). Group by
+`Finding.tool`/`Finding.category`/`Finding.severity` — every field #25's acceptance
+criteria ask for already exists on the `Finding` row; no new event payload shape is
+needed. Once #23 lands per Question 2, the same event type fires for
+`tool=AnalyzerTool.COMPILER_DIAGNOSTIC` findings too — #25 does not need to special-case
+compiler warnings differently from Semgrep matches, they arrive on the same channel.
+Empty state (#25 AC4, "not a zero dressed as a result"): a mission with zero
+`FINDING_RECORDED` events for a tool that DID run (`StageToolRun` row exists,
+`Finding` count is genuinely zero) is a real "clean scan" result; a mission where the
+`StageToolRun` row itself does not exist yet (job still running, or, before #274 merges,
+`TRIAGE` still on the old stub) is "not run" — these are different states and #25 must
+render them differently, per D-009's disclosure rule.
+
+**#26 (git history summary + bisect timeline panel):** **there is no real bisect event on
+any mission's stream today, and there will not be one until the executor described under
+Question 1 is built and actually calls `orchestrator.events.emit()`.** Checked directly:
+`workers/baseline/run.py::emit_baseline_events` and
+`workers/git_analysis/bisect_run.py::emit_bisect_events` are both pure functions that
+shape `MissionEvent`-envelope-looking dicts and **return** them — neither calls
+`orchestrator.events.emit()`, and grepping every call site of `events.emit(` across
+`apps/control-api/orchestrator/*.py` confirms it (`candidates.py`, `model_host.py`,
+`patch_generate_executor.py`, `queue.py` [lease-reclaim `LOG` events only],
+`findings.py`, `teardown.py`, `transitions.py` — no `baseline` or `git_analysis` caller
+anywhere). This is the single most important fact for #26's builder: **merging PR #275
+alone changes nothing observable on any real mission's event stream.** #26 depends on
+the `workers/git_analysis/dispatch.py` executor (Question 1's "Persistence and events"
+bullet) landing first — once it does, filter the stream for `payload.kind in {"bisect",
+"bisect_step"}` (the exact shape `emit_bisect_events()` already defines: one
+`STAGE_STARTED` with `good_commit`/`bad_commit`, one `STAGE_PROGRESS` per tested commit
+with `sha`/`verdict`/`subject`, one `STAGE_COMPLETED` with the full `BisectOutcome` and
+`culprit_commit`) — the events land with `stage=ANALYZE, state=TRIAGE`, reusing existing
+`EventType`/`MissionStage`/`MissionState` vocabulary, no new enum values. #26's own AC3
+("Renders sensibly before any bisect has run") should be the *default* render for nearly
+every mission, including every fixture other than #5, per Question 1's check-command
+scope limit — not an edge case. **Sequencing for engineering-manager: the Question 1
+wiring PR is a hard prerequisite for #26, not parallelizable with it** — #26 cannot be
+meaningfully built or tested against a real event stream until that PR lands, only
+against a hand-mocked one.
+
+### What was and wasn't built in this session
+
+**Built (doc-only):** this decision record, and a small reconciling edit to
+`docs/09-company/06-architecture-spec.md` §2.5's `TRIAGE` row and the state table's
+`TRIAGE` description — both currently state "Empty in this scope"/"Runs and finds
+nothing, by construction... Semgrep is CUT (#22)," which PR #274's own handoff flagged
+as stale and explicitly asked `software-architect`/`cto` to reconcile. Updated to
+describe the real composition this record specifies, not to invent new claims.
+
+**Deliberately NOT built:** the `JobKind.BISECT` endpoint/executor from Question 1, and
+the BASELINE compiler-output capture extension from Question 2. Both are real,
+non-trivial feature work (a new enum member + migration + endpoint + executor for the
+first; changes across two other seats' owned modules for the second), not "wiring
+together pieces that already compose" — the actual gap in each case is a genuinely
+missing capability, not a disconnected wire. Both PR #274 and PR #275 are also still
+OPEN (unmerged, pending `cybersecurity` review) as of this writing; touching
+`orchestrator/queue.py` or `contracts/enums.py` directly in this session would have
+risked exactly the kind of collision that already produced two independent "D-149"
+entries today (PR #274's embedded record, and PR #275's, which landed first as the real
+`D-149` — PR #274's own copy will need renumbering by whoever merges it, per the
+now-familiar convention). This record is the buildable spec for both; staffing them is
+`engineering-manager`'s call.
+
+**Cost implications.** None beyond what #22/#23/#24 already committed to (D-144). The
+compiler-log-capture extension is small (reuses the existing `Artifact` store, no new
+model). The bisect endpoint is a normal-sized backend task, not a research spike — every
+primitive it needs (`enqueue_job`, `register_executor`, `packages.sandbox.Jail`,
+`run_git_bisect`) already exists and is tested.
+
+**Security implications.** None of this record's decisions touch the sandbox boundary,
+authentication, or the verification gate. The bisect endpoint (Question 1, when built) is
+a new HTTP surface accepting operator-supplied git refs that get shelled into `git
+bisect bad/good <ref>` — `_run_git` in `bisect_run.py` already uses `subprocess.run`
+with a literal argv list, never `shell=True` (confirmed by reading it), so a malicious ref
+string cannot inject a second command; a `cybersecurity` pass on the new endpoint's input
+validation (a ref that is not a valid commit in the repo should fail loudly, not silently
+no-op) is still warranted before merge, per CLAUDE.md's standing rule for anything
+touching subprocess execution.
+
+**Scalability implications.** None new. Bisect stays `O(log N)` per invocation as #24
+already established; making it operator-triggered rather than automatic means its cost is
+paid once per explicit request, never once per mission — the more scalable of the two
+options by construction, not just the more honest one.
+
+**Recommendation.** Ship this composition as the target. Route Question 1's endpoint/
+executor and Question 2's BASELINE-capture extension to `engineering-manager` for
+staffing (both are real backend-developer-shaped tasks; the BASELINE half additionally
+needs `compiler-toolchain-engineer` sign-off on the `adapters/cpp/pipeline.py` touch).
+`#23`'s implementer should read this record's Question 2 section in full before starting
+— it changes both what #23 depends on (BASELINE extension, not yet built) and how it
+composes (one job, not two).
+
+**Final approval authority** — CTO (technical composition call, explicitly left open by
+D-144/PR #275's own builder rather than decided unilaterally — this record is that
+ruling, not self-approved; CTO review requested before Question 1's endpoint/executor or
+Question 2's BASELINE extension is staffed against it, per COMPANY.md §2's review chain:
+software-architect spec → reviewed by CTO).
