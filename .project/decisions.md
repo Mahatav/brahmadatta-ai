@@ -16223,10 +16223,25 @@ worktree yet, pending required `cybersecurity` review; `advance_through_triage`/
 `_emit_triage_stub_events` are removed by that PR, not yet on `main`). `#23` has no code
 anywhere yet (no branch, no PR).
 
-**Decision: #23 composes as a second sub-step inside the SAME `JobKind.ANALYZE` job —
-one job, two ordered internal steps, one `StageToolRun` row per tool, one
-`FINDING_RECORDED` event per finding, one `TRIAGE -> STRESS_TEST` transition. Not a
-second `JobKind`, not a second mission state.**
+**Decision, as originally drafted: #23 composes as a second sub-step inside the SAME
+`JobKind.ANALYZE` job — one job, two ordered internal steps, one `StageToolRun` row per
+tool, one `FINDING_RECORDED` event per finding, one `TRIAGE -> STRESS_TEST` transition.
+Not a second `JobKind`, not a second mission state.**
+
+**Superseded by what actually landed (see the "Update, same day" note further below):**
+#23 (PR #278) did not compose this way. It hooked into `workers/baseline/dispatch.py`
+instead — BASELINE, not ANALYZE — parsing compiler diagnostics from the same jailed
+`cmake --build` invocation the D3 gate already runs, while that build's stdout/stderr
+are still live in memory, before the jail tears down. This sidesteps the ordering
+problem below entirely (dedup against Semgrep's findings still works, since it queries
+the `Finding` table by `(file_path, line)` regardless of which `JobKind` wrote either
+row) and avoids ANY cross-stage data plumbing, which is a better outcome than this
+record's own recommendation, not a deviation to correct. `#25`/`#26` consume `Finding`
+rows and `FINDING_RECORDED` events either way — neither cares which `JobKind` produced
+a given finding, so downstream consumers are unaffected by which stage actually hosts
+compiler-warning parsing. The ordering discussion immediately below describes the
+originally-recommended-but-superseded ANALYZE-internal composition; kept for the
+record, not as current guidance.
 
 **Ordering, and why it's fixed, not a free choice:** Semgrep runs first, compiler-warning
 parsing runs second, in the same job execution. #23's own acceptance criterion #2
