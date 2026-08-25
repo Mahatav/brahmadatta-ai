@@ -16901,3 +16901,140 @@ SEC-A and SEC-B are closed. Do not merge PR #278 on this record's own say-so.
 authorized by D-144/D-150). `cybersecurity` re-review is a hard gate before PR #278
 merges, per this task's explicit instruction and CLAUDE.md's standing review-chain
 rule; not self-merged.
+
+---
+
+## D-154 — #56: keyboard operability of the Command Center — a shared, deliberate
+focus trap for `ConfirmDialog`/`CandidateCompareOverlay`, a real tab stop on the one
+CSS-scrollable region with no focusable child, and a build-excluded harness to
+verify both with a real keyboard · 2026-08-24 · `frontend-developer`, under D-144's
+authorization
+
+**Context.** #56 is named explicitly in D-144's reopened-`CUT` list. D-059
+(2026-08-16, `ui-ux-designer`) already ruled the design: native
+`Tab`/`Shift+Tab`/`Enter`/`Space`/`Escape` only, no command palette, no destructive-
+control mnemonics. `docs/09-company/13-cut-pullback-design-spec.md` §3 maps the
+real, current tab order and the P0 control set. This entry records what a full
+component-by-component audit against that spec found in the Command Center as it
+exists after PR #231 (rev-2 visual rebuild) and PR #270 (#52 presentation mode).
+
+**What was already correct, verified by reading every interactive element in
+`apps/command-center/src/components/`.** Every control across `StageTimeline`,
+`FindingsRail`, `VerdictPanel`, `BottomStrip`, `MissionControlPanel`,
+`LocalRepositoryIntake` is a real `<button>`/`<input>`/`<select>`/`<textarea>`/
+`<label>` with native semantics — no synthetic `onClick` on a bare `<div>`/`<span>`
+anywhere (confirmed by a new regression check, not just reading). DOM order already
+matches visual order throughout. The base `:focus-visible` rule
+(`packages/ui-components/tokens.css`) already exists, already renders a 2px solid
+`--bd-focus-ring` (`--bd-c-white`, 12:1 contrast) outline at 4px offset, and nothing
+in the rev-2 rebuild had overridden or removed it.
+
+**Two real gaps found, both fixed.**
+
+1. **`ConfirmDialog` and `CandidateCompareOverlay` had Escape-to-close and an
+   initial safe focus target, but no `Tab`/`Shift+Tab` boundary trap at all.**
+   Every other element on the page (Stage Timeline rows, Bottom Strip controls,
+   etc.) stays mounted in the DOM behind the scrim while either overlay is open, so
+   a keyboard user could `Tab` straight out of the dialog into the page behind
+   it — a background focus leak, not the deliberate, escapable trap D-059 §3.3/§3.4
+   specifies. Fixed with one shared primitive, `src/lib/a11y/focusTrap.ts`
+   (`trapTabKey`), used identically by both components: it only intervenes at the
+   two wrap-around boundaries (`Tab` on the last focusable element, `Shift+Tab` on
+   the first) and leaves every other `Tab` press to native browser order — DOM order
+   inside the dialog still determines tab order, matching §9's "tab order matches
+   visual order" rule inside an overlay, not just outside one. `ConfirmDialog` also
+   did not restore focus to the control that opened it on close (Escape or either
+   button) — fixed by capturing `document.activeElement` on mount and refocusing it
+   in the effect's cleanup, the same pattern `CandidateCompareOverlay`'s existing
+   `returnFocusRef` prop already used correctly.
+
+2. **`.bd-diff__body`** (the unified-diff `<ol>` inside `CandidateCompareOverlay`,
+   CSS `max-height` + `overflow-y: auto`) **is genuinely CSS-scrollable with no
+   focusable child of its own** (plain `<li>` lines, no controls) — exactly the gap
+   D-059 §3.2 names by pattern (a scrollable region a keyboard user tabs straight
+   past, with a long diff never reachable by keyboard scrolling). Fixed with
+   `tabIndex={0}` and `role="region"` (the `aria-label` was already present), per
+   §3.2's own prescription — no custom key handling added; a focusable
+   `overflow: auto` container gets arrow-key/Page Up/Page Down/Home/End scrolling
+   from the browser for free.
+
+**Verification — real, keyboard-driven, in real Chromium (Playwright), not code
+review alone.** `apps/command-center/scripts/verify-keyboard-operability.mjs`
+drives two real `astro dev` servers (sequentially — Astro 7 refuses a second
+concurrent `astro dev` against the same project directory regardless of port, a
+new-to-this-session constraint, not a design choice) and: (1) tabs through the
+real idle-state Command Center, typing into the `HUMAN` field and pressing `Space`
+on the authorization checkbox exactly as an operator would, confirming the
+previously-`disabled` `[ CHOOSE BROWSER FOLDER ]` file input becomes a real tab
+stop the moment those two actions unlock it, and asserting a real, non-`none`
+computed `outline` at every one of 13 real tab stops; (2) drives `ConfirmDialog`
+and `CandidateCompareOverlay` open via `Enter`, confirms `Tab`/`Shift+Tab` wrap at
+exactly the boundaries the components' own focusable-element sets define (5
+elements for the overlay: `[ ESC CLOSE ]` + two candidates' diff regions +
+`[ OPEN FULL ]` buttons), confirms no stop ever leaves the dialog/overlay, and
+confirms `Escape` returns focus to the exact opener button in both cases.
+Screenshots of every stop are written to
+`apps/command-center/scripts/.keyboard-verification/` (gitignored, evidence only)
+— visually confirmed: crisp white rings at 12:1 contrast against the deep-navy
+ground on inputs, checkboxes, and dialog buttons alike.
+
+**The harness this required.** Both dialogs are only reachable in the live app
+behind state that needs either a full mission run or a live Django backend (an
+active mission for the confirm dialogs, two `VerificationRecord`s for the compare
+overlay). `src/dev/keyboard-harness.astro` + `KeyboardHarness.tsx` mount the exact
+same production component modules with deterministic mock data, reusing #52's own
+build-time-exclusion mechanism verbatim (`BD_KEYBOARD_HARNESS_BUILD=true`,
+off by default, `injectRoute` outside `src/pages/`) so the finale/production
+artifact never contains it — verified the same way #52's is (
+`scripts/check-keyboard-harness-exclusion.sh`, mirroring
+`check-presentation-build-exclusion.sh`: builds both artifacts for real, greps
+`dist/` for zero references, greps `dist-keyboard-harness/` for a real positive).
+
+**Incidental fix, not part of #56's own scope.** `npm run check`/`npm run build`
+were broken on `main` before this task started: PR #276 (crash-deduplication)
+added `crash_count` to `FindingSummary` in `packages/schemas/openapi.json` without
+regenerating the frontend's committed `src/lib/api/schema.d.ts` (last regenerated
+at PR #231), and PR #277/#278 (renewed-fuzzing gate, compiler-warnings findings)
+compounded the drift further. Confirmed pre-existing and unrelated by reproducing
+the exact same failure directly against `origin/main`'s own already-merged
+`check-presentation-build-exclusion.sh`, with zero diff on my branch's own
+`schema.d.ts` at the time. Fixed mechanically via the project's own
+`npm run generate:api`, as a separate, clearly-labelled commit — not folded into
+the #56 commit, and not a judgment call about the underlying API contract, which
+stays backend-developer's.
+
+**Options considered** for the Tab-trap fix — (a) a shared `trapTabKey` primitive
+used identically by both dialogs; (b) two separate, hand-rolled traps, one per
+component; (c) a third-party focus-trap library.
+
+**Pros and cons.** (b) risks the two copies drifting (exactly the kind of
+inconsistency a reviewer would have to catch by diffing them against each other
+instead of against one spec). (c) is a new runtime dependency for ~40 lines of
+well-understood, testable logic, on a project whose own working agreement (D-059)
+is explicit about not adding new key-handling machinery beyond what native
+semantics already provide — a library is more machinery, not less, for a project
+this size. (a) is the smallest correct fix and is what both call sites now use.
+
+**Cost implications.** Near zero — one new ~60-line file, two ~10-line call-site
+changes, no new runtime dependency. `playwright` is added as a devDependency
+(command-center only) purely for the verification script; not shipped in any
+build artifact.
+
+**Security implications.** Mildly positive, same reasoning D-059 already recorded:
+destructive controls (`[ CANCEL MISSION ]`, `[ EMERGENCY TEARDOWN ]`) stay behind
+an explicit focus-and-activate sequence, and the fixed trap makes it structurally
+harder for a stray keypress to land somewhere unintended while a destructive
+confirm dialog is open, not easier.
+
+**Scalability implications.** None.
+
+**Recommendation.** Merge — `npm run check` (including the new
+`check:issue-56-keyboard` static regression test), both build-exclusion shell
+scripts, and the real Playwright-driven keyboard verification all pass, with
+screenshot evidence. No security/isolation surface touched (pure frontend
+keyboard/focus behavior) — self-merge is reasonable per this task's own
+authorization, recorded in the PR rather than re-litigated here.
+
+**Final approval authority** — `product-manager`/`cto` per D-059's own final-
+approval line, since this implements that ruling rather than revisiting it; no
+further sign-off required to merge given the verification depth above.

@@ -15,9 +15,13 @@ venv/
 node_modules/
 dist/
 dist-presentation/
+dist-keyboard-harness/
 build/
 .vite/
 *.tsbuildinfo
+
+# #56 keyboard-operability verification screenshots (evidence, not a build artifact)
+apps/command-center/scripts/.keyboard-verification/
 
 # Env & secrets
 .env

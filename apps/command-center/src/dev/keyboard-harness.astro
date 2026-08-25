@@ -1,0 +1,15 @@
+---
+// #56 — the keyboard-operability test harness entry point. Deliberately NOT under `src/pages/`,
+// same reasoning as `src/presentation/presentation.astro` (#52, D-058 §2.2): Astro's file-based
+// router only discovers pages there, so this file is invisible to the default `astro
+// build`/`astro dev` no matter what. It becomes a real route only when `astro.config.mjs`'s
+// `keyboardHarnessIntegration` calls `injectRoute`, which itself only happens when
+// `BD_KEYBOARD_HARNESS_BUILD=true` was set for that build/dev invocation — never true for the
+// finale/production artifact or the `command-center:presentation` build. See
+// `scripts/check-keyboard-harness-exclusion.sh`.
+import { KeyboardHarness } from './KeyboardHarness';
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+<BaseLayout title="Brahmadatta Command Center — #56 KEYBOARD HARNESS (dev tooling, not a real screen)">
+  <KeyboardHarness client:load />
+</BaseLayout>

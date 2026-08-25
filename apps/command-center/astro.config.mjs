@@ -39,8 +39,18 @@ const codellamaModel = process.env.CODELLAMA_MODEL || 'codellama:7b-instruct';
 const presentationBuild = process.env.BD_PRESENTATION_BUILD === 'true';
 const fixtureReplayUrl = process.env.BD_PRESENTATION_FIXTURE_URL || 'http://127.0.0.1:8971';
 
+// #56 — same build-time exclusion mechanism as `presentationBuild` above, for the keyboard-
+// operability test harness (`src/dev/keyboard-harness.astro`). Off by default, so a plain
+// `npm run dev`/`npm run build` and the `command-center:presentation` build never see this
+// route at all — see `scripts/check-keyboard-harness-exclusion.sh`.
+const keyboardHarnessBuild = process.env.BD_KEYBOARD_HARNESS_BUILD === 'true';
+
 export default defineConfig({
-  integrations: [react(), presentationBuild ? presentationModeIntegration() : undefined].filter(Boolean),
+  integrations: [
+    react(),
+    presentationBuild ? presentationModeIntegration() : undefined,
+    keyboardHarnessBuild ? keyboardHarnessIntegration() : undefined,
+  ].filter(Boolean),
   output: 'static',
   vite: {
     plugins: [localRepositoryPlugin()],
@@ -81,6 +91,31 @@ function presentationModeIntegration() {
           'BD_PRESENTATION_BUILD=true — this build includes the rehearsal-only presentation-mode ' +
             'route (/presentation). Never build the finale/production artifact this way ' +
             '(docs/09-company/10-fallback-ladder.md §2.5, D-058).',
+        );
+      },
+    },
+  };
+}
+
+/**
+ * #56 — the keyboard-harness build-exclusion mechanism, structured identically to
+ * `presentationModeIntegration` above. `injectRoute` only runs when `keyboardHarnessBuild` is
+ * true, so a plain `npm run build`/`npm run dev` never routes `/__dev/keyboard-harness` at all —
+ * not "present but disabled," genuinely absent from the bundle.
+ */
+function keyboardHarnessIntegration() {
+  return {
+    name: 'brahmadatta-keyboard-harness',
+    hooks: {
+      'astro:config:setup': ({ injectRoute, logger }) => {
+        injectRoute({
+          pattern: '/__dev/keyboard-harness',
+          entrypoint: './src/dev/keyboard-harness.astro',
+        });
+        logger.warn(
+          'BD_KEYBOARD_HARNESS_BUILD=true — this build includes the #56 keyboard-operability ' +
+            'test harness (/__dev/keyboard-harness). Never build the finale/production artifact ' +
+            'this way.',
         );
       },
     },
