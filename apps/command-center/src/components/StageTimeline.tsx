@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { STAGE_ROWS, formatElapsed, formatDurationSeconds } from '../lib/design/phases';
 import type { MissionSnapshot, MissionStage } from '../lib/events/store';
+import { FuzzingReportPanel } from './FuzzingReportPanel';
 import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
 
 /**
@@ -78,6 +79,14 @@ export function StageTimeline({ snapshot, hasActiveMission }: { snapshot: Missio
                   <small className="bd-timeline__detail">
                     {sanitizeDisplayText(detail, { maxLength: 160, fallback: '—' })} · {elapsed}
                   </small>
+                  {stage === 'STRESS_TEST' && (
+                    <FuzzingReportPanel
+                      fuzzing={snapshot.fuzzing}
+                      reached={Boolean(snapshot.stageStartedAt.STRESS_TEST)}
+                      running={rowState === 'running'}
+                      notRunMessage={snapshot.stageMessage.STRESS_TEST}
+                    />
+                  )}
                 </span>
               </button>
               {isExpanded && events.length > 0 && (
