@@ -1,6 +1,7 @@
 """`orchestrator.queue.tick` and its pieces: the actual #168 fix (nothing previously
-advanced a mission past `VALIDATING`), the `TRIAGE` stub pass-through, and
-`ensure_jobs_enqueued`'s one-job-per-stage idempotency.
+advanced a mission past `VALIDATING`), `TRIAGE` now being job-backed by `JobKind.
+ANALYZE` (#22, D-144 — was a hand-rolled stub before), and `ensure_jobs_enqueued`'s
+one-job-per-stage idempotency.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import pytest
 from contracts.enums import EventType, MissionState
 from missions.models import Job, JobKind, JobState
 from orchestrator import queue
-from orchestrator.tests.conftest import NOW, TRACE, walk_to
+from orchestrator.tests.conftest import NOW, walk_to
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -46,21 +47,31 @@ def test_advance_out_of_validating_leaves_an_unauthorized_mission_exactly_where_
     assert mission.state_enum is MissionState.VALIDATING
 
 
-def test_advance_through_triage_emits_the_hollow_stage_events_and_reaches_stress_test(mission):
+def test_triage_is_job_backed_by_analyze_not_the_old_stub(mission):
+    """#22, D-144: `orchestrator.queue.advance_through_triage`/
+    `_emit_triage_stub_events` are gone — `TRIAGE` is job-backed exactly like every
+    other stage now (`JOB_BACKED_STATES[MissionState.TRIAGE] == JobKind.ANALYZE`).
+    A mission sitting in `TRIAGE` gets a real `ANALYZE` job enqueued by
+    `ensure_jobs_enqueued`, and stays in `TRIAGE` until that job's terminal result is
+    read by `dispatch_terminal_jobs` (`workers.static_analysis.dispatch`'s own tests,
+    plus `orchestrator/tests/test_analyze_executor.py`, cover that half — this file
+    only proves the enqueue side, matching its own scope for every other job-backed
+    state below)."""
     walk_to(mission, MissionState.TRIAGE)
 
-    advanced = queue.advance_through_triage(trace_id=TRACE, now=NOW)
+    enqueued = queue.ensure_jobs_enqueued(now=NOW)
 
-    assert advanced == [mission.id]
+    assert any(job.mission_id == mission.id and job.kind == JobKind.ANALYZE for job in enqueued)
+    assert Job.objects.filter(mission=mission, kind=JobKind.ANALYZE).exists()
     mission.refresh_from_db()
-    assert mission.state_enum is MissionState.STRESS_TEST
+    assert mission.state_enum is MissionState.TRIAGE  # unchanged until the job resolves
 
+    # The old "hollow stage" LOG line is gone — nothing claims "no static analyzers
+    # configured" for a mission whose ANALYZE job has not even run yet.
     messages = list(
         mission.events.filter(type=str(EventType.LOG)).values_list("message", flat=True)
     )
-    assert any("no static analyzers configured" in m.lower() for m in messages)
-    assert mission.events.filter(type=str(EventType.STAGE_STARTED)).exists()
-    assert mission.events.filter(type=str(EventType.STAGE_COMPLETED)).exists()
+    assert not any("no static analyzers configured" in m.lower() for m in messages)
 
 
 def test_ensure_jobs_enqueued_writes_exactly_one_job_per_stage(mission):

@@ -357,10 +357,18 @@ class MissionEvent(models.Model):
 
 class JobKind(models.TextChoices):
     """Architecture spec §3.1. The list is `Fixed` there; extending it is a
-    backend-developer call, narrowing it is not."""
+    backend-developer call, narrowing it is not.
+
+    `ANALYZE` (#22, D-144): backs `MissionState.TRIAGE`, replacing the near-stub
+    `orchestrator.queue.advance_through_triage` drove that state through directly
+    (architecture spec §2.5's "must not fabricate a finding count" stub). Runs
+    Semgrep inside `packages.sandbox.container.ContainerJail` — see
+    `workers.static_analysis.dispatch`.
+    """
 
     BASELINE = "BASELINE"
     SANITIZER_BUILD = "SANITIZER_BUILD"
+    ANALYZE = "ANALYZE"
     FUZZ = "FUZZ"
     MINIMIZE = "MINIMIZE"
     CORRELATE = "CORRELATE"
@@ -385,6 +393,7 @@ class JobState(models.TextChoices):
 MAX_ATTEMPTS_BY_KIND: dict[str, int] = {
     JobKind.BASELINE: 1,
     JobKind.SANITIZER_BUILD: 1,
+    JobKind.ANALYZE: 1,
     JobKind.FUZZ: 2,
     JobKind.MINIMIZE: 1,
     JobKind.CORRELATE: 1,

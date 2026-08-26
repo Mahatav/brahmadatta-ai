@@ -210,8 +210,13 @@ class FindingCategory(StrEnum):
 
 
 class AnalyzerTool(StrEnum):
-    """Tools that may produce a finding. Semgrep is CUT for the seven-day build
-    (P1-2) and is absent deliberately — adding it back is a scope decision.
+    """Tools that may produce a finding.
+
+    `SEMGREP` was CUT for the seven-day build (P1-2, #22) and absent deliberately —
+    D-144 (.project/decisions.md, 2026-08-24) reopened the full `CUT` milestone by
+    direct CEO/user ruling, naming #22 explicitly. `workers.static_analysis.dispatch`
+    is the real, registered `JobKind.ANALYZE` executor that produces findings tagged
+    with this member; see that module's docstring.
     """
 
     COMPILER_DIAGNOSTIC = "COMPILER_DIAGNOSTIC"
@@ -219,6 +224,7 @@ class AnalyzerTool(StrEnum):
     UNDEFINED_BEHAVIOUR_SANITIZER = "UNDEFINED_BEHAVIOUR_SANITIZER"
     LIBFUZZER = "LIBFUZZER"
     CTEST = "CTEST"
+    SEMGREP = "SEMGREP"
 
 
 class LanguageAdapter(StrEnum):
@@ -243,17 +249,16 @@ class DiscoveryMethod(StrEnum):
     already names direct harnessing as the *starting* position rather than the
     fallback, and #83 adds reproducer replay under that.
 
-    `STATIC_ANALYSIS` (#23, D-144) is a fourth, independent claim: a finding surfaced
-    by reading source text (or, for #23 specifically, a compiler's own diagnostic
-    output from a real build) with no execution and no crash involved — never
-    conflated with `FUZZING_CAMPAIGN`, which specifically claims a dynamic run found
-    it. Named and valued identically to what #22 (Semgrep integration, CUT-milestone,
-    also authorized by D-144) independently adds for the same reason, on its own
-    not-yet-merged branch as of this writing — see `workers/baseline/dispatch.py`'s
-    module docstring for the coordination note on that overlap. If #22 lands first,
-    this becomes a trivial duplicate-member merge conflict to resolve by keeping one
-    copy; the string value either author picked is identical, so no downstream data is
-    at risk either way.
+    `STATIC_ANALYSIS` (#22 and #23, both D-144) is a fourth, independent claim: a
+    finding surfaced by reading source text — either a static analyzer
+    (`AnalyzerTool.SEMGREP`, #22) or a compiler's own diagnostic output from a real
+    build (`AnalyzerTool.COMPILER_DIAGNOSTIC`, #23) — with no execution and no crash
+    involved, never conflated with `FUZZING_CAMPAIGN`, which specifically claims a
+    dynamic run found it. #22 and #23 independently added this exact member (same
+    name, same string value) while working concurrently on separate branches; #23
+    merged first (D-153), #22 merges into an already-existing member here rather than
+    adding a second one — no downstream data was ever at risk, since both authors
+    picked the identical value.
     """
 
     FUZZING_CAMPAIGN = "FUZZING_CAMPAIGN"

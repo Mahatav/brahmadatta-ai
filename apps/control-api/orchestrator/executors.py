@@ -266,6 +266,7 @@ _OWNER_BY_KIND: dict[JobKind, str] = {
     JobKind.SANITIZER_BUILD: "T1/T2 (see this module's docstring — its orchestration "
     "point is genuinely unresolved as of T0; SANITIZER_BUILD has no MissionState row "
     "of its own in architecture spec §3.2's progress table)",
+    JobKind.ANALYZE: "backend-developer (#22, D-144) -- workers.static_analysis.dispatch",
     JobKind.FUZZ: "T2 (a reference transition policy is registered below; the "
     "executor itself is not)",
     JobKind.MINIMIZE: "T2",

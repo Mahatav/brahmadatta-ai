@@ -17038,3 +17038,158 @@ authorization, recorded in the PR rather than re-litigated here.
 **Final approval authority** — `product-manager`/`cto` per D-059's own final-
 approval line, since this implements that ruling rather than revisiting it; no
 further sign-off required to merge given the verification depth above.
+---
+
+## D-155 · #22 Semgrep integration built: `JobKind.ANALYZE` replaces the `TRIAGE` stub, a vendored offline ruleset, real findings normalized into the shared `Finding` schema · 2026-08-24 · `backend-developer`
+
+Built under D-144's blanket CUT-reopen authorization (`#22` is named explicitly in its
+scope list) — no per-issue ruling was needed to begin, per D-144's own text. Checked
+D-144 in full from a genuine `git fetch origin main` into an isolated worktree before
+starting (not from the shared primary checkout — see D-147's "process lesson" on
+exactly this failure mode, avoided here), and re-read #22's own comment thread
+(`gh issue view 22 --comments`, empty) before proceeding, per that same lesson.
+
+**Decision.** Semgrep now runs for real, inside the existing sandbox, against a
+vendored ruleset — not `--config=p/c`/`--config=auto`.
+
+**Options considered for the network constraint.**
+1. Vendor a small, hand-authored, pinned C/C++ ruleset into the repo
+   (`adapters/semgrep/rules/`), referenced by a local `--config` path at scan time.
+   Semgrep itself needs network only at Docker-image *build* time (`pip install
+   semgrep==1.173.0`, `infrastructure/compose/images/analyze-toolchain.Dockerfile`) —
+   never at scan time. **Chosen.**
+2. Fetch `--config=p/c`/`auto` live from `semgrep.dev` at scan time. Rejected:
+   `packages.sandbox.container.ContainerJailPolicy.network` is hardcoded to `"none"`
+   (`__post_init__` refuses anything else, D-024 condition 1) and
+   `docs/03-technical/23-security-plan.md` states "Outbound network denied by
+   default" at the project level — there is no reachable network to fetch from, by
+   design, and CLAUDE.md's own rule ("repository content is never sent to an
+   external inference API") extends in spirit to an outbound config-resolution
+   request too. Confirmed directly, not assumed: `ContainerJailPolicy.network`'s own
+   `__post_init__` raises on anything but `"none"`.
+3. Bake a full public registry ruleset (e.g. `p/c`) into the image at build time
+   instead of vendoring by hand. Rejected for this pass: the public `p/c` pack is
+   large and its exact rule set is not something this session could review
+   line-by-line before shipping it into a security-relevant path; a small,
+   hand-authored set the author can vouch for every line of is a more honest
+   starting point than importing an opaque third-party pack wholesale. Flagged as a
+   real follow-up (a reviewed, larger pack) rather than a rejected idea.
+
+**Where Semgrep plugs into the pipeline.** `TRIAGE` (architecture spec §2.5) was a
+near-stub before this change — `orchestrator.queue.advance_through_triage`/
+`_emit_triage_stub_events`, driven directly by the tick loop because Semgrep was
+`CUT` (P1-2) and nothing else needed a sandboxed worker for this stage. `JobKind.
+ANALYZE` now backs `MissionState.TRIAGE` (`JOB_BACKED_STATES[MissionState.TRIAGE] ==
+JobKind.ANALYZE`) exactly like every other stage; the old stub functions are removed
+(dead code once job-backed — leaving both would have double-transitioned a mission
+still mid-scan). `JobKind.ANALYZE` was added to `orchestrator.queue.FUZZ_ONLY_KINDS`
+(D-073's container-runtime-only set) since it opens a `ContainerJail` exactly like
+`FUZZ`/`MINIMIZE` do — `infrastructure/scripts/run-fuzz-worker.sh` needed no change,
+since it already derives its `--kinds` argument from that constant at invocation time
+(#203).
+
+**Normalization approach.** `adapters/semgrep/parser.py` parses `semgrep --json`
+output defensively (a malformed single result entry is skipped, not fatal; a scan
+that produced zero output or unparseable JSON is reported, not raised). One real,
+reproduced gotcha, checked directly against real Semgrep 1.173.0 output, not assumed:
+the OSS engine returns the literal string `"requires login"` for both
+`results[].extra.lines` and `results[].extra.fingerprint` when not authenticated
+against Semgrep Cloud (this adapter never authenticates) — neither is trusted;
+`adapters/semgrep/run_semgrep.py` reads the real matched code snippet back off the
+checked-out source directly (still host-readable inside `ContainerJail.root` before
+teardown), and `workers/static_analysis/dispatch.py` derives its own fingerprint from
+`(rule_id, file_path, start_line)`, the same "derive it ourselves" pattern
+`workers/fuzzing/dispatch.py::_fingerprint` already uses. `AnalyzerTool.SEMGREP` and
+`DiscoveryMethod.STATIC_ANALYSIS` were added to the frozen contract
+(`contracts/enums.py`) and documented back into
+`docs/03-technical/21-api-specification.md`'s `discovery_method` enumeration.
+Redaction: every matched code snippet goes through `orchestrator.redaction.
+redact_sanitizer_report` before reaching `Finding.sanitizer_report`/`code_slice` —
+the same helper `workers/fuzzing/dispatch.py` already uses for ASan/UBSan text,
+reused rather than reinvented, per this task's own instruction.
+
+**Ruleset scope.** Five rules (`adapters/semgrep/rules/c/dangerous-functions.yaml`):
+dangerous string functions (CWE-120), non-literal format strings (CWE-134), malloc/
+calloc sized from arithmetic (CWE-190), memcpy/memmove review (CWE-787, informational),
+command injection via `system`/`popen` (CWE-78). Each carries `metadata.
+brahmadatta_category`/`brahmadatta_severity` mapping directly onto `FindingCategory`/
+`Severity`, read explicitly by the normalizer rather than inferred from Semgrep's own
+three-level `severity` (a fallback mapping exists for a rule that omits the metadata).
+
+**Tests.** `adapters/semgrep/tests/test_parser.py` (pure parsing logic, fixtures drawn
+from real captured output). `adapters/semgrep/tests/test_real_scan.py` and
+`orchestrator/tests/test_analyze_executor.py::test_a_real_semgrep_scan_end_to_end`
+(opt-in, `BRAHMADATTA_RUN_REAL_ANALYZE_SCAN=1`, needs a reachable docker daemon —
+mirrors `workers/fuzzing/tests/test_real_campaign.py`'s own gate) run a REAL,
+non-mocked container — built from `infrastructure/compose/images/analyze-toolchain.
+Dockerfile`, digest-pinned via `build-analyze-image.sh` — against
+`demo/repositories/pktcfg` with the full D-024 flag set (`--network none --user
+10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs
+/tmp:size=...`) and get two real findings (`src/parse.c:114` memcpy, `src/parse.c:120`
+malloc arithmetic) — run and observed passing in this session, not asserted from
+reading the code. `orchestrator/tests/test_analyze_executor.py` (14 tests, mocked
+`run_analyze_stage`) covers idempotency, cancellation, the infra-failure vs
+scan-level-error split, `Finding`/`StageToolRun` persistence, redaction of a poisoned
+code snippet (absolute path + `DATABASE_URL=postgresql://...`), and the
+`TRIAGE -> STRESS_TEST`/`TRIAGE -> FAILED` transition-policy routing. Full regression:
+758 passed / 1 pre-existing-and-unrelated failure (`test_live_backend_built_by_this_
+module_gets_401_from_the_sidecar_without_the_fix`, confirmed identical on the
+unmodified checkout before this change) / 21 skipped, in `apps/control-api`; 204
+passed / 1 xfailed (pre-existing, unrelated) across `tests/ workers/ adapters/` at the
+repo root, with the real-scan opt-in enabled.
+
+**One real bug found and fixed by these tests, not by inspection**: the first draft of
+`_persist_outcome` (`workers/static_analysis/dispatch.py`) omitted
+`detected_at=outcome.recorded_at` from `record_finding`'s call — a required
+keyword-only argument distinct from `now`. Caught immediately by
+`test_real_matches_persist_a_stage_tool_run_and_a_finding_per_match` failing with a
+real `TypeError`, not discovered later. A second bug (`parse_semgrep_json("")`
+returning `ok=True` instead of `ok=False`) was caught the same way by
+`test_empty_stdout_is_reported_not_raised`.
+
+**A Django migration was generated** (`missions/migrations/0005_analyze_jobkind_and_
+semgrep_choices.py`) — `choices=` metadata only (`JobKind.ANALYZE`, `AnalyzerTool.
+SEMGREP`, `DiscoveryMethod.STATIC_ANALYSIS`), no new column/index/constraint, no data
+migration. `manage.py makemigrations --check` failed without it; generated because
+this is metadata on fields this backend-developer task already owns (not a schema
+design decision), flagged here rather than silently generated with no record.
+
+**Known naming debt, disclosed rather than silently perpetuated**:
+`orchestrator.queue.FUZZ_ONLY_KINDS` now also contains `JobKind.ANALYZE` and is
+misnamed (it means "container-runtime-only kinds"); not renamed in this change to
+avoid an unrelated rename across `run-fuzz-worker.sh`, `print_fuzz_kinds.py`, and the
+two tests that pin that exact name.
+
+**Not done in this change, flagged rather than assumed out of scope**:
+`docs/09-company/06-architecture-spec.md` line ~304 still describes `TRIAGE` as
+"runs and finds nothing, by construction... Semgrep is CUT (#22)" — stale as of this
+PR. Left untouched: that document is software-architect/cto-owned, and this backend-
+developer task's authority extends to `21-api-specification.md`'s enumerated contract
+values (updated above), not to rewriting the architecture spec's own prose. Flagged
+in this PR's handoff for `software-architect`/`cto` to reconcile.
+
+**Security implications.** Semgrep runs inside the same isolation boundary FUZZ
+already uses (D-024: `--network none`, non-root fixed uid, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--read-only` root + sized tmpfs) — a hostile
+target repository crafting a file to exploit a Semgrep parser bug is contained the
+same way a hostile fuzz target is. No new attack surface beyond what `ContainerJail`
+already accepts for FUZZ. This is a security-sensitive change (sandbox execution,
+analysis pipeline) and per `CLAUDE.md`/`COMPANY.md` requires `cybersecurity` review
+recorded on the PR before merge — not self-merged despite Claude's standing merge
+authority once gates pass.
+
+**Cost implications.** None beyond the existing sandbox infrastructure — Semgrep OSS
+is free, the image build adds ~15s to a cold `docker build` (measured in this
+session), cached thereafter.
+
+**Scalability implications.** A Semgrep scan against `demo/repositories/pktcfg` (7
+files) completed in well under 5 seconds in every real run this session performed;
+the fixed 600s container wall-clock budget (`workers/static_analysis/dispatch.py`,
+not derived from `MissionPolicy` — no new policy field added in this change,
+disclosed as a deliberate simplification) leaves two orders of magnitude of headroom
+before a dedicated `analyze_seconds` policy knob (mirroring `fuzz_seconds`) becomes a
+real need.
+
+**Final approval authority** — CTO (technical, this touches the state machine and the
+sandbox). `cybersecurity` review is required before merge (sandbox execution, analysis
+pipeline — same class as every other `ContainerJail` consumer) — not self-merged.
