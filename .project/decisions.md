@@ -17314,3 +17314,179 @@ self-merge is reasonable per this task's own authorization.
 this record implements that ruling as the owner's comment scoped it, rather than
 revisiting either). No further sign-off required to merge given the verification
 above.
+
+## D-157 — #25: Analysis Rail extended with findings-by-severity, dependency health and compiler health · 2026-08-25 · `frontend-developer` seat
+
+Built under D-144's blanket CUT-reopen authorization (`#25` is named explicitly
+in its scope list) and its own dependencies (#19, #22) already merged to
+`main`. Checked `gh issue view 25 --comments` (empty — no per-issue
+prohibition) before starting, per the D-147/D-153 process lesson, from a real
+`git fetch origin` into an isolated worktree (`/tmp/build-25-analysis-rail`,
+branch `feat/25-analysis-rail-findings`).
+
+**What this consumes.** `GET /missions/{id}/findings` and
+`GET /missions/{id}/findings/{id}` (`api/routers/evidence.py`, unchanged) —
+the same `FindingSummary`/`FindingDetail` schemas #22 (Semgrep) and #23
+(compiler diagnostics) already populate with `DiscoveryMethod.STATIC_ANALYSIS`
+findings, tagged `AnalyzerTool.SEMGREP` or `AnalyzerTool.COMPILER_DIAGNOSTIC`
+respectively. No backend change was needed or made — the contract already
+carries every field the acceptance criteria ask for (severity, category,
+tool, `location.file_path`/`location.line`).
+
+**Decision — read from the existing event stream, not a new REST call.**
+Followed the software-architect's own D-151 §"Question 3" guidance written
+for this exact issue: `MissionSnapshot` gains `findings: FindingSummary[]`,
+accumulated (upsert by `id`) from the same `FINDING_RECORDED`/`kind: 'finding'`
+events the store already ingests for the single fuzzing-confirmed `finding`
+field. This means `hydrateMissionSnapshot`'s existing full-history REST
+replay (D-114 BUG-2) reconstructs the complete findings list on load/
+reconnect for free, with no second data-fetching path to keep in sync with
+the live stream. `finding` (singular) is untouched — `FindingsRail.tsx` and
+`CandidateCompareOverlay.tsx` keep reading it exactly as before.
+
+**Options considered for where the findings list lives.**
+1. **(Chosen) Accumulate in the shared `$missionSnapshot` store**, exactly
+   like `patchCandidates`/`verifications` already do. Pro: one source of
+   truth, free REST-replay recovery, no new fetch/loading/error state to
+   build. Con: the store's shape grows by one field every panel that reads
+   `MissionSnapshot` now carries, whether it needs it or not — judged
+   acceptable, since every other accumulator in this file already works this
+   way.
+2. **A dedicated `listFindings()` REST call inside the new component**,
+   mirroring `FindingsRail.tsx`'s own `getFinding` pattern. Rejected: would
+   need its own loading/error/retry state for the *list* in addition to the
+   per-row drill-down fetch this issue also needs, duplicating machinery the
+   store already provides via replay, and would drift from the SSE-driven
+   value on a long-running mission unless separately re-polled.
+3. **Derive the list from `GET /missions/{id}/evidence`'s own
+   `findings` array.** Rejected: that endpoint returns the *whole* evidence
+   bundle (baseline, patches, verifications, tool versions, ...) for a single
+   list of findings — far more than this rail needs, and a second definition
+   of "the mission's findings" alongside the dedicated `/findings` endpoint
+   and the event stream.
+
+**Design spec followed, and where it needed a live update.**
+`docs/09-company/13-cut-pullback-design-spec.md` §1 (ui-ux-designer,
+2026-08-16, D-057) already specifies this exact extension — findings-by-
+severity, dependency health, compiler health, as three new regions inside
+the existing `AnalysisRail` (not a sixth panel; the frozen scored frame has
+zero body-height slack per §3 of the design system, and this rail already
+lives in the pre-mission setup drawer, outside that budget). Followed as
+written for: the extension point, the finding-row/evidence-block reuse, the
+severity sort order, the dependency-health row (still permanently absent —
+confirmed directly, no dependency-scanning capability exists anywhere in
+this codebase, not even a stub), and D-057's gate-style `NOT RUN` treatment
+for it.
+
+**One place this build deliberately updates that spec's premise, not its
+rule.** §1.2/§1.3 of that spec justified giving compiler health the same
+*permanent* `NOT RUN` gate-style row as dependency health, because at the
+time it was drafted (2026-08-16) compiler-warning capture was still P1-2,
+cut. #23 (D-153) landed it for real on 2026-08-24. Rendering compiler health
+as permanently `NOT RUN` today would itself be the exact dishonesty D-057
+was written to prevent — disclosing a capability as never-built when it now
+runs on every mission's `BASELINE` stage. `CompilerHealthRow` therefore
+renders two real states instead: a quiet, secondary-text *pending* line
+("waiting for the BASELINE build to complete") while `BASELINE` has not
+completed — matching D-023/DS-03's ordinary not-measured-value treatment,
+since this is a real producer that just hasn't run yet, not a permanently
+absent one — and a real, computed count of `AnalyzerTool.COMPILER_DIAGNOSTIC`
+findings (including a genuine zero, "clean build", in verified-green) once it
+has. Dependency health keeps D-057's original loud treatment unchanged,
+since nothing about its premise (no producer exists at all) has changed.
+
+**Severity grouping, made literal.** "Grouped by severity with real counts"
+is implemented as real per-severity bucket headers (`[ CRITICAL · 1 ]`,
+`[ MEDIUM · 2 ]`, ...) each showing only severities with at least one real
+finding — never a fabricated empty bucket for a severity nothing was found
+at, per the design spec's own §1.2 rule extended to the now-real multi-
+finding case. Within a bucket, sort is discovery order (`detected_at`
+ascending), matching §1.4.
+
+**Scope line drawn: `DiscoveryMethod.STATIC_ANALYSIS` only.** #25's own body
+names "the static-analysis findings summary" specifically, and depends only
+on #19/#22 — not #30 (crash dedup) or the fuzzing pipeline. The
+fuzzing-confirmed crash finding already has its own dedicated rail and
+always-expanded evidence block (`FindingsRail.tsx`, design system §6.3/
+§6.3a) and is not duplicated here. `computeStaticAnalysisCoverage` filters
+`snapshot.findings` to `discovery_method === 'STATIC_ANALYSIS'` before
+grouping.
+
+**Drill-down to file:line.** `location.file_path`/`location.line` render
+directly on the collapsed row (no round trip needed — already present on
+`FindingSummary`). `[ VIEW EVIDENCE ]` is a real `<button>` (not a synthetic
+`onClick` on a bare element, per #56's own audited rule) that fetches the
+real `GET /findings/{id}` on first expand — same endpoint, same
+`ApiError`/retry pattern `FindingsRail.tsx` already uses for the fuzzing
+finding — and renders `FindingDetail.code_slice`/`sanitizer_report`. Verified
+live (not just unit-tested): a temporary, non-committed harness page
+(deleted before this record was written; see Verification below) rendered
+three real snapshots — not-started, partial/"so far", and five populated
+findings across four severities — and a real click on `[ VIEW EVIDENCE ]`
+correctly toggled to `[ HIDE EVIDENCE ]` and surfaced a real
+`ApiError`/`[ RETRY ]` path (no backend was running in this environment, so
+the success-content render itself reuses `FindingsRail.tsx`'s
+already-verified pattern verbatim rather than being independently
+screenshotted with real data).
+
+**A pre-existing contract-drift gap, found and fixed as a mechanical
+prerequisite.** `apps/command-center/src/lib/api/schema.d.ts`'s committed
+`AnalyzerTool` union was missing `SEMGREP` — PR #274 (Semgrep integration)
+merged onto `main` *after* PR #280 (#56) last ran `npm run generate:api`
+(confirmed directly: `git log --oneline` shows `ad509a5` #274 on top of
+`42db6bd` #56), so the regeneration that last ran didn't yet have SEMGREP in
+`packages/schemas/openapi.json` to pick up. This build's own severity-chip/
+tool-label logic needs `AnalyzerTool` to include `SEMGREP` to typecheck, so
+`npm run generate:api` was re-run as a separate, clearly-labelled mechanical
+fix (openapi-typescript output only — no hand edits), verified against
+`npm run check:api`. This incidentally also closes the identical drift
+D-156's own record disclosed as a known gap left for `backend-developer` —
+confirmed by re-running `check:api` after rebasing this branch onto
+`origin/main` past D-156's commit, where it now passes.
+
+**Testing.** `apps/command-center/scripts/check-issue-25-analysis-rail-
+findings.mjs`: nine real behavioral tests against
+`src/lib/missionControl/severityFindings.ts` (`node --experimental-strip-
+types`, no JSX toolchain, mirroring `formLogic.ts`'s own reason for being
+split out of its component) — severity/discovery-order sort, no fabricated
+empty buckets, the three coverage states (not-started/partial/complete)
+including "zero is only a result once both producers finished," the
+static-analysis-only filter, compiler-vs-Semgrep separation, and the
+three-colour-only chip mapping (LOW/INFO get no colour, never a fourth
+state colour) — plus static-source assertions guarding the drill-down's real
+endpoint/error-handling/button semantics and the dependency-health row's
+permanent reason string. Full command-center suite re-run after rebasing
+onto `origin/main` past D-156 (#31): `npm run check` — every one of the 15
+check scripts, `astro check` (58 files, 0 errors/warnings/hints), and
+`tsc --noEmit` all green. `npm run build` succeeds.
+
+**Cost implications.** None — no new dependency, no new endpoint, no new
+container image. `findings: FindingSummary[]` is a bounded-by-mission array
+already implicitly bounded by how many findings a mission's own static
+analysis produces (Semgrep's five-rule ruleset, D-155, plus one build's
+worth of compiler diagnostics).
+
+**Security implications.** None beyond what `FindingsRail.tsx`/#22/#23
+already established: `code_slice`/`sanitizer_report` reach the browser
+already redacted server-side (`orchestrator.redaction.
+redact_sanitizer_report`, per D-153/D-155), and this component renders them
+through the same `sanitizeDisplayText` every other panel uses before they
+touch the DOM — no new rendering path, no `dangerouslySetInnerHTML`. Not a
+security-sensitive change (no sandbox, auth, secrets or verification-gate
+surface touched).
+
+**Scalability implications.** Negligible — grouping/filtering a mission's
+own findings array client-side (bounded by one Semgrep scan and one build's
+diagnostics) is O(n) over a small n.
+
+**Recommendation.** Merge. UI-only, non-security-sensitive, self-merge is
+reasonable per this task's own authorization and CLAUDE.md's standing merge
+rule. `npm run check`/`npm run build` both green; real rendering verified
+for the empty/not-started state and for five populated findings across four
+severities via a temporary local harness (not committed).
+
+**Final approval authority** — CTO (technical; UI-only). `product-manager`/
+`ui-ux-designer` may want to confirm the compiler-health premise update
+(§1.3 above) against the original design addendum, since it changes a
+rendering the addendum specified as permanent — flagged in the PR rather
+than treated as this seat's call alone to finalize silently.

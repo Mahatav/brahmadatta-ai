@@ -154,7 +154,7 @@ export function MissionCommandCenter() {
         <div className="bd-setup-drawer__body">
           <LocalRepositoryIntake />
           <MissionControlPanel />
-          <AnalysisRail snapshot={snapshot} localRepository={localRepository} analysis={analysis} />
+          <AnalysisRail snapshot={snapshot} localRepository={localRepository} analysis={analysis} streamState={streamState} />
           <section className="bd-control-plane" aria-labelledby="bd-control-plane-title">
             <h2 id="bd-control-plane-title" className="bd-panel__title">[ CONTROL PLANE ]</h2>
             <SystemStatus />
