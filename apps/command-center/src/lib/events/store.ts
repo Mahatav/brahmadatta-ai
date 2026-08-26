@@ -14,6 +14,7 @@ export type MissionState = components['schemas']['MissionState'];
 export type MissionPosture = components['schemas']['MissionPosture'];
 export type EventStatus = components['schemas']['EventStatus'];
 export type Severity = components['schemas']['Severity'];
+export type AnalyzerTool = components['schemas']['AnalyzerTool'];
 export type BaselineReport = components['schemas']['BaselineReport'];
 export type FindingSummary = components['schemas']['FindingSummary'];
 export type FuzzingReport = components['schemas']['FuzzingReport'];
@@ -110,6 +111,15 @@ export interface MissionSnapshot {
   baseline: BaselineReport | null;
   fuzzing: FuzzingReport | null;
   finding: FindingSummary | null;
+  /** #25 — every `FINDING_RECORDED` event this mission has emitted, accumulated (upsert by
+   * `id`, matching the `patchCandidates`/`verifications` pattern below), never just the latest
+   * one. `finding` above stays the single fuzzing-confirmed crash FindingsRail already reads;
+   * this is the full set the Analysis Rail's severity grouping needs — Semgrep and
+   * compiler-diagnostic findings (`DiscoveryMethod.STATIC_ANALYSIS`, #22/#23) both arrive as
+   * ordinary `FINDING_RECORDED` events on the same channel (D-151 §Q3), so no new event kind or
+   * REST call is needed to build the list; `hydrateMissionSnapshot`'s existing full-history
+   * replay already reconstructs it on load/reconnect exactly like every other accumulator here. */
+  findings: FindingSummary[];
   reproducer: ReproducerRecord | null;
   patchCandidates: PatchCandidate[];
   verifications: VerificationRecord[];
@@ -149,6 +159,7 @@ export const emptyMissionSnapshot: MissionSnapshot = {
   baseline: null,
   fuzzing: null,
   finding: null,
+  findings: [],
   reproducer: null,
   patchCandidates: [],
   verifications: [],
@@ -454,7 +465,9 @@ function reduceMissionSnapshot(snapshot: MissionSnapshot, event: MissionEventEnv
   }
 
   if (event.payload.kind === 'finding') {
-    next.finding = sanitizeFindingSummary(event.payload.finding);
+    const finding = sanitizeFindingSummary(event.payload.finding);
+    next.finding = finding;
+    next.findings = [...snapshot.findings.filter((item) => item.id !== finding.id), finding];
   }
 
   if (event.payload.kind === 'reproducer') {

@@ -1,4 +1,10 @@
 import type { LocalRepositoryContext, MissionSnapshot, StreamState } from '../lib/events/store';
+import {
+  CompilerHealthRow,
+  computeStaticAnalysisCoverage,
+  NotRunCoverageRow,
+  SeverityFindingsList,
+} from './SeverityFindingsList';
 
 /**
  * The Analysis Rail — baseline/ctest/regression readouts plus the bounded, virtualized local
@@ -94,12 +100,15 @@ export function AnalysisRail({
   snapshot,
   localRepository,
   analysis,
+  streamState = 'idle',
 }: {
   snapshot: MissionSnapshot;
   localRepository: LocalRepositoryContext | null;
   analysis: AnalysisRailState;
+  streamState?: StreamState;
 }) {
   const signalFiles = virtualizedSignalFiles(localRepository?.detectedFiles ?? []);
+  const staticCoverage = computeStaticAnalysisCoverage(snapshot);
 
   return (
     <section className={`analysis-rail analysis-rail--${analysis.state}`} aria-labelledby="analysis-rail-title">
@@ -138,6 +147,16 @@ export function AnalysisRail({
             <li>no signal files mapped yet</li>
           )}
         </ol>
+      </div>
+
+      {/* #25 — findings by severity, dependency health and compiler health (D-057,
+          docs/09-company/13-cut-pullback-design-spec.md §1). Extends this rail rather than
+          adding a sixth panel — the frozen scored frame has zero body-height slack (§3), and
+          this rail already lives in the pre-mission setup drawer, outside that budget. */}
+      <div className="analysis-rail__coverage">
+        <SeverityFindingsList snapshot={snapshot} streamState={streamState} coverage={staticCoverage} />
+        <CompilerHealthRow coverage={staticCoverage} />
+        <NotRunCoverageRow label="DEPENDENCY HEALTH" reason="no dependency scanner in this build" />
       </div>
     </section>
   );

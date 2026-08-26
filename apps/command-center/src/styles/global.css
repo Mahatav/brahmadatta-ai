@@ -333,3 +333,125 @@ button:disabled {
 .status-matrix div {
   grid-template-columns: 104px minmax(0, 1fr);
 }
+
+/* ==========================================================================
+   #25 — Analysis Rail extension: findings by severity, dependency health and
+   compiler health (docs/09-company/13-cut-pullback-design-spec.md §1, D-057).
+   Shares the rail's own tokens/rhythm rather than importing the scored frame's
+   bracket-panel chrome wholesale; severity/state colour still comes from the
+   one shared token set (`--bd-state-*`, tokens.css).
+   ========================================================================== */
+
+.analysis-rail__coverage {
+  display: grid;
+  gap: var(--bd-space-4);
+  min-inline-size: 0;
+  border-block-start: var(--bd-rule-hair) solid color-mix(in srgb, var(--bd-c-white) 18%, transparent);
+  padding-block-start: var(--bd-space-3);
+}
+
+.analysis-rail__coverage-block {
+  display: grid;
+  gap: var(--bd-space-2);
+  min-inline-size: 0;
+}
+
+.analysis-rail__coverage-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--bd-space-2);
+}
+
+.analysis-rail__coverage-title {
+  margin: 0;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+}
+
+.analysis-rail__coverage-header strong {
+  font-size: var(--bd-type-mono-xs);
+  font-weight: normal;
+  color: var(--bd-text);
+}
+
+.analysis-rail__coverage-empty {
+  margin: 0;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-xs);
+  line-height: var(--bd-type-mono-xs-lh);
+}
+
+.analysis-rail__severity-group {
+  display: grid;
+  gap: var(--bd-space-1);
+}
+
+.analysis-rail__severity-header {
+  margin: 0;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+}
+
+.analysis-rail__finding-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--bd-space-2);
+}
+
+.analysis-rail__finding-row {
+  min-height: var(--bd-control-h);
+  display: grid;
+  gap: var(--bd-space-1);
+  padding-block: var(--bd-space-1);
+  border-block-start: var(--bd-rule-hair) solid var(--bd-rule-construction);
+}
+
+.analysis-rail__finding-row-line {
+  display: flex;
+  min-inline-size: 0;
+  align-items: baseline;
+  gap: var(--bd-space-2);
+}
+
+.analysis-rail__finding-index {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-3xs);
+  white-space: nowrap;
+}
+
+.analysis-rail__finding-title {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bd-text);
+  font-size: var(--bd-type-mono-sm);
+}
+
+.analysis-rail__finding-row-meta {
+  display: flex;
+  min-inline-size: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bd-space-2);
+}
+
+.analysis-rail__finding-row-meta small {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+}
+
+.analysis-rail__finding-evidence {
+  padding-block-start: var(--bd-space-2);
+}
