@@ -19,6 +19,7 @@ import { BottomStrip } from './BottomStrip';
 import { BrahmadattaCore } from './BrahmadattaCore';
 import { CandidateCompareOverlay } from './CandidateCompareOverlay';
 import { FindingsRail } from './FindingsRail';
+import { GitHistoryBisectPanel } from './GitHistoryBisectPanel';
 import { LiveEventStatus } from './LiveEventStatus';
 import { LocalRepositoryIntake } from './LocalRepositoryIntake';
 import { MissionControlPanel } from './MissionControlPanel';
@@ -199,6 +200,11 @@ export function MissionCommandCenter() {
           onMissionRefreshed={refreshMissionDetail}
         />
       </div>
+
+      {/* #26 — below the frozen frame, not inside it (see GitHistoryBisectPanel's own doc
+          comment): the five-panel body above is fixed at zero slack (§3), and this is
+          supplementary evidence-deck content the issue's own body says is "not a gate". */}
+      <GitHistoryBisectPanel snapshot={snapshot} hasActiveMission={hasActiveMission} />
 
       <CandidateCompareOverlay
         open={compareOpen}

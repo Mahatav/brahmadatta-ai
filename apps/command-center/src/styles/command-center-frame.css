@@ -536,3 +536,74 @@
    cut, §11"). `.bd-frame`'s `min-width: 1280px` above lets the frame overflow into horizontal
    scroll rather than collapsing into a broken layout, which is the same choice the pre-existing
    `.command-center` rules made. */
+
+/* ---- Evidence deck (#26) — below the frozen frame, not one of the five P0 panels -------
+   docs/02-design/00-ui-design-direction.md, "Lower evidence deck". Same width/centring as
+   `.bd-frame` so the deck lines up under it rather than reading as an unrelated block. */
+.bd-evidence-deck {
+  position: relative;
+  margin: 0 auto var(--bd-space-6);
+  min-width: 1280px;
+  width: calc(100% - var(--bd-space-6) * 2);
+  max-width: 1600px;
+  padding: var(--bd-space-5);
+  border-top: var(--bd-rule-hair) solid var(--bd-rule-construction);
+}
+
+.bd-evidence-deck__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--bd-space-5);
+  padding-top: var(--bd-space-3);
+}
+
+.bd-git-history__commit {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--bd-space-1) var(--bd-space-3);
+  margin: 0 0 var(--bd-space-4);
+  font-size: var(--bd-type-mono-sm);
+}
+.bd-git-history__commit dt {
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+  align-self: baseline;
+}
+.bd-git-history__commit dd {
+  margin: 0;
+  color: var(--bd-text);
+  overflow-wrap: anywhere;
+}
+
+.bd-git-history__subtitle {
+  margin: 0 0 var(--bd-space-2);
+  color: var(--bd-text-secondary);
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+  text-transform: uppercase;
+}
+
+.bd-risk__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.bd-risk__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0 var(--bd-space-2);
+  align-items: baseline;
+  padding: var(--bd-space-2) 0;
+  border-top: var(--bd-rule-hair) solid var(--bd-rule-construction);
+}
+.bd-risk__row:first-child { border-top: none; }
+.bd-risk__file { font-size: var(--bd-type-mono-sm); color: var(--bd-text); overflow-wrap: anywhere; }
+.bd-risk__detail { grid-column: 1 / -1; color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); overflow-wrap: anywhere; }
+.bd-risk__row--critical .bd-chip { color: var(--bd-state-critical); }
+.bd-risk__row--high .bd-chip { color: var(--bd-state-warning); }
+
+.bd-bisect__range { margin: 0 0 var(--bd-space-3); color: var(--bd-text-secondary); font-size: var(--bd-type-mono-xs); }
+.bd-bisect__steps { list-style: none; margin: 0 0 var(--bd-space-3); padding: 0; display: grid; gap: 2px; max-height: 220px; overflow-y: auto; }
+.bd-bisect__step { font-size: var(--bd-type-mono-xs); color: var(--bd-text); overflow-wrap: anywhere; }
+.bd-bisect__step--bad { color: var(--bd-state-critical); }
+.bd-bisect__step--good { color: var(--bd-state-verified); }
+.bd-bisect__step--skip { color: var(--bd-text-secondary); }
+.bd-bisect__culprit { color: var(--bd-state-critical); }

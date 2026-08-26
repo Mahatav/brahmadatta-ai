@@ -17490,3 +17490,161 @@ severities via a temporary local harness (not committed).
 (§1.3 above) against the original design addendum, since it changes a
 rendering the addendum specified as permanent — flagged in the PR rather
 than treated as this seat's call alone to finalize silently.
+
+## D-158 · #26 Git history summary + bisect timeline panel: idle is the common case,
+not an edge case — no live `JobKind.BISECT` trigger exists for any mission today, so
+the bisect half renders a calm idle state by construction, with tested
+forward-compatible logic ready for when the backend half lands · 2026-08-25/26 ·
+`frontend-developer`, under D-144's authorization
+
+**Renumbered from D-157 to D-158 on rebase** — `#25`'s builder independently claimed
+D-157 first and merged to `main` before this branch rebased on top of it (both
+issues were picked up the same session; the collision is the documented, expected
+outcome of concurrent `CUT`-reopen work under D-144, not an error). Re-checked the
+real highest `D-` number on `origin/main` at rebase time (`D-157`, `#25`) and
+renumbered only this section; `#25`'s own D-157 entry above is untouched.
+
+**Context.** `#26` is named explicitly in D-144's reopened-`CUT` scope list, so no
+further per-issue ruling was needed to begin. Read D-151 (search "TRIAGE/ANALYZE
+composition after #22/#23/#24") in full before designing anything — the
+software-architect ruling that already answered the load-bearing question here: `git
+bisect` (#24, merged) is a separate, operator-triggered capability, never automatic
+for any mission, and wiring a real `JobKind.BISECT` dispatch executor plus the two
+missing `BisectPayload`/`BisectStepPayload` contract variants is named there as
+explicit future work, not done in this pass, and not staffed as of this entry. Also
+read `docs/09-company/06-architecture-spec.md`'s `TRIAGE` row (states plainly:
+"Git-history/bisect-timeline UI (#26) is unbuilt and depends on that not-yet-built
+bisect endpoint/executor actually emitting real events") and confirmed directly
+against `apps/control-api/contracts/schemas/envelope.py` that neither `"bisect"` nor
+`"bisect_step"` is among the fifteen `payload.kind` variants the frozen, D1 contract
+recognizes — an unrecognised `kind` fails Pydantic validation and is silently
+skipped by D-116's malformed-row resilience before it would ever reach `GET
+.../events` or `.../events/replay`. Also checked the #5/#52 fixture directly
+(`packages/test-fixtures/missions/mission-pktcfg-001.events.jsonl`, 60 real events):
+zero carry `payload.kind` of `"bisect"`/`"bisect_step"`.
+
+**Decision — idle is the primary case to design and test for, not a fallback.** The
+issue's own acceptance criterion 3 ("renders sensibly before any bisect has run")
+reads, against the above, as "renders sensibly, full stop" for essentially every
+mission this product can run today. Built the panel accordingly:
+
+1. **GIT HISTORY sub-panel — real data only.** `missions/models.py::Snapshot` records
+   exactly one ingested commit per mission; there is no multi-commit log or diff
+   endpoint anywhere in the contract, and `GET .../git-bisect` is explicitly cut at
+   D1 with a test enforcing its absence from the OpenAPI document
+   (`docs/03-technical/21-api-specification.md`). Rendering a plausible-looking
+   multi-commit "recent history" would be exactly the fabricated-metric failure mode
+   CLAUDE.md's "no decorative fake metrics" rule exists to catch. Instead: the one
+   real commit under test (`SnapshotPayload.commit_sha`, honestly rendered as "not
+   yet ingested" when null, which is the real, verified state of the #52 fixture's
+   own snapshot event — checked directly, not assumed), plus a "risky-change
+   summary" built from real `DiscoveryMethod.STATIC_ANALYSIS` rows (Semgrep/#22 +
+   compiler diagnostics/#23), grouped by file. **Revised mid-build after rebasing
+   onto `#25`** (merged to `main` while this branch was in flight): initially wrote
+   this against a new, dedicated `listFindings()` REST call, mirroring
+   `FindingsRail.tsx`'s `getFinding` pattern — but `#25`'s own D-157 entry (directly
+   above) had just added `MissionSnapshot.findings: FindingSummary[]`, a live
+   accumulator upserted from ordinary `FINDING_RECORDED` events and already
+   reconstructed on load/reconnect by `hydrateMissionSnapshot`, for the identical
+   purpose, and its own "options considered" explicitly rejected a dedicated
+   `listFindings()` call for exactly the reasons that would have applied here too
+   (a second loading/error/retry state, drift from the SSE-driven value on a
+   long-running mission). Building a second, redundant path to the same data one
+   entry after that reasoning was recorded would have ignored it. Switched
+   `summarizeRiskyChanges` to read `snapshot.findings` directly — verified live
+   against the #52 fixture both ways: with the REST call, `GET .../findings` 404s
+   against `sse_replay.py` (that tool never claimed to serve it) and the panel
+   showed an honest-but-needless `EVIDENCE UNAVAILABLE`; reading `snapshot.findings`
+   instead, backed by the same fixture's real `FINDING_RECORDED` event, correctly
+   renders `[ CLEAN ]` (the fixture's one finding is `REPLAYED_REPRODUCER`, not
+   `STATIC_ANALYSIS`, so zero risky files is the real, correct answer here) — both
+   screenshotted before and after. `listFindings` (`lib/api/client.ts`) remains real
+   and unused by this panel; left as-is, not removed, since `FindingsRail.tsx`'s own
+   drill-down pattern and `#25`'s per-row detail fetch are separate, legitimate
+   future callers.
+2. **BISECT TIMELINE sub-panel — calm idle state, always, in the shipped app.** No
+   fabricated live feed, no client-side timer standing in for real progress. The
+   render logic for the two harder acceptance criteria ("steps render live... as the
+   search narrows", "first-bad-commit called out clearly") is real and tested
+   (`lib/gitHistory/bisectTimeline.ts::deriveBisectTimelineState`), built directly
+   against `workers/git_analysis/bisect_run.py::emit_bisect_events`'s real, merged,
+   42-test output shape — not guessed — and exercised in
+   `scripts/check-git-history-bisect-panel.mjs` with fixtures shaped exactly like
+   that function's real dicts (start/step/converged/not-converged). Wired through an
+   optional `bisectEnvelopes` prop that `MissionCommandCenter` does not pass today —
+   a documented seam, not a bug, and a structural test
+   (`testTheOnlyLiveCallSiteIsAlwaysEmptyToday`) asserts the composition root never
+   fabricates a value for it.
+
+**Options considered for the bisect half:**
+
+- **(a) Wait to build any UI until `JobKind.BISECT` lands.** Rejected — D-144
+  authorizes `#26` now, by issue number, and the idle-state render plus the git
+  history half have real value today independent of that future work; the issue's
+  own acceptance criteria treat "before any bisect has run" as in-scope, not
+  something to defer.
+- **(b) Extend `MissionEvent.payload`'s discriminated union with `bisect`/
+  `bisect_step` variants myself, to get a fully live-wired panel today.** Rejected —
+  that is an API contract change, `software-architect`/`backend-developer` territory
+  per this role's own scope boundary, not a call a frontend PR should make
+  unilaterally; `contracts/schemas/envelope.py`'s own module doc states plainly that
+  "a new payload variant... breaks the Astro build, which is the intended failure
+  mode" — the contract is deliberately frozen against exactly this kind of
+  frontend-side addition.
+- **(c) Build a demo-friendly synthetic live bisect run into the panel (e.g., replay
+  a canned sequence on mount) so the panel "looks alive."** Rejected outright —
+  this is precisely the fabricated live feed the task brief and CLAUDE.md's
+  no-decorative-fake-metrics rule both prohibit; a judge or operator would be shown
+  progress that never happened.
+- **(d, chosen) Idle-by-default UI, real git-history data where it exists, and
+  tested-but-unwired pure logic for the bisect live path.** Ships real value now
+  (git history, honest idle state), proves the harder rendering logic against the
+  real backend contract without inventing a frontend-side schema change, and leaves
+  a one-line wiring change (pass real envelopes into the existing prop) as the whole
+  cost of the future backend PR's frontend integration.
+
+**Pros/cons of (d).** Pro: nothing shipped is fake; the idle state is honest and the
+git-history half is fully real and live today. Pro: the hardest UI logic (step
+narrowing, first-bad-commit callout) is already built, reviewed, and tested against
+the real event vocabulary, so the day `JobKind.BISECT` is staffed, its PR does not
+also need to design or test bisect rendering from scratch. Con: the bisect
+sub-panel will look identical (idle) across every demo run until that backend work
+lands — an accepted cost, not a defect, given the above.
+
+**A pre-existing, unrelated gap fixed in passing.** `apps/command-center/src/lib/
+api/schema.d.ts` was stale since `#274` (Semgrep, merged onto `main` immediately
+before this branch was cut) added `AnalyzerTool.SEMGREP` to `packages/schemas/
+openapi.json` without a matching `npm run generate:api`. `npm run check:api` failed
+on a clean `origin/main` checkout before this branch touched anything (verified:
+ran it first, saw it fail, then regenerated). Regenerated here because it silently
+broke `npm run check` for this app; not part of `#26`'s own scope, disclosed rather
+than left for the next person to rediscover. (Independently, `#31`'s builder hit the
+same drift and, reasonably, left it as a disclosed gap rather than fixing it — this
+entry's fix supersedes that gap; nothing about `#31`'s own recommendation was
+overridden, only the shared generated artifact both records refer to.)
+
+**Cost implications.** None beyond the work itself — no new infrastructure, no new
+endpoint, and (after the `#25` rebase revision above) no new fetch at all for the
+risky-change summary; it reads state `#25` already accumulates.
+
+**Security implications.** None new. `bisectTimeline.ts` parses `unknown[]`
+defensively (type-guarded field-by-field, never trusts shape) precisely because it
+is speculative parsing of a wire format nothing production-side validates yet — the
+opposite of widening trust. All rendered server-derived text routes through the
+existing `sanitizeDisplayText`, matching every other panel.
+
+**Scalability implications.** None material — `summarizeRiskyChanges` runs
+client-side over `snapshot.findings`, the same small, already-in-memory array `#25`'s
+severity grouping iterates for the same mission.
+
+**Recommendation.** Ship as built; self-merge once QA/manual verification (recorded
+on the PR) is green — UI-only, no isolation/auth/secrets/verification-gate surface
+touched.
+
+**Final approval authority** — CTO (technical; work already authorized by D-144,
+issue `#26` named explicitly in its scope list). Explicitly flagging for a future
+reader: the absence of a live bisect feed in this panel is not a bug or an
+unfinished corner cut short — it is the correct, verified state of the product as of
+this entry, and will remain so until a `JobKind.BISECT` dispatch executor and its
+contract variants are built (D-151's own "target design for the wiring, when
+staffed" section is the spec for that future work).
