@@ -1,6 +1,3 @@
-import { useEffect, useState } from 'react';
-
-import { ApiError, listFindings, type FindingSummary } from '../lib/api/client';
 import {
   deriveBisectTimelineState,
   shortSha,
@@ -23,10 +20,15 @@ import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
  *    ingested commit per mission (D-151); there is no multi-commit log or diff endpoint in
  *    the contract (`GET .../git-bisect` is explicitly cut at D1, enforced by a test
  *    asserting its absence from the OpenAPI document). So this renders the one real commit
- *    under test, plus a "risky-change summary" built from `GET .../findings`'s real
+ *    under test, plus a "risky-change summary" built from `snapshot.findings`'s real
  *    `STATIC_ANALYSIS`-discovered rows (Semgrep + compiler diagnostics) grouped by file —
  *    see `lib/gitHistory/riskyChangeSummary.ts` for why that is the honest reading of
- *    "risky-change summary" against what this system actually tracks.
+ *    "risky-change summary" against what this system actually tracks. `snapshot.findings`
+ *    is #25's accumulator (`lib/events/store.ts`, upserted from every real `FINDING_RECORDED`
+ *    event and already reconstructed on load/reconnect by `hydrateMissionSnapshot`) — reused
+ *    here rather than this panel adding a second, redundant fetch of the same data through
+ *    `GET .../findings` (that endpoint is real too, but #25 already established "no new event
+ *    kind or REST call is needed to build the list").
  *
  * 2. BISECT TIMELINE — idle by default, and today idle is not a fallback case, it is the
  *    ONLY reachable case: no `JobKind.BISECT` executor exists, no endpoint triggers one
@@ -74,34 +76,8 @@ export function GitHistoryBisectPanel({
 }
 
 function GitHistorySubPanel({ snapshot }: { snapshot: MissionSnapshot }) {
-  const [findings, setFindings] = useState<FindingSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const missionId = snapshot.missionId;
-
-  useEffect(() => {
-    setFindings(null);
-    setError(null);
-    if (!missionId) {
-      return undefined;
-    }
-    const controller = new AbortController();
-    setLoading(true);
-    listFindings(missionId, { limit: 100 }, controller.signal)
-      .then((page) => setFindings(page.items))
-      .catch((requestError) => {
-        if (requestError instanceof ApiError) {
-          setError(requestError.message);
-        } else if (!(requestError instanceof DOMException)) {
-          setError('findings request failed');
-        }
-      })
-      .finally(() => setLoading(false));
-    return () => controller.abort();
-    // Re-fetch whenever the mission's finding count could plausibly have grown — the SSE
-    // stream's own `finding` field only ever carries the latest single finding (P0 scope),
-    // so this is the one place that reads the real, complete list.
-  }, [missionId, snapshot.finding?.id]);
+  const groups = summarizeRiskyChanges(snapshot.findings);
+  const analyzeReached = hasAnalyzeStageBeenReached(snapshot);
 
   return (
     <section className="bd-panel bd-crop bd-git-history" aria-labelledby="bd-git-history-title">
@@ -117,66 +93,21 @@ function GitHistorySubPanel({ snapshot }: { snapshot: MissionSnapshot }) {
       </dl>
 
       <h3 className="bd-git-history__subtitle">RISKY-CHANGE SUMMARY</h3>
-      <RiskySummaryBody loading={loading} error={error} findings={findings} snapshot={snapshot} onRetry={() => setFindings((current) => current)} />
+      {groups.length === 0 ? (
+        <p className="bd-panel__empty">
+          <span className="bd-panel__empty-label">{analyzeReached ? '[ CLEAN ]' : '[ AWAITING ANALYZE ]'}</span>
+          {analyzeReached
+            ? 'ANALYZE completed. No static-analysis-flagged file in this snapshot.'
+            : 'Static analysis (Semgrep, compiler diagnostics) has not run for this mission yet.'}
+        </p>
+      ) : (
+        <ol className="bd-risk__list">
+          {groups.map((group) => (
+            <RiskyFileRow key={group.filePath} group={group} />
+          ))}
+        </ol>
+      )}
     </section>
-  );
-}
-
-function RiskySummaryBody({
-  loading,
-  error,
-  findings,
-  snapshot,
-  onRetry,
-}: {
-  loading: boolean;
-  error: string | null;
-  findings: FindingSummary[] | null;
-  snapshot: MissionSnapshot;
-  onRetry: () => void;
-}) {
-  if (loading) {
-    return (
-      <div className="bd-evidence--loading" aria-hidden="true">
-        <div className="bd-placeholder-rule bd-placeholder-rule--65" />
-        <div className="bd-placeholder-rule bd-placeholder-rule--40" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div>
-        <p className="bd-evidence__error" role="alert">[ × EVIDENCE UNAVAILABLE ] {sanitizeDisplayText(error, { maxLength: 200 })}</p>
-        <button type="button" className="bd-bracket-control" onClick={onRetry}>[ RETRY ]</button>
-      </div>
-    );
-  }
-
-  if (findings === null) {
-    return <p className="bd-evidence__pending">[ — AWAITING FINDINGS REQUEST ]</p>;
-  }
-
-  const groups = summarizeRiskyChanges(findings);
-  const analyzeReached = hasAnalyzeStageBeenReached(snapshot);
-
-  if (groups.length === 0) {
-    return (
-      <p className="bd-panel__empty">
-        <span className="bd-panel__empty-label">{analyzeReached ? '[ CLEAN ]' : '[ AWAITING ANALYZE ]'}</span>
-        {analyzeReached
-          ? 'ANALYZE completed. No static-analysis-flagged file in this snapshot.'
-          : 'Static analysis (Semgrep, compiler diagnostics) has not run for this mission yet.'}
-      </p>
-    );
-  }
-
-  return (
-    <ol className="bd-risk__list">
-      {groups.map((group) => (
-        <RiskyFileRow key={group.filePath} group={group} />
-      ))}
-    </ol>
   );
 }
 
