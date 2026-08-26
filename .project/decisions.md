@@ -17193,3 +17193,124 @@ real need.
 **Final approval authority** — CTO (technical, this touches the state machine and the
 sandbox). `cybersecurity` review is required before merge (sandbox execution, analysis
 pipeline — same class as every other `ContainerJail` consumer) — not self-merged.
+
+---
+
+## D-156 — #31: fuzzing telemetry panel built as the reduced static `FuzzingReport`, not the issue body's live/virtualized panel — the body was superseded by the repo owner's own comment · 2026-08-25 · `frontend-developer`, under D-144's reopened-`CUT` authorization
+
+**Context.** #31 is named in D-144's reopened-`CUT` list, but its own issue *body*
+describes a live, high-frequency, virtualized telemetry panel: four real-time
+counters, smooth updates under high event rate, virtualized long finding lists. That
+is not what was built, and this is the record of why, per this task's own explicit
+instruction to check the issue's comment thread before building from the body alone
+(the same "process lesson" D-147 already recorded after #41 was nearly built from a
+stale body read).
+
+`gh issue view 31 --comments` surfaces a comment from Mahatav (`author_association:
+owner`) that cuts the body's scope down, citing the CTO's own technical review:
+
+> Cut on the CTO's review (`05-cto-technical-review.md` §2.1). The most expensive UI
+> item left, no gate depends on it, and it is the direct cause of the event-rate
+> problem the review flags as C4 — a live high-frequency feed pushed through the
+> same SSE channel as durable mission events. Replaced by a static `FuzzingReport`
+> panel rendered once on stage completion: executions, runtime, crashes, corpus
+> size. A judge sees the same four numbers, at a tenth of the cost, with no
+> live-feed failure mode on stage.
+
+`docs/09-company/05-cto-technical-review.md` §2.1 and its C4 finding (D-021)
+independently confirm the same ruling in the CTO's own words: a high-rate fuzzing
+telemetry channel sharing the durable, gap-free, single-writer-per-mission mission
+event log (C3) is the direct cause of an event-rate problem no browser or database
+survives well, and no P0 gate depends on the live panel. The body's acceptance
+criteria (smooth updates under high event rate, virtualized long lists) were built
+for a panel that no longer exists in the authorized scope; this record deliberately
+does not build them.
+
+**What was built instead.** A static `FuzzingReportPanel` component
+(`apps/command-center/src/components/FuzzingReportPanel.tsx`) rendering the four
+named numbers — executions, runtime, unique crashes, corpus size — from the real,
+terminal `FuzzingReport` the STRESS_TEST stage's own `STAGE_COMPLETED` (or
+`MISSION_FAILED`) event already carries (`workers/fuzzing/run.py::emit_fuzzing_
+events`, `payload.kind === 'fuzzing'`) — the same durable, sequenced, one-writer-
+per-mission channel (C3) every other mission event already travels on, already
+folded into `MissionSnapshot.fuzzing` by the existing `reduceMissionSnapshot`
+(`lib/events/store.ts`, pre-existing, unmodified by this change). No new event
+type, no new endpoint, no second `EventSource`, no polling loop — the whole point
+of the cut. Three honest states, matching §5's "empty is not loading and loading is
+not zero" rule: not-yet-run (`STRESS_TEST` never started), in-progress (started,
+report not landed yet — no partial/invented numbers), and the terminal report
+(real numbers, or a disclosed `NOT_RUN` reason verbatim from the stage's own
+message when the campaign could not run at all, e.g. the #83 replay-fallback path).
+
+**Placement — not a sixth panel.** `docs/09-company/04-design-system.md` §6 is
+explicit and repeated twice: "P0-13 names five and this document still builds
+five," and the resource ledger (§6.6) and the findings evidence block (§6.3a) are
+both already-established precedent for "a block inside an existing panel, sized in
+chips rather than in body height" rather than a new panel competing for the frame's
+684px-with-zero-slack body budget (§3). `FuzzingReportPanel` follows the same
+precedent: it renders as a `bd-chip` group inside the Stage Timeline's (panel 2)
+existing STRESS_TEST row, always visible in the row body (not gated behind the
+row's click-to-expand event log, matching DS-04's "must not be behind a click
+during the demo" reasoning for the teardown receipt) rather than a new top-level
+region. No change to `MissionCommandCenter`'s five-panel composition.
+
+**Options considered** for placement — (a) a sixth top-level panel in the frozen
+three-column body; (b) a chip block inside the existing STRESS_TEST row (built);
+(c) fold it into the bottom strip's resource ledger instead.
+
+**Pros and cons.** (a) directly contradicts §6's explicit, twice-repeated "still
+builds five" rule and would need a body-height renegotiation of §3's already
+zero-slack budget — exactly the class of change §6 exists to forbid without a
+design-system revision, which is `ui-ux-designer`/CTO territory, not mine to take
+unilaterally. (c) is topologically wrong: the ledger's own docstring is explicit
+that it is teardown's/resource-release's surface specifically (DS-04, "one teardown
+count, three renderings"); fuzzing results are stage-scoped stress-test evidence,
+not a resource-lifecycle receipt, and mixing the two would make the ledger read as
+if a corpus count were something being released. (b) matches the row that the data
+is already conceptually tied to (STRESS_TEST) and the precedent §6.3a/§6.6 already
+set for exactly this problem — data that matters at a stage's evidence layer,
+without room for a new panel.
+
+**Real-data verification.** Manually verified in a real Chromium tab (Playwright)
+against a throwaway dev-only harness (not committed — deleted before this record),
+feeding `StageTimeline` four real `MissionSnapshot` fixtures side by side:
+not-yet-run (`[ · FUZZING REPORT · NOT YET RUN ]`), in-progress (`[ > FUZZING
+REPORT · IN PROGRESS — renders once the stage completes ]`), completed (`[ + EXECS
+12,480,321 ] [ + RUNTIME 00:02:12 ] [ ! CRASHES 3 ] [ + CORPUS 214 ]`), and a
+disclosed `NOT_RUN` failure (`[ × FUZZING REPORT · NOT RUN · Fuzzing did not run:
+PROBE_TOOLCHAIN failed (libFuzzer not found) ]`). All four states render with the
+correct state-vocabulary glyph/word/colour triple (§5) and no fabricated value.
+
+**Cost implications.** Near zero — one new ~90-line component, a ~15-line wiring
+change in `StageTimeline.tsx`, one CSS block reusing the existing `.bd-chip`
+primitive, one new static regression test
+(`scripts/check-issue-31-fuzzing-report.mjs`). No new dependency, no new backend
+endpoint (the data was already on the wire).
+
+**Security implications.** None — this reads an already-sanitized field
+(`sanitizeFuzzingReport`, pre-existing) off the existing mission snapshot; no new
+input surface, no new egress, no isolation/sandbox change. Not a security-sensitive
+change under `CLAUDE.md`'s definition (isolation, auth, verification gates,
+secrets) — no `cybersecurity` review gate applies.
+
+**Scalability implications.** Strictly positive relative to the cut body: this is
+the C4 fix, not a regression of it. Rendering happens exactly once per mission,
+off one already-durable event; no new SSE traffic, no new per-tick writes against
+`MissionEvent.sequence` (C3's single-writer constraint is unaffected — this adds no
+writer at all, only a reader).
+
+**Recommendation.** Merge. `npm run check` (including the new `check:issue-31`
+static regression test), `astro check`, and `tsc --noEmit` all pass; `npm run
+build` succeeds. `npm run check:api` independently fails on a pre-existing,
+unrelated `schema.d.ts`/`openapi.json` drift — reproduced identically against an
+untouched `origin/main` checkout in an isolated worktree before writing this
+record, so it is disclosed here as a known gap for `backend-developer` to
+regenerate, not attributed to this change or fixed by it (out of this task's
+scope, per D-153/D-155's own precedent of leaving contract regeneration to the
+schema's owner). No isolation/auth/secrets/verification-gate surface touched —
+self-merge is reasonable per this task's own authorization.
+
+**Final approval authority** — CTO (technical; §2.1/C4 is the CTO's own review, and
+this record implements that ruling as the owner's comment scoped it, rather than
+revisiting either). No further sign-off required to merge given the verification
+above.

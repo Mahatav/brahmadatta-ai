@@ -230,6 +230,23 @@
 .bd-timeline__row--not_reached .bd-timeline__label,
 .bd-timeline__row--not_reached .bd-timeline__detail { color: var(--bd-text-secondary); }
 
+/* ---- Fuzzing report (#31) — chips inside STRESS_TEST's row body, not a sixth panel ------- */
+.bd-fuzzing-report {
+  grid-column: 1 / -1;
+  margin: var(--bd-space-1) 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bd-space-2);
+}
+.bd-fuzzing-report--pending,
+.bd-fuzzing-report--critical {
+  display: block;
+  font-size: var(--bd-type-mono-2xs);
+  letter-spacing: var(--bd-type-mono-2xs-ls);
+}
+.bd-fuzzing-report--pending { color: var(--bd-state-not-run); }
+.bd-fuzzing-report--critical { color: var(--bd-state-critical); }
+
 .bd-timeline__events { list-style: none; margin: 0; padding: 0 0 var(--bd-space-2); }
 .bd-timeline__event {
   min-height: var(--bd-row-event-h);
