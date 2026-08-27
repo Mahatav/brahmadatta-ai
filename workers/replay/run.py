@@ -8,11 +8,44 @@ campaign at all. This module owns that path.
 The output mirrors the evidence/event shape used elsewhere in the backend, but stays
 as plain dictionaries for now like `workers.baseline.run`: no Django app, event bus, or
 evidence persistence is imported from this worker.
+
+## Redacting `ReplayFinding.sanitizer_report` (#246, following #191/D-125)
+
+`_finding_from_sanitizer` builds `sanitizer_report` from `run_replay_stage`'s own
+`stderr` — the raw, joined `captured_stderr` of every replay attempt, verbatim output
+of the sandboxed process — the exact same "raw captured tool output" class `workers/
+fuzzing/dispatch.py` already redacts via `orchestrator.redaction.redact_sanitizer_report`
+before it reaches `Finding.sanitizer_report` (#191, SEC-50, D-125). This module cannot
+call that function directly, for a real structural reason rather than convenience:
+
+`orchestrator` lives at `apps/control-api/orchestrator/`, and `apps/control-api` only
+lands on `sys.path` as a side effect of Django settings loading — `config/settings/
+base.py` does the `sys.path.insert(0, str(BASE_DIR))` itself, and that module is only
+ever imported via `manage.py`, `wsgi`/`asgi`, or pytest-django's `DJANGO_SETTINGS_MODULE`
+machinery. This module's own docstring above commits to importing no Django app, and
+`workers/replay/cli.py` runs as `python -m workers.replay` with only the repo root on
+`sys.path` — confirmed directly: `import orchestrator.redaction` from a bare
+interpreter at the repo root raises `ModuleNotFoundError`, exactly the failure `workers/
+fuzzing/dispatch.py` never hits because it only ever runs inside the Django process
+that already did that `sys.path` insertion. Making this worker depend on Django having
+initialized first — just to reach one redaction function — would be a much larger,
+undocumented coupling than the leak-prevention it buys.
+
+`_redact_sanitizer_report` below is therefore a duplicate of `orchestrator.redaction.
+redact_sanitizer_report`'s two regexes and behaviour (absolute-path and environment/
+secret-assignment-line stripping, substituting in place rather than discarding the
+whole report), not a new detector — the same "mirror the shape, do not import across
+the boundary" choice `services/model-gateway/gateway/validation_errors.py` already made
+for its own cross-package boundary (that module's own docstring explains its case: a
+deliberately separate dependency closure rather than a sys.path accident, but the same
+resolution). If the two drift apart, that is a real signal — a reviewer touching either
+should check the other.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -39,6 +72,53 @@ _EVENT_STAGE_COMPLETED = "STAGE_COMPLETED"
 _MISSION_STATE_STRESS_TEST = "STRESS_TEST"
 _MISSION_STAGE_STRESS_TEST = "STRESS_TEST"
 _DEFAULT_REPRODUCER = Path("crash") / "crash-literal-tab.bin"
+
+# --------------------------------------------------------------------------------------
+# Duplicated from `apps/control-api/orchestrator/redaction.py::redact_sanitizer_report`
+# (#191/D-125) — see this module's docstring, "Redacting ReplayFinding.sanitizer_report",
+# for why this cannot be a direct import instead.
+# --------------------------------------------------------------------------------------
+
+#: Same leak class as `orchestrator.redaction.sanitize_detail`'s `=`-ban (`DATABASE_URL=
+#: postgresql://...`-shaped content), but redacting only the offending line rather than
+#: the whole report — an `ALLCAPS_NAME=value` assignment, optionally `export`-prefixed,
+#: is not a shape a genuine ASan/UBSan grammar line (header, stack frame, or `SUMMARY:`)
+#: ever produces.
+_ENV_ASSIGNMENT_LINE_RE = re.compile(r"(?im)^.*\b(?:export\s+)?[A-Z_][A-Z0-9_]{2,}\s*=\s*\S.*$")
+
+#: The secret-keyword vocabulary itself, mirroring `orchestrator.redaction.
+#: _SECRET_KEYWORD_RE` / `gateway/context.py::_SECRET_LINE`.
+_SECRET_KEYWORD_RE = re.compile(r"api[_-]?key|token|secret|password", re.IGNORECASE)
+
+#: Mirrors `orchestrator.redaction._SECRET_LINE_RE`: a named-secret assignment
+#: (`api_key=...`, `token: ...`) regardless of casing, which `_ENV_ASSIGNMENT_LINE_RE`
+#: alone would miss for a lowercase key.
+_SECRET_LINE_RE = re.compile(rf"(?im)^.*\b(?:{_SECRET_KEYWORD_RE.pattern})\s*[:=].*$")
+
+#: Mirrors `orchestrator.redaction._ABSOLUTE_PATH_RE`: a Unix absolute path or a Windows
+#: drive path, substituted in place so a stack frame keeps its frame index, address, and
+#: function name and loses only the path span.
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w./-])(?:/[A-Za-z0-9._@%+=:,~ -]+)+|[A-Za-z]:\\[^\s:]+")
+
+_REDACTED_LINE = "[redacted: line removed - looked like a secret or environment assignment]"
+_REDACTED_PATH = "[redacted absolute path]"
+
+
+def _redact_sanitizer_report(report: str) -> str:
+    """Strip absolute paths and environment/secret-shaped lines from a raw ASan/UBSan
+    report, keeping everything else — crash type, stack frames, offsets.
+
+    Byte-for-byte the same behaviour as `orchestrator.redaction.redact_sanitizer_report`
+    (see this module's docstring for why that function is duplicated here rather than
+    imported). Idempotent for the same reason: neither regex matches its own placeholder
+    text.
+    """
+    if not report:
+        return report
+    redacted = _SECRET_LINE_RE.sub(_REDACTED_LINE, report)
+    redacted = _ENV_ASSIGNMENT_LINE_RE.sub(_REDACTED_LINE, redacted)
+    redacted = _ABSOLUTE_PATH_RE.sub(_REDACTED_PATH, redacted)
+    return redacted
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +415,12 @@ def _finding_from_sanitizer(
         reproducible=True,
         detected_at=detected_at,
         title=title,
-        sanitizer_report=sanitizer_report[-20000:],
+        # #246 (following #191/D-125): redact before storing in the dataclass, not just
+        # before display — `sanitizer_report` is raw captured stderr up to this point,
+        # and `_redact_sanitizer_report` (this module's duplicate of `orchestrator.
+        # redaction.redact_sanitizer_report`) is the same redaction pass `workers/
+        # fuzzing/dispatch.py` applies at its own capture point.
+        sanitizer_report=_redact_sanitizer_report(sanitizer_report[-20000:]),
     )
 
 
