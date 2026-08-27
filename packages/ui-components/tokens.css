@@ -296,12 +296,20 @@
   --bd-z-overlay:   30;   /* diff overlay                                    */
   --bd-z-dialog:    40;   /* destructive-action confirmation                 */
   --bd-z-alert:     50;
-  --bd-z-presentation: 60;   /* #52/D-058 presentation-mode disclosure chrome — must sit above
-                                every other layer, including an open dialog/alert, since the
-                                disclosure has to be visible in ANY screenshot taken while
-                                presentation mode is active. Rehearsal-only: never referenced
-                                outside `src/styles/presentation-mode.css`, which the
-                                finale/production build never imports. */
+
+  /* NOTE — there used to be a --bd-z-presentation: 60 token here (#52/D-058, above every other
+     layer including an open dialog/alert, since the presentation-mode disclosure chrome has to
+     be visible in ANY screenshot taken while it's active). #272 moved it into
+     `src/styles/presentation-mode.css`'s own `:root` block instead: this file is imported by
+     every build via `BaseLayout.astro` (finale included), so a presentation-only token declared
+     here compiled into the finale/production `dist/tokens.css` even though nothing in that
+     build ever read it — an inert but real reference cybersecurity's #52/D-148 review flagged
+     as overstating "zero references to presentation-mode code" in the finale artifact.
+     `presentation-mode.css` is only ever imported by `src/presentation/presentation.astro`,
+     which the finale/production build never reaches (see that file's own doc comment and
+     `scripts/check-presentation-build-exclusion.sh`), so the token now only exists in a build
+     that actually uses it. If you are looking for its value or the layering rationale, it lives
+     there now — do not re-add a presentation-only z-index token to this shared file. */
 
   /* ========================================================================
      9. GLYPH TOKENS — state is never colour-only, so each state owns a glyph

@@ -7,6 +7,23 @@
    duplicated UI code."
    ========================================================================== */
 
+/* #272 — moved here from `packages/ui-components/tokens.css`'s shared §8 z-index scale. That
+   file is imported unconditionally by every build (`BaseLayout.astro`), so a presentation-only
+   token declared there compiled into the finale/production `dist/tokens.css` even though the
+   finale build never reads it — an inert but real trace of presentation-mode code in an
+   artifact whose acceptance criterion is "zero references to presentation-mode code"
+   (cybersecurity's #52/D-148 review). This file, by contrast, is only ever imported by
+   `src/presentation/presentation.astro`, itself only ever reachable from a
+   `command-center:presentation` build (see that file's doc comment and
+   `scripts/check-presentation-build-exclusion.sh`) — so declaring the token here means it is
+   physically absent from the finale bundle, not just unused by it. Must sit above every other
+   layer in the shared z-index scale, including an open dialog/alert (`--bd-z-dialog: 40`,
+   `--bd-z-alert: 50` in `tokens.css`), since the disclosure has to be visible in ANY screenshot
+   taken while presentation mode is active. */
+:root {
+  --bd-z-presentation: 60;
+}
+
 /* ---- Primary disclosure — top-strip chip, §2.3 --------------------------- */
 .bd-presentation-strip {
   position: sticky;

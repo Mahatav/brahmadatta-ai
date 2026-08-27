@@ -2,14 +2,14 @@ import { useStore } from '@nanostores/react';
 import { useEffect, useState } from 'react';
 
 import { getMissionDetailWithProvenance } from '../lib/api/client';
-import {
-  $activeMissionId,
-  $missionSnapshot,
-  deriveMockSource,
-  setActiveMissionId,
-  setMockSource,
-} from '../lib/events/store';
+import { $activeMissionId, setActiveMissionId } from '../lib/events/store';
 import { discoverFixtureMission } from '../lib/presentation/discoverFixtureMission';
+import {
+  $presentationMockSource,
+  deriveMockSource,
+  resetPresentationMockSource,
+  setPresentationMockSource,
+} from '../lib/presentation/provenance';
 import { MissionCommandCenter } from './MissionCommandCenter';
 import { MockDataWatermark } from './MockDataWatermark';
 import { PresentationModeChip } from './PresentationModeChip';
@@ -27,10 +27,11 @@ type ProvenanceStatus = 'checking' | 'mock' | 'real-mission-detected';
  * Renders the exact same `<MissionCommandCenter />` every live/finale build renders — zero
  * duplicated panel code, per the task brief ("feed the SAME store... not a parallel rendering
  * path"). The only two things layered on top are (1) the disclosure chrome (chip + watermark),
- * driven strictly by the real `X-Brahmadatta-Fixture` header via `$missionSnapshot.mockSource`
- * — never by the mere fact that this build exists — and (2) auto-binding to whatever mission
- * the configured backend is actually serving, so an operator gets a working rehearsal with zero
- * manual setup once `sse_replay.py` is running.
+ * driven strictly by the real `X-Brahmadatta-Fixture` header via `$presentationMockSource`
+ * (`lib/presentation/provenance.ts`, moved out of `$missionSnapshot` by #272 — see that file's
+ * own doc comment) — never by the mere fact that this build exists — and (2) auto-binding to
+ * whatever mission the configured backend is actually serving, so an operator gets a working
+ * rehearsal with zero manual setup once `sse_replay.py` is running.
  *
  * §2.2's second, independent lock lives here: even inside this build, a mission that resolves
  * without the fixture header never gets the mock chip/watermark, and `MissionCommandCenter`
@@ -39,7 +40,7 @@ type ProvenanceStatus = 'checking' | 'mock' | 'real-mission-detected';
  */
 export function PresentationMissionCommandCenter() {
   const activeMissionId = useStore($activeMissionId);
-  const snapshot = useStore($missionSnapshot);
+  const presentationMockSource = useStore($presentationMockSource);
   const [status, setStatus] = useState<ProvenanceStatus>('checking');
 
   // Auto-bind to whatever mission the backend serves, unless a `?mission=` deep link
@@ -62,6 +63,7 @@ export function PresentationMissionCommandCenter() {
   // switching missions (or a stale `?mission=` link) always gets a fresh, real answer rather
   // than trusting whatever the previous mission resolved to.
   useEffect(() => {
+    resetPresentationMockSource();
     if (!activeMissionId) {
       setStatus('checking');
       return undefined;
@@ -71,7 +73,7 @@ export function PresentationMissionCommandCenter() {
     getMissionDetailWithProvenance(activeMissionId, controller.signal)
       .then(({ fixtureHeaderValue }) => {
         const mockSource = deriveMockSource(fixtureHeaderValue);
-        setMockSource(activeMissionId, mockSource);
+        setPresentationMockSource(activeMissionId, mockSource);
         setStatus(mockSource === 'fixture-replay' ? 'mock' : 'real-mission-detected');
       })
       .catch(() => {
@@ -84,7 +86,7 @@ export function PresentationMissionCommandCenter() {
 
   // Belt-and-braces against a render landing between `setStatus` and the store write above:
   // the watermark/chip's "mock" rendering reads the store field directly, not just local state.
-  const confirmedMock = status === 'mock' && snapshot.mockSource === 'fixture-replay' && snapshot.missionId === activeMissionId;
+  const confirmedMock = status === 'mock' && presentationMockSource === 'fixture-replay';
 
   return (
     <>

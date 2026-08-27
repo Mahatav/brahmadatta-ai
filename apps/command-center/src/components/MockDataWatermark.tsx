@@ -11,8 +11,9 @@
  * screenshot rasterizes text exactly as reliably as an image. `ROWS`/`COLS` are sized generously
  * enough that the rotated field still fully covers a 1440×900+ viewport with margin, so cropping
  * to any single panel never lands on a gap. Never mounted outside a `command-center:presentation`
- * build (`PresentationMissionCommandCenter`) and never rendered unless `mockSource ===
- * 'fixture-replay'` — see that component.
+ * build (`PresentationMissionCommandCenter`) and never rendered unless
+ * `deriveConfirmedMock` (`lib/presentation/provenance.ts`) is true for the current mission — see
+ * that component.
  */
 const ROWS = 16;
 const COLS = 7;
