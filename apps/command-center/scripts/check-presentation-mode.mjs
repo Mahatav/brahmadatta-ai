@@ -6,15 +6,25 @@
 // `check-mission-snapshot-hydration.mjs` established: `node --experimental-strip-types`
 // against the real modules, `global.fetch` mocked with real `Response` objects so header
 // reads are exercised for real, not string-matched.
+//
+// #272 moved `MockSource`/`deriveMockSource`/the store guard out of `../src/lib/events/store.ts`
+// and into `../src/lib/presentation/provenance.ts` (a presentation-only module — see that
+// file's own doc comment for why: the finale bundle imported `store.ts` unconditionally, so a
+// `mockSource` field there leaked its name into the finale artifact even though the finale
+// build never read it). This file's imports below follow that move; the assertions themselves
+// are unchanged. `scripts/check-issue-273-presentation-provenance-gate.mjs` covers the new
+// #273 behavior (the render gate and the shared fetch-through-provenance path) this file
+// doesn't touch.
 
 import assert from 'node:assert/strict';
 import { getMissionDetailWithProvenance } from '../src/lib/api/client.ts';
 import {
-  $missionSnapshot,
+  $presentationMockSource,
   deriveMockSource,
-  resetMissionSnapshot,
-  setMockSource,
-} from '../src/lib/events/store.ts';
+  resetPresentationMockSource,
+  setPresentationMockSource,
+} from '../src/lib/presentation/provenance.ts';
+import { $activeMissionId, setActiveMissionId } from '../src/lib/events/store.ts';
 import { discoverFixtureMission } from '../src/lib/presentation/discoverFixtureMission.ts';
 
 const originalFetch = globalThis.fetch;
@@ -72,31 +82,38 @@ async function testGetMissionDetailWithProvenanceReadsTheRealHeader() {
 }
 
 // ---------------------------------------------------------------------------
-// The store guard — same cross-mission shape as `applyMissionEvent`'s existing guard.
+// The store guard — same cross-mission shape as `applyMissionEvent`'s existing guard, now
+// checked against `$activeMissionId` (the shared, always-present store) rather than
+// `$missionSnapshot.missionId`, since #272 moved this guard out of `$missionSnapshot` entirely.
 // ---------------------------------------------------------------------------
 
-function testSetMockSourceIsGuardedByTheCurrentMission() {
-  resetMissionSnapshot();
-  assert.equal($missionSnapshot.get().mockSource, null, 'a fresh snapshot must never claim mock data by default');
+function testSetPresentationMockSourceIsGuardedByTheCurrentMission() {
+  resetPresentationMockSource();
+  setActiveMissionId(null);
+  assert.equal($presentationMockSource.get(), null, 'a fresh check must never claim mock data by default');
 
-  // No mission bound yet (missionId still null) — the write is accepted; it will be preserved
-  // once the first event lands and sets missionId, via `reduceMissionSnapshot`'s spread.
-  setMockSource('m-1', 'fixture-replay');
-  assert.equal($missionSnapshot.get().mockSource, 'fixture-replay');
+  // No mission bound yet ($activeMissionId still null) — the write is dropped, matching the
+  // guard's "only the currently-active mission may write this" rule.
+  setPresentationMockSource('m-1', 'fixture-replay');
+  assert.equal($presentationMockSource.get(), null, 'a write for a mission that is not the active one must be dropped');
+
+  setActiveMissionId('m-1');
+  setPresentationMockSource('m-1', 'fixture-replay');
+  assert.equal($presentationMockSource.get(), 'fixture-replay');
 
   // A late-resolving provenance check for a DIFFERENT mission than the one the store now
   // belongs to (operator switched missions mid-flight) must never overwrite the current
   // mission's disclosure state.
-  $missionSnapshot.set({ ...$missionSnapshot.get(), missionId: 'm-1' });
-  setMockSource('m-2', null);
-  assert.equal($missionSnapshot.get().mockSource, 'fixture-replay', 'a stale write for a different mission id must be dropped');
-  assert.equal($missionSnapshot.get().missionId, 'm-1');
+  setPresentationMockSource('m-2', null);
+  assert.equal($presentationMockSource.get(), 'fixture-replay', 'a stale write for a different mission id must be dropped');
+  assert.equal($activeMissionId.get(), 'm-1');
 
   // The real refusal path: the CURRENT mission's own provenance check resolves to "no header."
-  setMockSource('m-1', null);
-  assert.equal($missionSnapshot.get().mockSource, null, 'a confirmed real mission must clear a previously-set mock flag');
+  setPresentationMockSource('m-1', null);
+  assert.equal($presentationMockSource.get(), null, 'a confirmed real mission must clear a previously-set mock flag');
 
-  resetMissionSnapshot();
+  resetPresentationMockSource();
+  setActiveMissionId(null);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +163,7 @@ async function testDiscoverFixtureMissionReturnsNullRatherThanThrowingWhenUnreac
 async function main() {
   testDeriveMockSourceOnlyAcceptsTheExactHeaderValue();
   await testGetMissionDetailWithProvenanceReadsTheRealHeader();
-  testSetMockSourceIsGuardedByTheCurrentMission();
+  testSetPresentationMockSourceIsGuardedByTheCurrentMission();
   await testDiscoverFixtureMissionReadsTheFixtureToolsMissionIdShape();
   await testDiscoverFixtureMissionAlsoAcceptsTheRealContractShape();
   await testDiscoverFixtureMissionReturnsNullRatherThanThrowingWhenUnreachable();

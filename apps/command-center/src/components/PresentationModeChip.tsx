@@ -1,4 +1,5 @@
 import { sanitizeDisplayText } from '../lib/security/renderSafety.mjs';
+import type { ProvenanceStatus } from '../lib/presentation/provenance';
 
 /**
  * #52 / D-058 §2.3 — the primary disclosure. A dedicated band fixed above `.bd-top-strip`,
@@ -18,7 +19,7 @@ export function PresentationModeChip({
   status,
   fixtureLabel,
 }: {
-  status: 'checking' | 'mock' | 'real-mission-detected';
+  status: ProvenanceStatus;
   fixtureLabel: string | null;
 }) {
   if (status === 'checking') {

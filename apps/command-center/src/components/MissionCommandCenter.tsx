@@ -42,7 +42,25 @@ import { VerdictPanel } from './VerdictPanel';
  * the P0-13 five-panel set. They are pre-mission operator tooling, not part of what a judge
  * reads on the scored screen; nothing about them was rebuilt.
  */
-export function MissionCommandCenter() {
+export interface MissionCommandCenterProps {
+  /**
+   * #273 — injection point for the structural fix to "panels fed by a separate plain
+   * `getMissionDetail()` call that never routes through the provenance wrapper."
+   * `PresentationMissionCommandCenter` passes `fetchMissionDetailWithDisclosure`
+   * (`lib/presentation/provenance.ts`), which fetches through `getMissionDetailWithProvenance`
+   * and folds the response's disclosure header into its own state before returning the same
+   * `MissionDetail` this component already expects — so in a presentation build, the exact HTTP
+   * response that decided the mock/real banner is the one this component's `missionDetail`
+   * state (and every `refreshMissionDetail()` call) is built from, every time.
+   *
+   * Defaults to the ordinary `getMissionDetail` — the live/finale build never supplies this
+   * prop, so its own detail fetch is byte-for-byte what #52's review already covered; nothing
+   * about the live rendering path changes.
+   */
+  fetchMissionDetail?: (missionId: string, signal?: AbortSignal) => Promise<MissionDetail>;
+}
+
+export function MissionCommandCenter({ fetchMissionDetail = getMissionDetail }: MissionCommandCenterProps = {}) {
   const snapshot = useStore($missionSnapshot);
   const localRepository = useStore($localRepository);
   const streamState = useStore($streamState);
@@ -74,7 +92,7 @@ export function MissionCommandCenter() {
       return undefined;
     }
     const controller = new AbortController();
-    getMissionDetail(activeMissionId, controller.signal).then((mission) => {
+    fetchMissionDetail(activeMissionId, controller.signal).then((mission) => {
       setMissionRepositoryContext(mission.repository_ref);
       setMissionDetail(mission);
     }, () => undefined);
@@ -90,7 +108,7 @@ export function MissionCommandCenter() {
       controller.abort();
       disconnect();
     };
-  }, [activeMissionId]);
+  }, [activeMissionId, fetchMissionDetail]);
 
   // §8, §12 build note 2 — the one timer in this product. It only ever degrades the display.
   useEffect(() => startStaleWatcher(), []);
@@ -134,7 +152,7 @@ export function MissionCommandCenter() {
   async function refreshMissionDetail(): Promise<void> {
     if (!activeMissionId) return;
     try {
-      setMissionDetail(await getMissionDetail(activeMissionId));
+      setMissionDetail(await fetchMissionDetail(activeMissionId));
     } catch {
       // The alert line in BottomStrip already surfaces the action's own failure; a failed
       // refresh here just means the next render uses the previous (still real) snapshot.
