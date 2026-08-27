@@ -18128,3 +18128,136 @@ verification gates, secrets) need a `cybersecurity` agent review recorded on the
 before merge"); the three CTO calls above are separate from, and do not gate, that
 review. **Not yet reviewed as of this entry — do not merge the PR this record documents
 on this entry's own say-so.**
+
+---
+
+## D-163 — Security review of PR #287 (#181/SEC-57: `ContainerJail` in BASELINE/VERIFY) — CLEARED WITH NOTES · 2026-08-27 · cybersecurity
+
+**Decision** — PR #287 (branch `fix/181-baseline-verify-container-isolation`, HEAD
+`e5022ad`) is **CLEARED WITH NOTES**. Every claim in the PR description and D-162 was
+independently re-run, not taken on the builder's self-report, and held up. This does not
+authorize merge on its own say-so — per the requesting agent's own instruction, the
+human (Mahatav) makes the merge call; this record is the required review-recorded-on-
+the-PR gate CLAUDE.md's standing rule asks for.
+
+**What was independently verified, and how:**
+
+1. **Core isolation PoC** — ran `pytest workers/baseline/tests/test_container_isolation_poc.py -v`
+   for real (not read-only). Both tests passed: under subprocess `Jail`, an injected CTest
+   case both read a marker file outside the jail root and opened a raw TCP connection to
+   `8.8.8.8:53`; under `ContainerJail` (a real `brahmadatta-build-toolchain:local` image
+   built and confirmed present via `docker images` during this review), both were blocked,
+   and pktcfg's own 8/8 tests still passed (`outcome.tests_passed == 8`,
+   `isolation_mode == "CONTAINER_NO_NETWORK"`, asserted in-test, not just claimed).
+   Result: `2 passed in 4.44s` — matches the PR description exactly.
+2. **Fallback honesty** — traced `Job.result["container_isolation"]`/`isolation_mode`
+   end to end via `git grep`, not just the one field named in the PR: `BaselineOutcome.
+   isolation_mode` → `orchestrator/evidence_bundle.py` → `orchestrator/evidence_export.py`
+   (prints `"Isolation mode: {bundle.isolation_mode}"` into the human-readable evidence
+   report) → `contracts/schemas/evidence.py`/`system.py` (OpenAPI-exposed) →
+   `apps/command-center/src/lib/api/schema.d.ts` (frontend-typed). This is a real,
+   judge/operator-visible field on every mission's evidence, not a DB column nobody
+   reads. Confirmed positive.
+3. **The compose-topology gap** — read `infrastructure/compose/docker-compose.yml` and
+   `docker-compose.finale.yml`'s diffs directly: both thread `SANDBOX_BUILD_IMAGE:
+   ${SANDBOX_BUILD_IMAGE:-}` into the `worker` service, unset by default, with an explicit
+   "DO NOT set this on THIS service" comment (no `docker` CLI in `control-api.Dockerfile`'s
+   apt-get list; D-036 forbids the socket mount unconditionally). **Conclusion: in the
+   only deployment shape this repository currently ships (`docker-compose.yml` /
+   `docker-compose.finale.yml`'s `worker` service, which is what actually claims
+   `JobKind.BASELINE`/`JobKind.VERIFY` per D-073), this PR delivers zero net change in
+   real isolation.** BASELINE/VERIFY will keep running inside the unisolated subprocess
+   `Jail` in that topology, identically to before #287, for as long as no bare-metal
+   BASELINE/VERIFY-capable worker process exists. The fix is real, tested, and merged —
+   it is just not reachable from the shipped topology yet. This is not a regression (the
+   pre-PR state had the identical gap, unmitigated even by a fallback marker) and it is
+   disclosed everywhere a reader would look — PR description, `.env.example`, both
+   compose files' own inline comments, `README.md`, and D-162 — not narrowly in one
+   field. No instance found of the PR's own framing overstating what is actually
+   protected in the shipped topology.
+4. **`ContainerJailRunner` hardening** — confirmed `packages/sandbox/container.py`
+   (the file that actually constructs `docker run` args: `--network none`, `--user
+   <uid>:<gid>`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`,
+   no socket mount ever) is **not touched by this PR at all** (`git grep` for that file
+   in the diff: no hits). `ContainerJailRunner` only wraps `.run()` calls for path
+   translation and a `cd`-then-`exec` cwd shim; it never constructs or edits Docker
+   invocation flags. Tested the cwd-wrapper directly with adversarial argv
+   (`'; rm -rf / #'`, `'$(whoami)'`) — both passed through as inert positional arguments
+   to `exec "$@"` inside the container's `sh -c` script, never shell-interpolated. No
+   hardening regression found.
+5. **`build-toolchain.Dockerfile`** — base image pinned by digest
+   (`ubuntu@sha256:561618e2...`), every `apt-get install` package pinned to an exact
+   version (`gcc=4:13.2.0-7ubuntu1`, etc.), `--no-install-recommends` used, matching the
+   #194/SEC-53 precedent. No unpinned packages found.
+6. **Self-expiring target allowlist** — read `authorization/target_allowlist.py` and ran
+   `pytest authorization/tests/test_target_allowlist.py -v` for real: 7/7 passed,
+   including a real proof that `is_enforced()` flips to `False` after 2026-08-20 and that
+   `assert_target_allowed` genuinely raises `RepositoryOutOfScopeError` for an
+   out-of-scope name while the window is open. Confirmed via `git grep` that
+   `authorization/service.py::_resolve_repository_ref` is the single call site and the
+   only path that resolves a mission's `repository_ref` to a filesystem path — not
+   bypassable through a second code path. The module does exactly what it says: real
+   enforcement while open, honestly inert (not silently) once past its own expiry.
+7. **Full test suites, run for real in this session** (Python 3.12 venv, project
+   dependencies installed from `requirements-dev.txt` + `apps/control-api/requirements
+   {,-dev}.txt`):
+   - `pytest adapters/cpp/tests workers/baseline/tests packages/sandbox/tests
+     tests/architecture -q` → `239 passed, 4 skipped in 69.17s` — matches the PR
+     description exactly.
+   - Django suite (`apps/control-api`, sqlite/test profile) → `1 failed, 798 passed,
+     23 skipped`. The one failure
+     (`test_patch_generate_executor.py::test_live_backend_built_by_this_module_gets_401_
+     from_the_sidecar_without_the_fix`) was independently reproduced on a clean
+     `origin/main` worktree with identical output — confirmed pre-existing and unrelated
+     to this PR, not merely asserted.
+   - `authorization/tests/test_target_allowlist.py` → 7 passed, as claimed.
+
+**Findings (none critical):**
+
+* **FINDING D163-1 (medium, process/tracking, not a vulnerability)** — because the
+  compose `worker` topology cannot reach `ContainerJail` at all (see point 3 above),
+  closing GitHub issue #181/SEC-57 outright risks the org losing track of the fact that
+  the actual shipped BASELINE/VERIFY isolation gap is still fully open in the only
+  deployment shape that exists. **Condition of this CLEARED-WITH-NOTES verdict:** #181
+  must not be closed as fully resolved, or a new linked issue must be opened, tracking
+  "make `SANDBOX_BUILD_IMAGE` reachable from the compose worker topology" (D-162's own
+  three CTO recommendations already name the shape of this work) — a backlog-visibility
+  requirement, not a merge blocker for #287 itself.
+* **FINDING D163-2 (low)** — the target allowlist is inert by design as of merge. No
+  action required before merge; D-162's own "Recommendation" (2) — converting it to a
+  permanent, non-expiring control — should be decided by the CTO before this system is
+  ever pointed at a target other than `pktcfg`, per the issue's own original scoping.
+* No critical or high findings. No hardening regression found anywhere in the diff.
+
+**Options considered** — (a) BLOCK, on the grounds that #3 above means the fix delivers
+no protection in the real deployment shape; (b) CLEAR WITH NOTES, on the grounds that
+the PR introduces no new vulnerability, closes a real and independently verified gap for
+any deployment that can reach it, and discloses the shape it does not close more
+thoroughly than most PRs disclose the parts they do. **Chosen: (b).** A critical finding
+in this role's own terms is a new, exploitable hole or a claim of protection that is
+actually false in a way that would mislead an operator into an unsafe action. Neither is
+present: nothing here is less safe after this PR than before it in any deployment shape,
+and every reader-facing surface (PR description, README, `.env.example`, both compose
+files, D-162) states the compose-topology gap in the same breath as the fix, not buried.
+(a) would be the right call if this PR's own materials oversold the fix as "closing
+#181" without the caveat — they do not.
+
+**Cost implications** — none from this review. FINDING D163-1's remediation (a
+bare-metal or DooD BASELINE/VERIFY worker process) is D-162's own unresolved cost
+question, already flagged there for CTO/devops.
+
+**Security implications** — net positive, real gap partially closed, residual gap fully
+disclosed. See findings above for the two follow-ups this verdict is conditioned on.
+
+**Scalability implications** — none from this review.
+
+**Recommendation** — Merge is safe from a security standpoint, conditioned on FINDING
+D163-1 (keep #181 open or file a linked follow-up before/at merge, so the topology gap
+does not silently fall off the backlog). FINDING D163-2 is a pre-existing, already-
+flagged CTO decision (D-162), not new. **Per the requesting agent's own explicit
+instruction, this role does not merge PR #287** — reporting verdict and reasoning back
+for a human merge decision.
+
+**Final approval authority** — cybersecurity (security severity/verdict, this role's own
+standing authority, per CLAUDE.md); the two CTO calls D-162 already named (bare-metal
+worker investment, allowlist permanence) remain separate and unblocked by this verdict.
