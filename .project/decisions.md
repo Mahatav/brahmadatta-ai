@@ -17648,3 +17648,124 @@ unfinished corner cut short — it is the correct, verified state of the product
 this entry, and will remain so until a `JobKind.BISECT` dispatch executor and its
 contract variants are built (D-151's own "target design for the wiring, when
 staffed" section is the spec for that future work).
+
+---
+
+## D-159 — #246 fix: `ReplayFinding.sanitizer_report` redacted at capture, via a duplicated (not imported) copy of `redact_sanitizer_report` · 2026-08-26 · `backend-developer` seat
+
+**Trigger** — Cybersecurity found, during PR #243's (D-125, #191's `Finding.
+sanitizer_report` redaction) review, that `workers/replay/run.py::_finding_from_
+sanitizer` builds `ReplayFinding.sanitizer_report` from raw, joined `captured_stderr`
+with no call to `orchestrator.redaction.redact_sanitizer_report` or any redaction at
+all — the same leak class #191 fixed for the `FUZZ` executor's `Finding.
+sanitizer_report`, left open in `REPLAY`'s independent implementation. Filed as #246,
+rated dormant/not currently exploitable: `workers/replay/cli.py` is a standalone CLI
+never wired into Django's `Finding` model or `record_finding`, and `ReplayFinding.
+as_summary_dict()` deliberately omits `sanitizer_report` from its own JSON/event
+output, so nothing displays this field today. Fixed anyway, now, per the issue's own
+reasoning: the module's docstring already calls its output "the evidence-shaped JSON
+record the Command Center/API can display later," and redaction has to be applied at
+the point the field is populated so it cannot be silently missed the day that wiring
+lands.
+
+**Decision** — Added `_redact_sanitizer_report` as a private function inside `workers/
+replay/run.py` itself (not a shared module), and call it in `_finding_from_sanitizer`
+on the joined `stderr` before it is stored on the `ReplayFinding` dataclass — the one
+place in this module that ever populates `sanitizer_report`.
+
+**Import-boundary investigation (per this fix's own instructions, checked directly
+rather than assumed)** — `services/model-gateway/gateway/validation_errors.py`'s own
+docstring gives the precedent this fix was told to check against: that module
+duplicates `orchestrator.redaction`'s `looks_secret_shaped`/`redact_loc` shape instead
+of importing across a *deliberate* dependency-closure boundary (its own `pytest.ini`,
+its own venv, no import edge in either direction today). `workers/replay/run.py`'s
+boundary is a different shape but produces the identical result: `orchestrator` lives
+at `apps/control-api/orchestrator/`, and `apps/control-api` only lands on `sys.path`
+as a side effect of Django settings loading (`config/settings/base.py`'s own
+`sys.path.insert(0, str(BASE_DIR))`, run only via `manage.py`, `wsgi`/`asgi`, or
+pytest-django's `DJANGO_SETTINGS_MODULE` machinery). Confirmed directly: `cd` to repo
+root, bare `python3 -c "import orchestrator.redaction"` raises `ModuleNotFoundError`.
+`workers/replay/run.py`'s own docstring already commits to "no Django app, event bus,
+or evidence persistence is imported from this worker" (mirroring `workers.baseline.
+run`), and `workers/replay/cli.py` runs as `python -m workers.replay` with only the
+repo root on `sys.path` — so a direct `from orchestrator.redaction import
+redact_sanitizer_report` would either raise at import time for every real invocation
+of this CLI, or silently work only when this module happened to be imported after
+Django settings (an accident of import order this codebase should not depend on).
+Contrast with `workers/fuzzing/dispatch.py`, which imports `orchestrator.redaction`
+directly and successfully — that module also imports `django.conf.settings` and
+`missions.models` directly, i.e. it is only ever loaded inside the Django process
+that already did the `sys.path` insertion; it is not a counterexample, it confirms
+the mechanism.
+
+**Options considered** — (a) import `orchestrator.redaction.redact_sanitizer_report`
+directly; (b) make `workers/replay` depend on Django settings having loaded first,
+so the import succeeds; (c) duplicate `redact_sanitizer_report`'s two regexes and
+behaviour as a private function inside `workers/replay/run.py`, matching the
+model-gateway precedent's resolution to the structurally similar problem.
+
+**Pros and cons** — (a) is not a same-PR fix, it is broken by construction for this
+worker's real invocation path (confirmed `ModuleNotFoundError` above) — it would only
+appear to work under pytest-django or inside the Django process, and silently fail
+for the actual `python -m workers.replay` CLI entry point this module exists for. (b)
+would work, but converts a deliberately Django-free, standalone worker (this module's
+own docstring's explicit design choice, shared with `workers.baseline.run`) into one
+that cannot run without the control API's full settings stack initialized first, just
+to reach one small pure-Python function — a much larger, undocumented coupling than
+the leak-prevention it buys, and inconsistent with every sibling module in `workers/`
+that is not itself a Django app (`baseline`, `git_analysis`, `static_analysis`). (c)
+costs a second implementation of the same two regexes to keep in sync by hand — the
+same trade-off D-125 already accepted and documented for the `gateway/context.py` ↔
+`orchestrator/redaction.py` pair, extended here to a third mirror. Accepted for the
+same reason: the constraint is real (not stylistic), and the redaction logic itself
+is small, stable, and already reviewed twice (D-071c, D-125).
+
+**What changed** — `workers/replay/run.py` gained `_redact_sanitizer_report` (private,
+module-local) plus its four supporting regex constants, byte-for-byte mirroring
+`orchestrator.redaction.redact_sanitizer_report`'s behaviour: an absolute Unix/Windows
+path is replaced in place with `[redacted absolute path]`; a whole line shaped like an
+environment-variable assignment or a named-secret line (`api_key=`, `token:`, etc.,
+case-insensitive) is replaced with a fixed placeholder line; everything else (crash
+type, stack frame indices/addresses/function names, the `SUMMARY:` line's prefix)
+survives untouched. `_finding_from_sanitizer` now calls it on the truncated
+`sanitizer_report` string before constructing the `ReplayFinding` — redaction at the
+point of capture, not deferred to a display layer that (today) does not even exist for
+this field.
+
+**Testing** — one new regression test in `workers/replay/tests/test_run_replay.py`
+(`test_finding_sanitizer_report_is_redacted_before_it_is_stored`), following
+`test_fuzz_executor.py`'s own #191 methodology: mocks `run_variant`/`run_reproducer`
+to return a poisoned stderr transcript carrying a fabricated test credential
+(`sk-FAKE-TEST-TOKEN-not-a-real-secret-88221`, an `API_TOKEN=...` assignment line) and
+a fake absolute path distinct from the values already used by `orchestrator/tests/
+test_sanitizer_report_redaction.py` and `test_fuzz_executor.py`'s own #191 test (so
+this test cannot pass by accident on a pattern tuned for those values), then asserts
+both are absent from `ReplayFinding.sanitizer_report` and from `ReplayOutcome.
+as_dict()`, while the crash signature (`AddressSanitizer: heap-buffer-overflow`,
+`emit_tab`, the `SUMMARY:` line) survives. Verified failing before the fix (reverted
+`run.py` only, reran: `AssertionError: fake credential leaked through unredacted`) and
+passing after. Full suite: `pytest workers/replay/tests -q` → 6 passed; full
+`pytest workers/ -q` → 67 passed, 2 skipped, 1 xfailed (on a clean `demo/repositories/
+pktcfg` checkout — two `workers/git_analysis` bisect tests flake with leftover
+untracked fixture files when run back-to-back with other suites in the same
+session; reproduced identically on `origin/main` with no changes applied, unrelated
+to this fix, not fixed here); `pytest tests/architecture -q` → 74 passed, 7 skipped.
+
+**Security implications** — closes the concrete gap #246 named before `REPLAY` is
+ever wired into persistence, so the wiring PR cannot reintroduce #191's leak class by
+omission. Same known, disclosed residual gap D-125 already accepted for the sibling
+field: a bare secret with no path prefix, no `=`, and no named keyword is not caught.
+
+**Scalability implications** — none; three additional regex substitutions on a
+20,000-char-capped string, run once per replayed finding, in a CLI path that runs at
+most once per mission today.
+
+**Recommendation** — Ship as built; self-merge once tests are green. This is a
+mechanical, faithful reapplication of an already-reviewed redaction pattern (D-125)
+to a second call site, not a new isolation/auth/sandbox boundary — the import-boundary
+question above resolved to "duplicate, matching the model-gateway precedent," which
+is a call-site-only decision, not a structural change requiring a `cybersecurity`
+review gate before merge.
+
+**Final approval authority** — CTO (technical; mechanical application of an
+already-approved pattern, D-125's own precedent).
