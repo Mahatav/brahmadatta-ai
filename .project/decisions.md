@@ -17769,3 +17769,80 @@ review gate before merge.
 
 **Final approval authority** — CTO (technical; mechanical application of an
 already-approved pattern, D-125's own precedent).
+
+---
+
+## D-160 · Presentation-mode dead-name traces and disclosure/panel-data coupling fixed (#272, #273) · 2026-08-27 · frontend-developer
+
+**Decision** — Two hardening fixes from cybersecurity's #52/D-148 review of PR #270, on the
+authorized `fix/272-273-presentation-mode-hardening` branch.
+
+**#272** — `--bd-z-presentation` (a z-index token) and `mockSource` (a `MissionSnapshot` field)
+compiled into the finale/production bundle even though nothing in that build ever read either,
+because both lived in files every build imports unconditionally
+(`packages/ui-components/tokens.css`, `src/lib/events/store.ts`). Moved both into files only a
+`command-center:presentation` build ever imports: the token into `src/styles/
+presentation-mode.css`'s own `:root` block, the field into a new `src/lib/presentation/
+provenance.ts` module (`$presentationMockSource`, guarded against `$activeMissionId` rather than
+`$missionSnapshot.missionId`).
+
+**#273** — the mock/real disclosure banner was driven by `getMissionDetailWithProvenance` (a
+side-channel probe), while `MissionCommandCenter`'s actual panels were fed by
+`connectMissionEvents` (SSE) and a separate plain `getMissionDetail()` call that never routed
+through the provenance wrapper; correctness relied on "the same backend serves both endpoints
+identically" rather than being structurally enforced. Separately, `MissionCommandCenter` rendered
+unconditionally from mount, so real panel content could populate before the async provenance
+check resolved. Fixed by (1) adding `fetchMissionDetailWithDisclosure`
+(`lib/presentation/provenance.ts`) as the single function used for both the initial provenance
+check and, via `MissionCommandCenter`'s new optional `fetchMissionDetail` prop, every REST fetch
+that populates the panels — so panel data and the disclosure signal are always read off the same
+HTTP response — and (2) gating `MissionCommandCenter`'s render on `shouldRenderMissionPanels
+(status)`, so it never mounts (and therefore never opens its SSE connection or fetches data)
+until the first provenance check for the bound mission has resolved.
+
+**Options considered**
+
+- **(a) Leave #272 as documented-but-inert.** Rejected — the task was explicitly authorized to
+  fix both issues now, and the fix is small, mechanical, and zero-risk (moving names between
+  files the build-exclusion mechanism already treats as authoritative or not).
+- **(b, #273) Route the SSE stream itself through provenance verification.** Rejected as
+  infeasible from the frontend alone — a native `EventSource` never exposes response headers to
+  JS (already documented in `client.ts`'s doc comment on `getMissionDetailWithProvenance` prior to
+  this branch). Structurally closing this would need a backend change (e.g. an in-band SSE event
+  carrying the fixture marker), out of scope for a frontend-only P2 fix — flagged as an open
+  question to backend-developer/software-architect rather than silently left unaddressed.
+- **(c, #273, chosen) Dedupe the REST fetch through one shared, provenance-checked function, and
+  gate initial render on that function's first resolution.** Closes the REST-detail half of the
+  divergence risk completely (panel data literally cannot come from an un-checked response,
+  because there is no other code path left that fetches mission detail in this build) and bounds
+  the residual SSE gap to "only after the mission's provenance is already known," which is the
+  most a browser-only change can guarantee.
+
+**Pros and cons of (c).** Pro: no new endpoint, no backend change, and the live/finale build's own
+`getMissionDetail` default path is byte-for-byte unchanged (verified: `tsc --noEmit`, `astro
+check`, and the full `npm run check` suite pass with zero diffs to finale-path behavior). Pro: the
+render gate is a pure, directly-testable predicate (`shouldRenderMissionPanels`), not scattered
+conditional logic. Con: introduces a second REST call at mission-bind time (the gating check, then
+`MissionCommandCenter`'s own first fetch) — accepted as negligible against a local rehearsal
+fixture server.
+
+**Cost implications** — none; no new infrastructure or endpoint.
+
+**Security implications** — improves the finale artifact's honesty ("zero references to
+presentation-mode code" is now literally true, not "true except two inert names") and closes a
+structural gap in the disclosure-correctness property #52/D-148 was adversarially reviewed
+against. No new attack surface: the injected `fetchMissionDetail` prop defaults to the exact
+existing `getMissionDetail` call and is only ever overridden by presentation-only code, which
+itself never ships in the finale bundle (verified by the extended
+`scripts/check-presentation-build-exclusion.sh` dual-build diff).
+
+**Scalability implications** — none; one extra REST call per mission bind, only in the
+rehearsal-only presentation build.
+
+**Recommendation** — merge after cybersecurity re-reviews the #273 half specifically, since it
+touches the disclosure-correctness property #52/D-148 adversarially verified; #272 is
+low-risk/mechanical and does not independently need re-review, but is bundled in the same PR per
+the assignment.
+
+**Final approval authority** — CTO (technical; both issues explicitly pre-authorized to build
+now). cybersecurity holds sign-off on #273's disclosure-correctness claim before merge.
