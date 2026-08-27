@@ -17971,3 +17971,160 @@ the two follow-ups above as normal backlog items, not urgent.
 **Final approval authority** — cybersecurity (security severity/verdict, per this role's standing
 authority); the `MissionControlPanel` consistency question itself belongs to
 software-architect/frontend-developer to resolve, not gated by security.
+
+---
+
+## D-162 — #181/SEC-57: `ContainerJail` wired into BASELINE and VERIFY; fast-follow conditions closed · 2026-08-27 · backend-developer seat, pending cybersecurity sign-off
+
+**Decision** — Wire `packages.sandbox.container.ContainerJail` (built and merged for
+#15, previously unused by either stage) into `JobKind.BASELINE` (a target's own
+build/test suite) and `JobKind.VERIFY`'s compile/reproducer-replay/regression gates —
+the exact gap issue #181/SEC-57 names, and the one Mahatav's own issue-181 comment
+(2026-08-24) deliberately deferred as "a real, already-documented, deliberately-accepted
+gap for the current competition scope... left open and tracked as backlog... since the
+requirement is real and will need doing before this system is ever pointed at an
+untrusted target." Built now because the competition demo date (2026-08-20) has passed
+by the time this work was authorized, which is exactly the condition that comment named
+as the trigger for doing it for real.
+
+Shape of the fix, in one line per moving part:
+
+* **`packages/sandbox/container_runner.py::ContainerJailRunner`** — a `Jail`-compatible
+  adapter over `ContainerJail` (same `root`/`run(argv, cwd=..., extra_env=...)`/
+  `resolve()`/`which()` surface `Jail` exposes), so `adapters/cpp/pipeline.py::
+  run_variant` and `orchestrator/verification.py`'s gate sequence drive either backend
+  with no logic changes of their own — only which jail class they were handed. Handles
+  the three real differences between the two jail flavors (no per-call `cwd` on
+  `ContainerJail.run()`; a single bind mount vs. sharing the whole host filesystem;
+  `shutil.which()` resolving against the wrong filesystem for a container) — see that
+  module's own docstring for each.
+* **`Jail.which()`** added (mirrors `shutil.which`, unchanged behavior) so
+  `adapters/cpp/toolchain.py::probe_build_tools` and `pipeline.py::run_variant` resolve
+  `cmake`/`ctest` through whichever jail they were given instead of a module-level
+  `shutil.which()` call that silently assumed the host's `PATH` meant anything inside a
+  container.
+* **`workers/baseline/run.py::run_baseline_stage`** gains `container_policy:
+  ContainerJailPolicy | None = None`. When given, copies `source_dir` into the jail's
+  one bind-mounted root before building (the subprocess path builds out-of-place
+  against the original directory; `ContainerJail` has exactly one mount point) and
+  records the real `image_digest`/`isolation_mode`/`isolation_unprotected_against` —
+  `None`/`SUBPROCESS_JAIL`/the full unprotected-against list, unchanged, when not given.
+* **`orchestrator/verification.py::run_verification`** gains the same `container_policy`
+  parameter. The compile/`git apply`/reproducer-replay/regression gate sequence is
+  factored into a shared `_run_gate_sequence` both the `Jail` and `ContainerJail`
+  branches call, so SEC-47's original gate logic is not duplicated. The reproducer
+  artifact (which lives under `ARTIFACT_ROOT`, never under the jail root) is staged
+  into the container's bind mount before the replay step — the one thing
+  `ContainerJailRunner`'s automatic path translation cannot do on its own, since that
+  file was never under the jail root to translate a reference to in the first place.
+  `RenewedFuzzConfig`'s own, already-existing `ContainerJail` usage (#40) is untouched.
+* **`git apply` / stdin (#181's item 2)** — already closed before this PR, by SEC-47
+  (PR #175): `run_verification` already writes the candidate diff to a file inside the
+  jail and invokes `git apply <path>` instead of piping it over stdin. Verified by
+  reading the current code, not re-implemented.
+* **Rollout is opt-in, not hard-required** — `settings.SANDBOX_BUILD_IMAGE` (new,
+  `.env.example`) drives both stages; unset, both fall back to the pre-#181 subprocess
+  `Jail` path, recorded honestly as `Job.result["container_isolation"] = False` and
+  (BASELINE) `Job.result["isolation_mode"]`, never silently. This deliberately diverges
+  from `JobKind.FUZZ`/`JobKind.ANALYZE`'s own convention (`SANDBOX_FUZZ_IMAGE`/
+  `SANDBOX_ANALYZE_IMAGE` unset -> the stage refuses to run, `infra_failure`) — see
+  "Options considered."
+* **Fast-follow conditions from #181's own text, all built:**
+  (a) `apps/control-api/authorization/target_allowlist.py` — a `pktcfg`-only allowlist
+  enforced at `authorization.service._resolve_repository_ref`, self-expiring after
+  2026-08-20 exactly as the issue's own text specifies. **This window is already closed
+  as of this entry's date (2026-08-27)** — `is_enforced()` is `False` for any real
+  caller today, so this control is presently inert by its own literal terms. Built
+  anyway because building it was a stated condition of doing this work at all, and
+  because a deployment that has not yet configured `SANDBOX_BUILD_IMAGE` (see the known
+  gap below) is running the exact pre-#181 gap this allowlist existed to narrow.
+  Flagged explicitly rather than silently left to look like live protection — see that
+  module's own docstring, and "Recommendation" below for the CTO call this leaves open.
+  (b) `README.md`'s "Safety boundary" section claimed "Target builds and fuzzing run
+  inside rootless containers, never on the host" — false on two counts even after this
+  PR (BASELINE/VERIFY's container path is opt-in, not universal; and D-024's own
+  container is a rootFUL daemon, explicitly not rootless, condition 8 of that ruling:
+  "never called 'rootless'"). Corrected to describe the real, current, opt-in state.
+  (c) this record.
+
+**A known gap this PR does NOT close, found while building it, recorded rather than
+hidden** — the containerized `worker` compose service (`infrastructure/compose/
+docker-compose.yml`/`docker-compose.finale.yml`), which is what actually claims
+`JobKind.BASELINE`/`JobKind.VERIFY` under D-073's `DEFAULT_WORKER_KINDS`, has no
+`docker` CLI installed (`control-api.Dockerfile`'s own `apt-get install` list) and,
+structurally, can never be given one safely: D-036 forbids mounting the container
+runtime socket into any compose service, `worker` included, enforced by `tests/
+architecture/test_container_isolation.py`. `JobKind.FUZZ`'s identical need is exactly
+why `fuzz-worker` exists as a separate bare-metal process (D-073) — "the only thing
+anywhere in this system ever given container-runtime access." BASELINE/VERIFY have no
+such bare-metal-worker equivalent. Concretely: setting `SANDBOX_BUILD_IMAGE` on the
+compose `worker` service today would make every BASELINE/VERIFY job fail with
+`SANDBOX_UNAVAILABLE` (`JailError`, now caught and reported as `infra_failure` rather
+than crashing the claim loop — see `workers/baseline/dispatch.py`'s and
+`orchestrator/verify_dispatch.py`'s exception handling) — never silently wrong, but not
+usable in that deployment shape either. `SANDBOX_BUILD_IMAGE` works today only for a
+bare-metal `manage.py run_worker` process with a real docker daemon reachable, which is
+exactly how this record's own verification below was run. Whether BASELINE/VERIFY get
+their own `fuzz-worker`-shaped bare-metal process, whether `fuzz-worker` itself grows a
+second kind set, or whether to build the broker-with-an-allowlist D-036's own
+"Scalability implications" section already names as the correct shape *if* a service
+ever genuinely needs to start containers ("it needs a broker with an allow-list, not the
+socket") is an infra/architecture decision this PR does not make unilaterally.
+
+**Options considered (rollout: opt-in fallback vs. hard-required like FUZZ/ANALYZE)** —
+(a) hard-require `SANDBOX_BUILD_IMAGE`, refuse to run BASELINE/VERIFY without it,
+matching FUZZ/ANALYZE's own convention exactly. (b, chosen) opt-in with an honest
+fallback to the pre-#181 subprocess path. **Pros/cons** — (a) is the more consistent,
+arguably more secure default, and closes the gap for real the moment it merges. Against
+it: FUZZ and ANALYZE are both *new* stages built directly against `ContainerJail` with
+no prior production dependents; BASELINE and VERIFY have run against the subprocess
+`Jail` since #16/#38 respectively, and every existing deployment, CI run, and finale
+rehearsal to date depends on that continuing to work with zero operator action. Given
+the known gap above (the containerized `worker` cannot actually run the container path
+at all yet), (a) would not just require a config change, it would BRICK BASELINE/VERIFY
+in the only deployment shape docker-compose.yml currently supports, with no working
+replacement available same-day. That is exactly the kind of irreversible, outward-facing
+operational break CLAUDE.md reserves for an explicit CTO call, not a default a backend
+PR should flip on its own authority. (b) preserves every existing deployment unchanged
+today, gives operators (and this PR's own test suite, run against a bare-metal python
+process with real docker access) a working, verified container path, and makes the
+current state — isolated or not — visible on every job's own result rather than
+assumed either way.
+
+**Cost implications** — none beyond the new pinned image build
+(`infrastructure/scripts/build-baseline-verify-image.sh`, mirrors the existing
+`build-fuzz-image.sh`); no new infrastructure required to keep running exactly as before.
+
+**Security implications** — real, positive, and real gap, both: this closes the
+network/filesystem-escape isolation gap #181/SEC-57 named, for any deployment that (1)
+configures `SANDBOX_BUILD_IMAGE` and (2) runs BASELINE/VERIFY on a process that actually
+has docker access (not the current compose `worker` service — see the known gap above).
+Until both are true for a given deployment, that deployment is running exactly the
+pre-#181 gap, now at least visible in `Job.result` rather than assumed away. The
+self-expiring target allowlist is, by its own literal terms, already inert as of this
+entry's date.
+
+**Scalability implications** — none for BASELINE/VERIFY's own resource ceilings
+(`ContainerJailPolicy.cpu_limit`/`memory_mb` are sized identically to the existing
+`SandboxPolicy`/`MissionPolicy.sandbox` fields already used elsewhere). The known
+bare-metal-worker gap above is itself a scalability/topology question for whoever
+resolves it, not resolved here.
+
+**Recommendation** — three explicit calls for the CTO, not defaulted by this PR: (1)
+whether to invest in a BASELINE/VERIFY-capable bare-metal (or docker-outside-of-docker)
+worker process so `SANDBOX_BUILD_IMAGE` is actually usable in the compose deployment
+shape, and on what timeline; (2) whether the SEC-57 target allowlist, now that its own
+literal expiry has passed, should be converted into a permanent, non-expiring control
+(the reasoning that justified letting it expire — "the actual target in scope is a
+team-owned, trusted fixture" — was scoped to the pre-#181, demo-only period, and this
+system moving "beyond the demo scope" is exactly the trigger issue #181 itself names for
+needing the real fix, which is what this PR is); (3) whether to schedule flipping
+BASELINE/VERIFY's rollout from opt-in to hard-required (matching FUZZ/ANALYZE) once (1)
+is resolved, so the fallback this PR adds is a migration aid, not a permanent state.
+
+**Final approval authority** — cybersecurity (isolation-boundary change, per CLAUDE.md's
+own standing rule: "Security-sensitive changes (isolation, sandboxing, auth,
+verification gates, secrets) need a `cybersecurity` agent review recorded on the PR
+before merge"); the three CTO calls above are separate from, and do not gate, that
+review. **Not yet reviewed as of this entry — do not merge the PR this record documents
+on this entry's own say-so.**
