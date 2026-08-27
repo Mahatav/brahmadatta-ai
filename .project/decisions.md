@@ -17846,3 +17846,128 @@ the assignment.
 
 **Final approval authority** — CTO (technical; both issues explicitly pre-authorized to build
 now). cybersecurity holds sign-off on #273's disclosure-correctness claim before merge.
+
+---
+
+## D-161 · Security re-review of PR #285 (#272, #273 presentation-mode hardening) — CLEARED WITH NOTES · 2026-08-27 · cybersecurity
+
+**Decision** — PR #285 (commit `a1aedc2`, merged as `0962808`) closes #272 and #273 from the
+original #52/D-148 review with the rigor that review demanded: real dual-build-and-grep
+verification, not code review alone. Verdict: **CLEARED WITH NOTES** — merged. One inaccurate
+completeness claim in the PR's own decision record (D-160) and doc comments, plus one pre-existing,
+out-of-scope bypass path, are recorded as follow-ups rather than blockers.
+
+**What was actually run this session (not just read):**
+
+- `bash scripts/check-presentation-build-exclusion.sh` — ran directly, all 4 assertions PASS
+  (finale `dist/` clean of both dead-name traces; presentation `dist-presentation/` still
+  genuinely uses at least one, proving the negative check isn't vacuous).
+- Independent grep of the built `dist/` (not the PR's own script): `grep -rl -- '--bd-z-presentation' dist`
+  and `grep -rl 'mockSource' dist` both returned nothing. Also grepped `dist-presentation/` directly:
+  `--bd-z-presentation` is present (CSS custom properties survive minification); `mockSource` is
+  now absent from *both* builds — it moved from an object-literal property name (which esbuild's
+  minifier does not mangle) to a local variable/parameter name (which it does), so the text is
+  gone everywhere, not merely relocated. Confirms the fix over-delivers relative to its own
+  stated claim, not under-delivers.
+- Built the pre-fix baseline (`git worktree add` at `9be84c0`, the commit immediately before
+  #272/#273) and grepped its finale `dist/`: both `--bd-z-presentation`
+  (`dist/_astro/index.DFDt7P-A.css`) and `mockSource` (`dist/_astro/MissionCommandCenter.ZXQ_re_u.js`)
+  were genuinely present pre-fix. This confirms #272 was a real leak, not a false positive the
+  fix "solved" by accident.
+- `npm run check:issue-273-presentation-provenance-gate` and `npm run check:presentation-mode` —
+  ran directly, both PASS.
+- `bash scripts/check-keyboard-harness-exclusion.sh` — ran directly, PASS (unrelated exclusion
+  mechanism unaffected, as claimed).
+- Full `npm run check` (all 17 behavioral scripts, `astro check`, `tsc --noEmit`) — ran twice, once
+  contaminated by leftover `dist`/`dist-presentation` from the exclusion-script run (astro check
+  picked up the stray build artifacts as source files, producing noisy but non-blocking `hints`),
+  and once clean after `rm -rf dist dist-presentation`: **0 errors, 0 warnings, 0 hints, 64 files**,
+  exit 0, all 17 `ok:` lines printed.
+
+**#273 code-path analysis (the specific ask: find a case the PR's reasoning missed):**
+
+- Provenance-check failure/error: `PresentationMissionCommandCenter`'s `.catch()` leaves `status`
+  at `'checking'` forever; `shouldRenderMissionPanels('checking') === false` keeps
+  `MissionCommandCenter` (and its SSE connection) unmounted indefinitely. Fails closed — verified
+  by reading the actual `.catch()` body and the pure `shouldRenderMissionPanels` predicate the
+  render gate uses.
+- Slow network: same mechanism — nothing renders until the check resolves, however long that
+  takes.
+- Mission switch mid-session: the effect that re-runs the provenance check for a new
+  `activeMissionId` calls `setStatus('checking')` and `resetPresentationMockSource()`
+  *synchronously*, in the same tick as the mission-id change, before the new async check starts.
+  This unmounts `MissionCommandCenter` (running its cleanup: `controller.abort()`, SSE
+  `disconnect()`) immediately on mission switch, closing the stale SSE connection before the new
+  mission's provenance is known — not just "gated at first mount," gated on every mission
+  transition.
+- **Real gap found, not caught by the PR's own reasoning:** `apps/command-center/src/components/MissionControlPanel.tsx:111`
+  (`refreshMissionDetail`, pre-existing code from #52/#D-100, untouched by this PR) calls raw
+  `getMissionDetail(missionId)` directly — a second mission-detail fetch path that does not go
+  through `fetchMissionDetailWithDisclosure`. This makes the PR's own claim in `provenance.ts`'s
+  doc comment and D-160's decision record — *"this is now the ONLY function... there is no other
+  code path left that fetches mission detail in this build"* — factually inaccurate.
+  `MissionControlPanel` is mounted unconditionally inside `MissionCommandCenter`'s setup drawer
+  (`MissionCommandCenter.tsx:175`), the exact component tree #273's render gate protects.
+  **Assessed as non-blocking** because: (1) `MissionControlPanel` only mounts after
+  `shouldRenderMissionPanels` has already gated the whole tree open, i.e. after disclosure is
+  already resolved for that mission — this is not a "panels render before disclosure" instance of
+  the bug #273 targeted; (2) `MissionControlPanel` never renders a mock/real claim of its own
+  derived from this fetch — it doesn't feed `PresentationModeChip` or `MockDataWatermark`, so there
+  is no banner-vs-content mismatch to exploit on the disclosure signal itself; (3) it is explicitly
+  scoped out of "what a judge reads on the scored screen" by #52's own original design comment
+  ("pre-mission operator tooling"); (4) it is pre-existing, not a regression this PR introduced.
+  It is a real, demonstrable exception to the PR's stated completeness claim and should be
+  corrected in the record, not left to silently overstate the fix's scope.
+- Separately noted, not part of #273's scope and not blocking: because `MissionControlPanel` is
+  reachable once the render gate opens, its `CANCEL MISSION` / `EMERGENCY TEARDOWN` buttons become
+  clickable for *any* bound mission (mock or real) once `$missionSnapshot.state` is non-null via
+  SSE — `canCancel` does not require the panel's own `missionDetail` to be populated. This is a
+  pre-existing property of presentation mode's design (verbatim reused live-mode chrome, per
+  `MissionCommandCenter`'s own doc comment), not something #285 changed, and out of scope for this
+  PR's diff (`MissionControlPanel.tsx` is not touched by it) — flagged as a follow-up, not a #285
+  blocker.
+
+**Scope confirmation** — the diff touches only `apps/command-center/` (presentation-only files,
+plus the two shared files the leak lived in, now cleaned) and `.project/decisions.md`. No backend,
+API, or auth changes. The build-exclusion mechanism (`astro.config.mjs`'s conditional
+`injectRoute`, gated on `BD_PRESENTATION_BUILD`) is unchanged and independently re-verified to
+still work for both this feature and the unrelated keyboard-harness exclusion.
+
+**Verdict: CLEARED WITH NOTES.** Two follow-ups recorded, neither blocking:
+
+1. Correct the overclaiming language in `apps/command-center/src/lib/presentation/provenance.ts`'s
+   doc comment on `fetchMissionDetailWithDisclosure` and in D-160's text — "no other code path
+   left" should name `MissionControlPanel.tsx`'s exception explicitly.
+2. File a tracked follow-up (owner: frontend-developer via engineering-manager) to decide whether
+   `MissionControlPanel`'s `refreshMissionDetail` should also route through the shared
+   provenance-aware fetcher for consistency, or whether the exception should simply be documented
+   as accepted (it doesn't feed the disclosure UI and only mounts post-gate). Either answer is
+   fine; leaving it unstated is what's being closed here.
+
+The residual SSE-header limitation (`EventSource` cannot carry response headers) remains correctly
+disclosed by the PR itself as an open question to backend-developer/software-architect, not
+silently worked around — no new action needed from this review on that point.
+
+**Options considered** — (a) BLOCKED pending the `MissionControlPanel` exception being closed:
+rejected, since that path doesn't affect the disclosure-correctness property #273 was built to
+close (the P0-13 scored five-panel set), is pre-existing, and is out of this PR's diff entirely —
+blocking a merged, tested, in-scope fix over an adjacent pre-existing gap would be disproportionate.
+(b) CLEARED as-is, no notes: rejected, since the PR's own claim of completeness is factually wrong
+and should not stand uncorrected in the record. (c, chosen) CLEARED WITH NOTES: merge now, correct
+the record, track the follow-up.
+
+**Cost implications** — none; documentation correction and a tracked follow-up issue only.
+
+**Security implications** — the P0-13 scored-panel disclosure-correctness property is
+independently verified intact; the finale bundle is independently verified clean of both dead-name
+traces (exceeding the stated requirement for `mockSource`). The `MissionControlPanel` exception is
+a real but narrow, pre-existing, non-disclosure-facing gap, tracked rather than silently accepted.
+
+**Scalability implications** — none.
+
+**Recommendation** — no further gate before this PR's merge (already merged as `0962808`); track
+the two follow-ups above as normal backlog items, not urgent.
+
+**Final approval authority** — cybersecurity (security severity/verdict, per this role's standing
+authority); the `MissionControlPanel` consistency question itself belongs to
+software-architect/frontend-developer to resolve, not gated by security.
