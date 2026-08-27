@@ -31,9 +31,20 @@ project controls.
 
 ## Safety boundary
 
-Authorized repositories and isolated environments only. No public-target scanning, no exploit
-deployment, no automatic production merge. Target builds and fuzzing run inside rootless
-containers, never on the host.
+Authorized repositories only. No public-target scanning, no exploit deployment, no automatic
+production merge.
+
+Fuzzing and static analysis run inside a `--network none`, non-root, `--cap-drop ALL`
+container (a standard container runtime, not rootless Podman — D-024 accepted that
+substitution explicitly, with eight binding conditions, after Podman was not available on
+the build host; see `packages/sandbox/container.py`). BASELINE (a target's own build/test
+suite) and VERIFY's compile/reproducer-replay/regression gates run the same way when
+`SANDBOX_BUILD_IMAGE` is configured (#181/SEC-57) — that is a real, deliberate opt-in still
+being rolled out to every deployment, not the default everywhere yet: unset, both stages
+fall back to a subprocess-only jail with resource ceilings but no network/filesystem
+isolation from the host, and every mission's evidence records honestly which one actually
+ran a given stage. See `.project/decisions.md`'s SEC-57 entry for the current rollout state
+and the known gap in wiring container isolation into the containerized worker deployment.
 
 ## Stack
 

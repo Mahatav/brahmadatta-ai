@@ -33,7 +33,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from authorization import archive, store
+from authorization import archive, store, target_allowlist
 from authorization.errors import (
     AuthorizationScopeError,
     InvalidOperatorInputError,
@@ -316,8 +316,15 @@ def _resolve_repository_ref(repository_ref: str) -> Path:
     allowlisted root. Distinct repository references that collapse to the same key are
     refused, however: silently selecting one would bind a mission's evidence to the
     wrong repository (SEC-29).
+
+    #181/SEC-57 fast-follow condition (a): `target_allowlist.assert_target_allowed`
+    additionally refuses a `name` outside the SEC-57 target allowlist, while that
+    gate's own self-expiring window is still open — see that module's own docstring
+    for why it is presently a no-op (`is_enforced()` is `False` for any date after
+    2026-08-20) and why it is built anyway.
     """
     name = _repository_lookup_name(repository_ref)
+    target_allowlist.assert_target_allowed(name)
     for candidate_ref in Mission.objects.values_list("repository_ref", flat=True):
         if candidate_ref == repository_ref:
             continue

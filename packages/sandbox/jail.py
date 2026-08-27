@@ -593,6 +593,26 @@ class Jail:
             )
         return resolved
 
+    def which(self, name: str) -> str | None:
+        """Resolve a bare tool name (`"cmake"`) to the path this jail will actually
+        run when handed it.
+
+        For this subprocess jail that is exactly `shutil.which(name)`: the child runs
+        on the SAME filesystem and `PATH` as the orchestrator host (see this module's
+        own opening warning), so a host-resolved absolute path is a correct, valid
+        argv[0] here. #181/SEC-57 added this method (and the container-backed
+        equivalent, `packages.sandbox.container_runner.ContainerJailRunner.which`) so
+        `adapters/cpp/toolchain.py::probe_build_tools` and `adapters/cpp/pipeline.py`
+        can resolve a tool through whichever jail flavor they were actually handed,
+        instead of calling `shutil.which()` themselves and silently baking in the
+        assumption that a host-resolved path means anything inside a container's own,
+        differently-built filesystem — see `ContainerJailRunner.which`'s own docstring
+        for why that assumption is exactly the toolchain-pinning gap `toolchain.py`'s
+        module docstring already names as open until "the container path" (#15) is
+        wired into this call site.
+        """
+        return shutil.which(name)
+
     # -- running ------------------------------------------------------------------
 
     def run(

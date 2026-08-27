@@ -260,6 +260,32 @@ SANDBOX_POLICY = {
 # by `adapters.cpp.toolchain.require_pinned` regardless of what is set here.
 SANDBOX_FUZZ_IMAGE = env.get_str("SANDBOX_FUZZ_IMAGE", "")
 
+# #181/SEC-57: `packages.sandbox.container_runner.ContainerJailRunner`'s image for
+# BASELINE (`workers/baseline/dispatch.py`) and VERIFY (`orchestrator/
+# verify_dispatch.py`) — the two stages that, before this issue, ran a target's own
+# build/test suite and a model-generated patch's configure+build+ctest+git-apply
+# sequence inside `packages.sandbox.jail.Jail` (same host filesystem, same network as
+# the orchestrator) rather than `ContainerJail`. Same "blank by default, no safe
+# default image" rule as `SANDBOX_FUZZ_IMAGE` above, and the same digest-pin
+# enforcement (`adapters.cpp.toolchain.require_pinned`).
+#
+# Deliberately BLANK-SAFE, not required, unlike `SANDBOX_FUZZ_IMAGE`: FUZZ was built
+# against `ContainerJail` from the start (#168 T2) and has never had a working
+# subprocess-jail path to fall back to, so refusing to run without an image is a
+# no-op-shaped fail-closed default there. BASELINE/VERIFY have run against
+# `packages.sandbox.jail.Jail` since #16/#38 and every existing deployment/CI/demo
+# rehearsal depends on that continuing to work with no image configured — SEC-57's own
+# disposition (`.project/decisions.md`) is explicit that this is a fast-follow, not a
+# pre-demo blocker, and that the un-isolated path's blast radius is already bounded
+# (`Jail`'s own resource ceilings, plus the target-allowlist this same issue adds,
+# `authorization/target_allowlist.py`). `workers/baseline/dispatch.py`/
+# `orchestrator/verify_dispatch.py` therefore fall back to the pre-existing `Jail`
+# path — with `result["container_isolation"] = False` recorded on the job, never
+# silently — when this is unset, instead of refusing to run the way FUZZ does. Set
+# this to move BASELINE/VERIFY onto the container path; leaving it blank is a real,
+# visible, audited choice, not a silent gap.
+SANDBOX_BUILD_IMAGE = env.get_str("SANDBOX_BUILD_IMAGE", "")
+
 # `ContainerJailPolicy.image` for `JobKind.ANALYZE` (#22, D-144) — same "no safe
 # default" reasoning as `SANDBOX_FUZZ_IMAGE` above. Blank by default;
 # `workers/static_analysis/dispatch.py` refuses to start a Semgrep scan without it
@@ -282,6 +308,18 @@ ARTIFACT_ROOT = Path(env.get_str("ARTIFACT_ROOT", str(BASE_DIR / "var" / "artifa
 SNAPSHOT_SOURCE_ROOT = Path(
     env.get_str("SNAPSHOT_SOURCE_ROOT", str(BASE_DIR.parent.parent / "demo" / "repositories"))
 )
+
+# #181/SEC-57 fast-follow condition (a): `authorization.target_allowlist`'s configured
+# override for `DEFAULT_ALLOWED_TARGETS` (`{"pktcfg"}`) — see that module's own
+# docstring for the self-expiring window this is checked against (already closed as of
+# this setting's own introduction; read the module docstring before assuming this line
+# does anything live today). Unset (`None`, the `env.get_list` default's empty-string
+# sentinel below is deliberately turned into `None`, not `[]` — `target_allowlist.
+# _configured_allowlist` treats an explicitly-configured empty list as a real "allow
+# nothing," which an absent env var must never be mistaken for) falls back to that
+# module's own default rather than this file inventing a second copy of it.
+_mission_target_allowlist_raw = env.get_list("MISSION_TARGET_ALLOWLIST")
+MISSION_TARGET_ALLOWLIST = _mission_target_allowlist_raw or None
 
 # `services/model-gateway/` — the directory `orchestrator/patch_generate_executor.py::
 # _model_gateway_root()` puts on `sys.path` (lazily, only inside `run_worker`'s claim

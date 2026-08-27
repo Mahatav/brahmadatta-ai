@@ -574,6 +574,26 @@ services:
       # #189: threaded through so it is visible here even though THIS service cannot
       # currently act on it — see the comment block above `worker:` for why.
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
+      # #181/SEC-57: BASELINE/VERIFY both run on `worker` (D-073's own
+      # `DEFAULT_WORKER_KINDS`), unlike FUZZ above — but DO NOT set this on THIS
+      # service in its current form. `packages.sandbox.container.ContainerJail` shells
+      # out to a `docker` CLI binary this image does not install (see
+      # control-api.Dockerfile's own apt-get list) and, structurally, never can:
+      # D-036 forbids ever mounting `/var/run/docker.sock` into any compose service,
+      # `worker` included (`tests/architecture/test_container_isolation.py`), which is
+      # the other half of what running `docker` from inside a container needs. FUZZ's
+      # own identical need is why `fuzz-worker` exists as a SEPARATE bare-metal
+      # process (`infrastructure/scripts/run-fuzz-worker.sh`, D-073) — "the only thing
+      # anywhere in this system ever given container-runtime access"
+      # (`orchestrator/queue.py`'s own `FUZZ_ONLY_KINDS` docstring). BASELINE/VERIFY
+      # have no bare-metal-worker equivalent yet, so setting this here today would
+      # make every BASELINE/VERIFY job fail with SANDBOX_UNAVAILABLE, not silently —
+      # see `.project/decisions.md`'s SEC-57 entry, "known gap: no bare-metal worker
+      # for BASELINE/VERIFY," for the real, unresolved infra decision this needs
+      # before it is safe to populate. Threaded through anyway, unset, for the same
+      # reason `SANDBOX_FUZZ_IMAGE` is above: visible here rather than invented only
+      # in a `.env` an operator has to know to write from scratch.
+      SANDBOX_BUILD_IMAGE: ${SANDBOX_BUILD_IMAGE:-}
       # D-100: this is the process that actually runs JobKind.PATCH_GENERATE — see
       # control-api's identical MODEL_GATEWAY_ROOT comment above.
       MODEL_GATEWAY_ROOT: /app/services/model-gateway

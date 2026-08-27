@@ -49,6 +49,7 @@ D-026 boundary this package's other modules already document).
 
 from __future__ import annotations
 
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -61,9 +62,36 @@ from adapters.cpp.detect import BuildSystem, detect
 from adapters.cpp.errors import AdapterError, BuildStep, StepFailure, ToolchainError
 from adapters.cpp.pipeline import BuildResult, run_variant
 from adapters.cpp.snapshot import SnapshotInfo, hash_source_tree
-from adapters.cpp.toolchain import ISOLATION_UNPROTECTED_AGAINST
+from adapters.cpp.toolchain import ISOLATION_UNPROTECTED_AGAINST, require_pinned
 from adapters.cpp.variants import Variant
-from packages.sandbox import ISOLATION_MODE, Jail, JailPolicy
+from packages.sandbox import (
+    ISOLATION_MODE,
+    ContainerJailPolicy,
+    ContainerJailRunner,
+    Jail,
+    JailPolicy,
+)
+from packages.sandbox.container import ISOLATION_MODE as CONTAINER_ISOLATION_MODE
+
+#: What `--network none` / `--cap-drop ALL` / `--read-only` / a pinned image (D-024,
+#: `packages/sandbox/container.py`) leave genuinely unresolved, for the same honest
+#: "isolation_unprotected_against" reporting `ISOLATION_UNPROTECTED_AGAINST` gives the
+#: subprocess path — see that constant's own docstring (`adapters/cpp/toolchain.py`) for
+#: the shape this mirrors. Deliberately much shorter: network egress, filesystem reads
+#: outside the jail root, and toolchain reproducibility are the three items
+#: `ISOLATION_UNPROTECTED_AGAINST` names that a `--network none` container with a single
+#: bind mount and a real pinned `image_digest` actually closes (D-024 §6.2 conditions
+#: 1/5, and `require_pinned` below). What is left, honestly: this is still a rootful
+#: Docker daemon (D-024 accepted this substitution for rootless Podman explicitly, not
+#: silently — see `packages/sandbox/container.py`'s own module docstring), and
+#: `--cap-drop ALL`/`--security-opt no-new-privileges` narrow but do not add seccomp or a
+#: user namespace on top of the fixed non-root uid.
+CONTAINER_ISOLATION_UNPROTECTED_AGAINST: tuple[str, ...] = (
+    "a container-runtime escape reaching host root (D-024 accepted a rootful daemon, "
+    "not rootless, as the substitute for Podman not being installed on the build host)",
+    "no seccomp profile or Linux user namespace beyond the fixed non-root uid/gid and "
+    "--cap-drop ALL",
+)
 
 __all__ = ["BaselineFailureDetail", "BaselineOutcome", "emit_baseline_events", "run_baseline_stage"]
 
@@ -207,24 +235,57 @@ def _failure_from_adapter_error(
     )
 
 
+#: Directories never worth copying into a `ContainerJailRunner`'s bind mount before a
+#: BASELINE build — mirrors `orchestrator/verification.py::VerificationBaseline.
+#: ignored_names`'s identical list for the identical reason (a `.git` history or a stale
+#: build tree left in the mission's extracted source is real, reachable I/O this stage
+#: does not need to pay for). Irrelevant to the subprocess-`Jail` path, which builds
+#: out-of-place against the original `source_dir` and never copies it anywhere.
+_CONTAINER_SOURCE_COPY_IGNORED_NAMES: tuple[str, ...] = (
+    ".git",
+    "build",
+    "cmake-build-debug",
+    "cmake-build-release",
+)
+
+
 def run_baseline_stage(
     mission_id: str | uuid.UUID,
     source_dir: Path | str,
     workspace_root: Path | str,
     *,
     jail_policy: JailPolicy | None = None,
+    container_policy: ContainerJailPolicy | None = None,
 ) -> BaselineOutcome:
     """Run the baseline stage for one mission. Never raises on a red or broken build —
     every failure mode this module knows about is converted into a `BaselineOutcome` with
     `passed=False` and `failure` populated. Only a programming error (a bug in this
     module) escapes as an unhandled exception.
 
-    Opens exactly one `packages.sandbox.Jail` for the whole configure+build+ctest
-    sequence and closes it before returning — its scratch directory, including
-    `BuildResult.build_dir`, does not survive past this call (D-053/D-054). The one
-    artifact worth keeping — the CTest JUnit report — is copied out to `workspace_root`
-    (which is NOT inside the jail and is not deleted) while the jail is still open, and
-    `BaselineOutcome.log_ref` points at that durable copy, not the ephemeral original.
+    Opens exactly one jail for the whole configure+build+ctest sequence and closes it
+    before returning — its scratch directory, including `BuildResult.build_dir`, does not
+    survive past this call (D-053/D-054). The one artifact worth keeping — the CTest
+    JUnit report — is copied out to `workspace_root` (which is NOT inside the jail and is
+    not deleted) while the jail is still open, and `BaselineOutcome.log_ref` points at
+    that durable copy, not the ephemeral original.
+
+    ``container_policy`` (#181/SEC-57): when given, this stage runs inside
+    `packages.sandbox.container.ContainerJail` (via `ContainerJailRunner`, `packages/
+    sandbox/container_runner.py`) instead of the subprocess-only `packages.sandbox.Jail`
+    — D-024's `--network none`/`--cap-drop ALL`/`--read-only` isolation, real for a
+    mission's own build/test suite (BASELINE runs a target's own, potentially
+    adversarial, `CMakeLists.txt`/CTest configuration — see #181's own finding). `None`
+    (the default) is the pre-#181 behavior, unchanged: `workers/baseline/dispatch.py`
+    decides which to pass based on whether `settings.SANDBOX_BUILD_IMAGE` is configured.
+
+    The container path additionally copies `source_dir` into the jail's own bind-mounted
+    root before building — `ContainerJail` has exactly one mount point (`packages/
+    sandbox/container.py::_docker_run_args`, `-v {root}:/workspace:rw`), unlike the
+    subprocess `Jail`, which shares the whole host filesystem and can build out-of-place
+    against the original `source_dir` with no copy at all (`adapters/cpp/pipeline.py`'s
+    own `-S <source_dir>` argument, resolved as a bare host path). The copy is the one
+    real, load-bearing difference this function's two branches have beyond which jail
+    class they open — see `_CONTAINER_SOURCE_COPY_IGNORED_NAMES`.
     """
     started = time.monotonic()
     mission_id_str = str(mission_id)
@@ -232,7 +293,9 @@ def run_baseline_stage(
     source = Path(source_dir).resolve()
 
     # #17 AC 4: the snapshot hash is recorded regardless of what happens next — computed
-    # before configure/build even start, so it reflects the exact input attempted.
+    # before configure/build even start, so it reflects the exact input attempted. Always
+    # hashes the ORIGINAL source, never the container path's own in-jail copy — the
+    # snapshot must describe the exact, unmodified mission input either way.
     snapshot = hash_source_tree(source)
 
     workspace = Path(workspace_root).resolve()
@@ -246,9 +309,35 @@ def run_baseline_stage(
     compiler_id = "unknown"
     compiler_version = "unknown"
 
-    with Jail.create(jail_policy, parent=workspace) as jail:
+    using_container = container_policy is not None
+    image_digest = require_pinned(container_policy.image) if using_container else None
+    isolation_mode = CONTAINER_ISOLATION_MODE if using_container else ISOLATION_MODE
+    isolation_unprotected_against = (
+        CONTAINER_ISOLATION_UNPROTECTED_AGAINST if using_container else ISOLATION_UNPROTECTED_AGAINST
+    )
+
+    jail_cm = (
+        ContainerJailRunner.create(container_policy, parent=workspace, mission_ref=mission_id_str)
+        if using_container
+        else Jail.create(jail_policy, parent=workspace)
+    )
+    with jail_cm as jail:
         try:
-            build_result = run_variant(source, jail, Variant.BASELINE)
+            build_source = source
+            if using_container:
+                # See this function's own docstring: the container's one bind mount has
+                # to actually contain the source before `-S <path>` (built from it,
+                # `adapters/cpp/pipeline.py::_configure_argv`) means anything inside the
+                # container's own mount namespace.
+                build_source = jail.root / source.name
+                shutil.copytree(
+                    source,
+                    build_source,
+                    ignore=shutil.ignore_patterns(*_CONTAINER_SOURCE_COPY_IGNORED_NAMES),
+                )
+            build_result = run_variant(
+                build_source, jail, Variant.BASELINE, image_digest=image_digest
+            )
             adapter_name = build_result.detected.build_system.value
             # #23: structurally parse the compiler diagnostics out of the SAME
             # `cmake --build` invocation the D3 gate already ran — while the jail is
@@ -306,6 +395,8 @@ def run_baseline_stage(
             compiler_diagnostics=compiler_diagnostics,
             compiler_id=compiler_id,
             compiler_version=compiler_version,
+            isolation_mode=isolation_mode,
+            isolation_unprotected_against=isolation_unprotected_against,
         )
 
     # Configure, build, or toolchain probing did not complete. Recorded as a red baseline
@@ -336,6 +427,8 @@ def run_baseline_stage(
         compiler_version=compiler_version,
         log_ref=None,  # no durable artifact for a configure/build failure — see `failure.detail`
         failure=failure,
+        isolation_mode=isolation_mode,
+        isolation_unprotected_against=isolation_unprotected_against,
     )
 
 

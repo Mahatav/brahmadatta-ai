@@ -81,17 +81,29 @@ separate wiring mechanism.
 
 ## What this module deliberately does not do
 
-It does not open a `packages.sandbox.Jail` itself — SEC-47 closed that gap inside
-`orchestrator/verification.py` instead. `run_verification` now opens exactly one
-`Jail` per call (`git apply`'s candidate diff is written to a file inside the jail
-and applied via a path argument rather than piped over stdin, since `Jail.run()`
-hardcodes `stdin=subprocess.DEVNULL`), sized for the sanitizer build
-`VerificationBaseline`'s own default turns on (`memory_bytes` from
-`adapters.cpp.variants.MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`, PR #175's functional
-re-review). This module calls `run_verification(ctx.source_dir, patch.diff,
-reproducer_path, baseline)` with no `runner=` override, so it inherits that
-isolation and sizing for free rather than needing to open or size a `Jail` of its
-own.
+It does not open a jail itself — SEC-47 closed that gap inside `orchestrator/
+verification.py` instead. `run_verification` opens exactly one jail per call (`git
+apply`'s candidate diff is written to a file inside the jail and applied via a path
+argument rather than piped over stdin, since neither jail backend has a `stdin`
+channel), sized for the sanitizer build `VerificationBaseline`'s own default turns on
+(`memory_bytes` from `adapters.cpp.variants.MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS` on
+the subprocess path, PR #175's functional re-review). This module calls
+`run_verification(ctx.source_dir, patch.diff, reproducer_path, baseline, renewed_fuzz=
+..., container_policy=...)` with no `runner=` override, so it inherits that isolation
+and sizing for free rather than needing to open or size a jail of its own.
+
+#181/SEC-57: `container_policy` (`_main_gates_container_policy_for`, below) is this
+module's own decision, not `verification.py`'s — `None` when `settings.
+SANDBOX_BUILD_IMAGE` is unset, which routes `run_verification` to the pre-#181
+subprocess `Jail` (no network/filesystem isolation from the host) for the compile/
+reproducer-replay/regression gates, same as every VERIFY run before this issue. Not a
+hard requirement, unlike `JobKind.FUZZ`'s `SANDBOX_FUZZ_IMAGE` (`workers/fuzzing/
+dispatch.py`) — VERIFY has run against the subprocess path since #38 and every existing
+deployment depends on that continuing to work with no image configured; see `.project/
+decisions.md`'s SEC-57 entry for the full reasoning and the explicit call this
+un-does-by-default choice needs from the CTO before it can be treated as closed rather
+than mitigated. Recorded either way in `ExecutorResult.result["container_isolation"]`,
+never silently.
 """
 
 from __future__ import annotations
@@ -134,6 +146,14 @@ from packages.sandbox.container import ContainerJailPolicy
 #: `JobKind.FUZZ`'s dispatch module, and #40's own budget is a different, smaller
 #: number (`MissionPolicy.renewed_fuzz_seconds`, not `fuzz_seconds`).
 _RENEWED_FUZZ_WALL_CLOCK_BUFFER_SECONDS = 180.0
+
+#: #181/SEC-57 — `docker run`/`docker wait`/`docker logs` overhead the subprocess-`Jail`
+#: path never pays, added on top of `VerificationBaseline.timeout_seconds` for the
+#: compile/reproducer-replay/regression gates' `ContainerJailPolicy.wall_clock_seconds`.
+#: Same reasoning as `_RENEWED_FUZZ_WALL_CLOCK_BUFFER_SECONDS`/`workers/fuzzing/
+#: dispatch.py`'s identical constant; kept separate for the same "not coupled to a
+#: different job kind's own budget" reason.
+_CONTAINER_STARTUP_BUFFER_SECONDS = 60.0
 
 #: Sentinel path handed to `run_verification` when no reproducer artifact can be
 #: resolved for this candidate's finding. `run_verification`'s own reproducer gate
@@ -221,6 +241,7 @@ def _verify_executor(ctx: ExecutorContext) -> ExecutorResult:
     reproducer_path = _resolve_reproducer_path(ctx, patch)
     baseline = _baseline_for(mission)
     renewed_fuzz = _renewed_fuzz_config_for(mission)
+    main_gates_container_policy = _main_gates_container_policy_for(mission)
 
     started_at = timezone.now()
     try:
@@ -230,6 +251,7 @@ def _verify_executor(ctx: ExecutorContext) -> ExecutorResult:
             reproducer_path,
             baseline,
             renewed_fuzz=renewed_fuzz,
+            container_policy=main_gates_container_policy,
         )
     except Exception as exc:  # noqa: BLE001 - an infra fault, never a verdict
         return ExecutorResult(
@@ -270,6 +292,12 @@ def _verify_executor(ctx: ExecutorContext) -> ExecutorResult:
             "verification_id": str(record.id),
             "verdict": record.verdict,
             "gate_matrix_ref": gate_matrix_ref,
+            # #181/SEC-57: never silent either way — `False` here means the compile/
+            # reproducer-replay/regression gates ran inside `packages.sandbox.jail.Jail`
+            # (no network/filesystem isolation from the host) because
+            # `settings.SANDBOX_BUILD_IMAGE` is not configured for this deployment, not
+            # that isolation was forgotten. See `_main_gates_container_policy_for`.
+            "container_isolation": main_gates_container_policy is not None,
         },
     )
 
@@ -345,6 +373,50 @@ def _renewed_fuzz_config_for(mission: Mission) -> RenewedFuzzConfig:
         container_policy=container_policy,
         budget_seconds=budget_seconds,
         mission_ref=f"renewed-fuzz-{mission.id}",
+    )
+
+
+def _main_gates_container_policy_for(mission: Mission) -> ContainerJailPolicy | None:
+    """#181/SEC-57 — build `run_verification`'s `container_policy` (the compile/
+    reproducer-replay/regression gates) from this mission's own sandbox policy, the
+    same `MissionPolicy.sandbox` fields `_renewed_fuzz_config_for`/`workers/fuzzing/
+    dispatch.py::_container_policy` already use, keyed on `settings.SANDBOX_BUILD_IMAGE`
+    instead of `SANDBOX_FUZZ_IMAGE` — a deliberately separate setting (`config/settings/
+    base.py`'s own comment on it explains why: unlike FUZZ, VERIFY has a pre-existing,
+    still-supported subprocess-`Jail` path, so this setting being unset falls back to
+    it rather than refusing to run).
+
+    Returns `None` when `SANDBOX_BUILD_IMAGE` is unset — `_verify_executor` records
+    that as `result["container_isolation"] = False` rather than silently proceeding
+    with no signal either way, matching `workers/baseline/dispatch.py`'s identical
+    convention for `JobKind.BASELINE`.
+    """
+    image = getattr(settings, "SANDBOX_BUILD_IMAGE", "") or ""
+    if not image:
+        return None
+    mission_policy = _mission_policy(mission)
+    sandbox = mission_policy.sandbox
+    if sandbox.runtime == "subprocess-jail":
+        # `SandboxPolicy.runtime`'s own field description: "not a silent substitution"
+        # — a mission that explicitly asked for the subprocess-jail fallback gets it,
+        # even when `SANDBOX_BUILD_IMAGE` is configured for every other mission.
+        return None
+    runtime = sandbox.runtime if sandbox.runtime in ("docker", "podman") else "docker"
+    # `VerificationBaseline().timeout_seconds` (120s default) is the same budget
+    # `run_verification`'s own subprocess-`JailPolicy` sizing already uses for this
+    # exact gate sequence (`policy_overrides["wall_clock_seconds"]` in `verification.
+    # py`) — `_baseline_for` never overrides `timeout_seconds`, only
+    # `expected_regression_tests`, so this is the real effective budget either way, not
+    # a guess. `_CONTAINER_STARTUP_BUFFER_SECONDS` covers `docker run`/`docker wait`
+    # overhead the subprocess path does not pay, mirroring `workers/fuzzing/
+    # dispatch.py`'s identical `_CONTAINER_WALL_CLOCK_BUFFER_SECONDS` reasoning.
+    wall_clock_seconds = VerificationBaseline().timeout_seconds + _CONTAINER_STARTUP_BUFFER_SECONDS
+    return ContainerJailPolicy(
+        image=image,
+        runtime=runtime,
+        cpu_limit=float(sandbox.cpu_limit),
+        memory_mb=sandbox.memory_mb,
+        wall_clock_seconds=float(wall_clock_seconds),
     )
 
 
