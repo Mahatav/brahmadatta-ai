@@ -18747,3 +18747,139 @@ are unaffected by this fix.
 **Final approval authority** — CTO (technical); a `cybersecurity` review is additionally
 required before merge per CLAUDE.md's standing rule for verification-gate changes.
 
+---
+
+## D-168 — Security review of PR #296 (#288/#289/#291/#292: generalize the libFuzzer adapter beyond pktcfg) — CLEARED WITH NOTES · 2026-08-29 · cybersecurity
+
+**Decision** — PR #296 genuinely fixes all four issues it claims to, does not weaken the
+D5 verification gate, and does not touch the sandbox isolation boundary. Verdict:
+**CLEARED WITH NOTES**. Merged as-is (squash, `f3260225`); three low-severity follow-ups
+recorded below, none blocking.
+
+**Verification performed (not just read — run)**:
+
+1. **#291 — the verification-gate change, scrutinized hardest.** Read `_artifact_kind`,
+   `_stopping_artifact`, and the rewritten `parse_libfuzzer_metrics` line by line, then
+   ran adversarial inputs directly against the real module (not just the shipped
+   tests). `crashes_found`/`unique_crashes` are computed from `sanitizer_relevant =
+   {p for p in discovered if _artifact_kind(p) in {"crash","leak"}}` —
+   **independent of `_stopping_artifact`**. A genuine `crash-*`/`leak-*` artifact is
+   counted regardless of which artifact "stopped" the run. Could not construct a case
+   where a real crash/leak-kind artifact fails to be classified as such: in the real
+   pipeline `discovered` is seeded from an authoritative directory listing
+   (`sandbox.root/fuzz-artifacts/*`), not solely from regex over captured text, and
+   `artifact_prefix` is hardcoded with a trailing `/` (`adapters/cpp/fuzzing.py:472`), so
+   every real artifact path is always `fuzz-artifacts/<kind>-<hash>` —
+   `_ARTIFACT_KIND_RE`'s `(?:^|/)` anchor always matches. Verified empirically: multiple
+   `slow-unit-*` artifacts followed by a real `crash-*` correctly yields
+   `crashes_found=1`, `sanitizers=('address',)`; a real `crash-*` with no `SUMMARY:`
+   line (non-ASan build) correctly yields `crashes_found=1` (still counted, unlike the
+   old bug this replaces) with `sanitizers=()` (correctly not claimed as
+   sanitizer-confirmed — intentional, not a regression). `_stopping_artifact`'s
+   multi-artifact branch is exercised more often than its own docstring suggests, since
+   libFuzzer's `slow-unit` reporting does not halt the process — a long real campaign
+   can legitimately accumulate several `slow-unit-*` artifacts before a genuine crash
+   finally stops it; traced this path and confirmed `_stopping_artifact` correctly
+   resolves to the crash, since "Test unit written to ..." lines are append-only and
+   the real halting fault is always printed last. Only `sanitizers`
+   (and the derived `sanitizer_confirmed`) is gated on `_stopping_artifact`; the
+   narrowest failure mode found is captured-output truncation removing every "Test unit
+   written to" line while more than one heterogeneous artifact kind is present, forcing
+   the `max(discovered)` lexicographic fallback, which could pick a
+   `timeout-`/`slow-unit-` path over a co-present `crash-` path. This would make
+   `sanitizer_confirmed` **False** for a run that did have a real crash, but
+   `crashes_found`/`artifact_paths` still report it correctly — never silently dropped,
+   only under-labelled, which is the same conservative direction the fix intends and
+   strictly safer than the over-counting bug it replaces. **Conclusion: this change
+   makes `sanitizer_confirmed` strictly more conservative; no path was found that drops
+   a real crash/leak from `crashes_found`.**
+2. **pktcfg's own behavior, run for real, not trusted from the PR body.** Ran pktcfg's
+   real (non-mocked, real Docker) campaign tests directly:
+   `test_real_libfuzzer_campaign_finds_the_seeded_heap_overflow` and
+   `test_real_campaign_crash_bytes_survive_the_jails_own_teardown` — both **PASSED**,
+   same outcomes as before this PR.
+3. **Real, non-mocked Docker tests, run myself**
+   (`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1 pytest workers/fuzzing/tests/test_real_campaign.py
+   workers/fuzzing/tests/test_cli_real.py -v`, real Docker daemon, real image build via
+   `infrastructure/scripts/build-fuzz-image.sh`): the synthetic non-pktcfg target test
+   (#288), the deliberate-leak-suppression test (#289), and the CLI end-to-end
+   artifact-survival test (#292) all **PASSED** — 5 passed, 1 xfailed. Confirmed by
+   reading the fixtures that these go through a real `ContainerJail`/`docker run` with
+   the unchanged D-024 flag set, not something that only looks real.
+4. **#289 `sanitizer_env`/`dataclasses.replace`.** Confirmed non-mutation:
+   `dataclasses.replace(policy, extra_env={**policy.extra_env, **sanitizer_env})`
+   creates a new object; re-ran the shipped
+   `test_run_libfuzzer_campaign_sanitizer_env_is_opt_in_and_merges_with_policy_env` —
+   passes, asserts the caller's original policy is untouched. Real gap found: the merge
+   is last-write-wins with no collision detection — a future caller whose own
+   `policy.extra_env` already sets `ASAN_OPTIONS` would have it silently replaced
+   wholesale (not combined) by `sanitizer_env`'s value. No current call site does this
+   (grepped every `run_libfuzzer_campaign`/`RenewedFuzzConfig` caller) — not exploitable
+   as shipped, recorded as a follow-up.
+5. **`.project/decisions.md` well-formedness.** Checked the full file: D-1 through
+   D-167, no corruption or stray tool-call fragments at the tail (ends cleanly after
+   D-167's "Final approval authority" line). A duplicate `## D-151` header and a small
+   numbering gap exist, but `git show origin/main:.project/decisions.md` at the commit
+   before PR #296 confirms both already existed prior to this PR — pre-existing,
+   unrelated, not worsened by it.
+6. **Full test suites, fresh Python 3.12 venv, run myself.**
+   `adapters/cpp/tests workers/fuzzing/tests workers/baseline/tests
+   workers/replay/tests`: **121 passed, 7 skipped, 1 xfailed**, matching the PR's claim
+   exactly (confirmed the 7 skips are the opt-in real-Docker tests, all run for real in
+   point 3 above). Full `apps/control-api` suite via `pytest --junitxml`: **822 total, 1
+   failure, 23 skipped → 798 passed**, matching the PR's claim exactly; the one failure
+   (`test_patch_generate_executor.py::test_live_backend_built_by_this_module_gets_401_
+   from_the_sidecar_without_the_fix`, needs a live model-gateway sidecar) was
+   independently reproduced with identical JUnit counts on unmodified `origin/main` in
+   a separate worktree/venv — confirmed pre-existing and unrelated, not just trusted
+   from the PR body. `ruff check`: one new, non-blocking `F811` in the new
+   `workers/fuzzing/tests/test_cli_real.py` (a re-exported pytest fixture name reused as
+   a test function's own parameter, a known pyflakes pattern); everything else flagged
+   (an import-sort nit, one `S603` subprocess warning in `orchestrator/verification.py`)
+   is pre-existing on `origin/main`, confirmed by diffing ruff's output against both
+   branches. Per `.github/workflows/ci.yml`, ruff/mypy are documented as "run locally,"
+   not a CI merge gate, so this does not block. `mypy` on the three core changed source
+   files: clean. Sandbox isolation boundary (`ContainerJail`'s D-024 flags, `--network
+   none`, `--cap-drop ALL`, non-root uid, no Docker-socket mount): confirmed untouched
+   by this diff by direct code review.
+
+**Options considered** — none; this is a verification/verdict decision on an
+already-chosen design (the PR's own #288/#289/#291/#292 fixes), not a design decision of
+this role's own. The one judgment call this review owns is severity of the
+`_stopping_artifact` truncation/multi-artifact edge case: judged low severity (fails
+toward under-claiming, never drops evidence, no current call site can even reach the
+colliding-key gap in #289) rather than a blocking finding.
+
+**Pros and cons** — Pro: independently re-derived, from the actual classification logic
+and adversarial inputs (not just the shipped tests), that #291 cannot regress into a
+worse-than-original false negative on `crashes_found`; independently reproduced every
+test-count claim in the PR body, including the one pre-existing unrelated failure, on
+both branches. Con: three real (if low-severity) gaps were found that the PR's own
+review request did not surface — the `sanitizer_env` override-wins merge, the
+whole-output-scoped `SUMMARY:` text extraction, and a cosmetic new lint nit — recorded as
+follow-ups rather than blockers since none creates a dropped finding or a security
+boundary weakening.
+
+**Cost implications** — none.
+
+**Security implications** — this review's own subject; see verification above. Residual
+risk, all low severity: (a) `sanitizer_env`'s last-write-wins merge could silently drop
+a security-relevant `ASAN_OPTIONS` fragment a future caller already set, once two
+callers compose `policy.extra_env` and `sanitizer_env` with an overlapping key — no
+call site does this today; (b) `sanitizers`' `SUMMARY:` extraction is scoped to the
+whole captured session rather than strictly the stopping artifact's own block, which can
+attribute an unrelated sanitizer name into the tuple without inflating the boolean gate
+or `crashes_found`; (c) the truncation+multi-artifact edge case in point 1 above can
+under-claim `sanitizer_confirmed` for a real crash, never drop it from evidence.
+
+**Scalability implications** — none.
+
+**Recommendation** — CLEARED WITH NOTES, merged as-is. Follow-ups (non-blocking, low
+severity, unassigned): (1) document or enforce that `sanitizer_env` combines rather than
+silently replaces an identically-named `policy.extra_env` key; (2) scope `sanitizers`'
+`SUMMARY:` text extraction to the stopping artifact's own captured block; (3) fix the
+new `F811` in `workers/fuzzing/tests/test_cli_real.py`.
+
+**Final approval authority** — cybersecurity (security verdict, this role's own
+standing authority per CLAUDE.md).
+
