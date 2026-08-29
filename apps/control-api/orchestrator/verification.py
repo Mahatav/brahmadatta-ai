@@ -6,13 +6,24 @@ path: deterministic gates produce a ``GateMatrix`` and ``derive_verdict`` remain
 only verdict reducer.
 
 SEC-47: every command this module runs (``git apply``, ``cmake`` configure/build, the
-compiled patched binary, ``ctest``) executes inside exactly one ``packages.sandbox.Jail``
-per ``run_verification`` call, mirroring ``workers/baseline/run.py``'s existing pattern
-for the BASELINE stage's own configure+build+ctest sequence. This bounds CPU, address
-space, process count and wall-clock time on the one pipeline stage that compiles and
-executes a diff whose provenance may be ``MODEL_GENERATED`` — it does not, on its own,
-stop credential exfiltration (SEC-44's explicit env allowlist is what does that; see
-``_ENV_ALLOWLIST`` below and ``Jail.run()``'s own environment scrubbing).
+compiled patched binary, ``ctest``) executes inside exactly one jail per
+``run_verification`` call, mirroring ``workers/baseline/run.py``'s existing pattern for
+the BASELINE stage's own configure+build+ctest sequence. This bounds CPU, address space,
+process count and wall-clock time on the one pipeline stage that compiles and executes a
+diff whose provenance may be ``MODEL_GENERATED`` — it does not, on its own, stop
+credential exfiltration (SEC-44's explicit env allowlist is what does that; see
+``_ENV_ALLOWLIST`` below and each jail's own environment scrubbing).
+
+#181/SEC-57: that jail is ``packages.sandbox.jail.Jail`` (no network/filesystem isolation
+from the host — see that module's own opening warning) unless ``run_verification`` is
+given ``container_policy``, in which case it is ``packages.sandbox.container.
+ContainerJail`` instead (D-024: ``--network none``, ``--cap-drop ALL``, ``--read-only``,
+a pinned image) — real isolation for the gate that compiles and runs a
+possibly-``MODEL_GENERATED`` diff, which #181's own finding named as one of the two
+BASELINE/VERIFY stages that had never been wired into it despite it being built and
+merged for exactly this purpose (#15). ``orchestrator/verify_dispatch.py`` decides which
+to pass, from ``settings.SANDBOX_BUILD_IMAGE``. See `_run_gate_sequence` (the shared gate
+logic both branches call) and `_run_verification_in_container`.
 
 ``git apply`` cannot take the candidate diff over stdin here — ``Jail.run()`` hardcodes
 ``stdin=subprocess.DEVNULL`` (``packages/sandbox/jail.py``) — so ``run_verification``
@@ -83,8 +94,10 @@ from adapters.cpp.fuzzing import LibFuzzerRunResult, run_libfuzzer_campaign
 from adapters.cpp.variants import MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS
 from contracts.enums import EvidenceSource, GateName, GateStatus
 from contracts.verdict import GateMatrix, GateResult
+from adapters.cpp.toolchain import require_pinned
 from packages.sandbox import Jail, JailPolicy
 from packages.sandbox.container import ContainerJailPolicy
+from packages.sandbox.container_runner import ContainerJailRunner
 from packages.sandbox.errors import JailError
 from packages.sandbox.policy import DEFAULT_ENV_ALLOWLIST
 
@@ -217,6 +230,48 @@ def _jail_command_runner(jail: Jail) -> CommandRunner:
     return _run
 
 
+def _container_jail_command_runner(jail: ContainerJailRunner) -> CommandRunner:
+    """Adapt `ContainerJailRunner.run()` to this module's `CommandRunner` shape —
+    #181/SEC-57's VERIFY half. Identical contract to `_jail_command_runner` above (same
+    stdin refusal, same `CommandResult` shape); the only real difference is which jail
+    class `.run()` is called on, and `ContainerJailRunner` (`packages/sandbox/
+    container_runner.py`) already translates every host path under `jail.root` — `cwd`
+    and every argv element `run_verification` builds from `verify_root`/`jail.root`
+    (the diff path, the replay binary path) — into the container's own `/workspace`, so
+    nothing here has to duplicate that logic.
+
+    The one thing this function's caller (`run_verification`) still has to do that
+    `_jail_command_runner`'s caller does not: stage the reproducer artifact (which
+    lives under `settings.ARTIFACT_ROOT`, never under `jail.root`) into the jail before
+    calling this runner with a path to it — see `run_verification`'s own container
+    branch. A path outside `jail.root` is not something `ContainerJailRunner.run()` can
+    translate; the container's one bind mount never had it in the first place.
+    """
+
+    def _run(
+        argv: Sequence[str],
+        cwd: Path,
+        stdin: str | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        del timeout_seconds  # the container's own ContainerJailPolicy.wall_clock_seconds governs
+        if stdin is not None:
+            raise ValueError(
+                "the ContainerJailRunner-backed command runner has no stdin channel "
+                "(ContainerJail.run() has none either); write the input to a file "
+                "inside the jail and pass its path as an argument instead"
+            )
+        result = jail.run(list(argv), cwd=cwd)
+        return CommandResult(
+            argv=result.argv,
+            returncode=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+    return _run
+
+
 @dataclass(frozen=True)
 class VerificationBaseline:
     """Deterministic checks expected for a CMake/CTest target."""
@@ -268,11 +323,20 @@ def run_verification(
     *,
     runner: CommandRunner | None = None,
     renewed_fuzz: RenewedFuzzConfig | None = None,
+    container_policy: ContainerJailPolicy | None = None,
 ) -> GateMatrix:
     """Apply ``candidate_diff`` in a fresh worktree and return deterministic gates.
 
     No ``PatchCandidate`` object is accepted here. Callers may record provenance in
     evidence, but the verifier cannot see it and therefore cannot use it.
+
+    ``container_policy`` (#181/SEC-57) — NOT to be confused with `RenewedFuzzConfig.
+    container_policy`, the already-existing, already-isolated optional fuzz sub-gate:
+    this one governs the compile/reproducer-replay/regression gates above, which ran
+    inside `packages.sandbox.jail.Jail` (no network/filesystem isolation from the host)
+    for every candidate — including a `MODEL_GENERATED` one — until this issue. `None`
+    (the default) is the pre-#181 behavior, unchanged: `orchestrator/verify_dispatch.py`
+    decides which to pass based on whether `settings.SANDBOX_BUILD_IMAGE` is configured.
     """
 
     baseline = baseline or VerificationBaseline()
@@ -280,6 +344,18 @@ def run_verification(
     if not source.exists() or not source.is_dir():
         raise ValueError(
             f"verification source does not exist or is not a directory: {source}"
+        )
+
+    using_container = container_policy is not None and runner is None
+    if using_container:
+        # Real pinning only means anything on the container path — see
+        # `adapters/cpp/toolchain.py`'s module docstring. Raises `UnpinnedToolchain`
+        # (an `AdapterError`) for a floating tag; `orchestrator/verify_dispatch.py`
+        # catches that the same way it already catches every other infra fault this
+        # function can raise.
+        require_pinned(container_policy.image)
+        return _run_verification_in_container(
+            source, candidate_diff, reproducer, baseline, container_policy, renewed_fuzz
         )
 
     # SEC-47: exactly one Jail for the whole configure+build+ctest sequence, mirroring
@@ -299,112 +375,202 @@ def run_verification(
     policy = JailPolicy(**policy_overrides)
     with Jail.create(policy) as jail:
         command_runner = runner or _jail_command_runner(jail)
-        # `_copy_source_tree`'s destination lives inside `jail.root` so `jail.resolve()`'s
-        # containment check (every `cwd` this module hands `Jail.run()`) is checking
-        # something real, not a directory the jail has no relationship to.
-        verify_root = jail.root / source.name
-        _copy_source_tree(source, verify_root, baseline.ignored_names)
-
-        # `Jail.run()` has no `stdin` (see module docstring): write the candidate diff to
-        # a file inside the jail and pass its path to `git apply` instead of piping it.
-        # Written outside `verify_root` so it never becomes a stray file inside the copied
-        # source tree that the build/ctest steps could see.
-        diff_path = jail.root / ".brahmadatta-candidate.patch"
-        diff_path.write_text(candidate_diff)
-
-        apply_result = command_runner(
-            ["git", "apply", "--whitespace=nowarn", str(diff_path)],
-            verify_root,
-            None,
-            baseline.timeout_seconds,
-        )
-        if not apply_result.ok:
-            return _matrix(
-                compile_=_fail(GateName.COMPILE, "git apply", apply_result),
-                reproducer=_not_run(
-                    GateName.REPRODUCER_ELIMINATED,
-                    "Not run: candidate diff did not apply in the fresh worktree.",
-                ),
-                regression=_not_run(
-                    GateName.REGRESSION_PRESERVED,
-                    "Not run: candidate diff did not apply in the fresh worktree.",
-                ),
-                renewed_fuzzing=_not_run(
-                    GateName.RENEWED_FUZZING,
-                    "Not run: candidate diff did not apply in the fresh worktree.",
-                ),
-            )
-
-        build_dir = verify_root / baseline.build_dir
-        configure_result = command_runner(
-            ["cmake", "-S", ".", "-B", baseline.build_dir, *baseline.configure_args],
-            verify_root,
-            None,
-            baseline.timeout_seconds,
-        )
-        if not configure_result.ok:
-            return _matrix(
-                compile_=_fail(GateName.COMPILE, "cmake configure", configure_result),
-                reproducer=_not_run(
-                    GateName.REPRODUCER_ELIMINATED,
-                    "Not run: configure failed before a replay binary existed.",
-                ),
-                regression=_not_run(
-                    GateName.REGRESSION_PRESERVED,
-                    "Not run: configure failed before the regression suite existed.",
-                ),
-                renewed_fuzzing=_not_run(
-                    GateName.RENEWED_FUZZING,
-                    "Not run: configure failed before a patched build existed to fuzz.",
-                ),
-            )
-
-        build_result = command_runner(
-            ["cmake", "--build", baseline.build_dir],
-            verify_root,
-            None,
-            baseline.timeout_seconds,
-        )
-        if not build_result.ok:
-            return _matrix(
-                compile_=_fail(GateName.COMPILE, "cmake build", build_result),
-                reproducer=_not_run(
-                    GateName.REPRODUCER_ELIMINATED,
-                    "Not run: build failed before a replay binary existed.",
-                ),
-                regression=_not_run(
-                    GateName.REGRESSION_PRESERVED,
-                    "Not run: build failed before the regression suite could run.",
-                ),
-                renewed_fuzzing=_not_run(
-                    GateName.RENEWED_FUZZING,
-                    "Not run: build failed before a patched build existed to fuzz.",
-                ),
-            )
-
-        compile_gate = _pass(GateName.COMPILE, "cmake")
-        reproducer_gate = _run_reproducer(
+        return _run_gate_sequence(
+            jail.root,
             command_runner,
-            verify_root,
-            build_dir,
+            source,
+            candidate_diff,
             Path(reproducer).resolve(),
             baseline,
+            renewed_fuzz,
         )
-        regression_gate = _run_regressions(command_runner, verify_root, baseline)
-        # #40: the patched build exists and compiled cleanly — the one precondition
-        # this gate needs (see `_run_renewed_fuzz`'s own docstring for why it runs
-        # independently of the reproducer/regression outcome). Still inside the `with
-        # Jail.create(...)` block: `verify_root` is deleted the moment it exits, and
-        # `run_libfuzzer_campaign` needs to `shutil.copytree` it into its own
-        # `ContainerJail` before that happens (mirrors D-106's identical concern for
-        # the original FUZZ path's crash-artifact copy-out).
-        renewed_fuzzing_gate = _run_renewed_fuzz(renewed_fuzz, verify_root)
+
+
+def _run_verification_in_container(
+    source: Path,
+    candidate_diff: str,
+    reproducer: Path,
+    baseline: VerificationBaseline,
+    container_policy: ContainerJailPolicy,
+    renewed_fuzz: RenewedFuzzConfig | None,
+) -> GateMatrix:
+    """#181/SEC-57's VERIFY half of `run_verification`: the same gate sequence
+    `_run_gate_sequence` runs, inside `ContainerJail` (D-024: `--network none`,
+    `--cap-drop ALL`, `--read-only`, a pinned image) instead of the subprocess `Jail`.
+
+    Sizing note this function deliberately does NOT carry over from the `Jail` branch:
+    `ContainerJailPolicy.memory_mb` is a cgroup `--memory` ceiling, not `JailPolicy`'s
+    `RLIMIT_AS` — it does not collide with AddressSanitizer's shadow-memory reservation
+    the way `RLIMIT_AS` does (`workers/fuzzing/dispatch.py`'s module docstring verifies
+    this directly for the identical `-DPKTCFG_SANITIZE=ON` build), so there is no
+    `MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS`-equivalent override to apply here. Sizing
+    (`cpu_limit`/`memory_mb`/`wall_clock_seconds`) is entirely `container_policy`'s own
+    — set once, at `orchestrator/verify_dispatch.py`'s call site — the same division of
+    responsibility `workers/fuzzing/dispatch.py::_container_policy` already uses.
+    """
+    with ContainerJailRunner.create(container_policy, mission_ref="verify") as jail:
+        command_runner = _container_jail_command_runner(jail)
+        staged_reproducer = _stage_reproducer_for_container(jail.root, reproducer)
+        return _run_gate_sequence(
+            jail.root,
+            command_runner,
+            source,
+            candidate_diff,
+            staged_reproducer,
+            baseline,
+            renewed_fuzz,
+        )
+
+
+def _stage_reproducer_for_container(jail_root: Path, reproducer: Path) -> Path:
+    """Copy the reproducer artifact into the jail before referencing it in an argv the
+    container-backed `command_runner` will run.
+
+    `reproducer` lives under `settings.ARTIFACT_ROOT` — never under `jail_root` — so
+    unlike every other path `_run_gate_sequence` builds (the diff, the replay binary),
+    `ContainerJailRunner`'s automatic `jail_root` -> `/workspace` argv rewrite
+    (`packages/sandbox/container_runner.py::ContainerJailRunner._translate`) has
+    nothing to rewrite here: the container's one bind mount never had this file in the
+    first place. A missing reproducer is not staged (nothing to copy) and the original,
+    still-missing path is returned unchanged — `_run_reproducer`'s own
+    `reproducer.exists()` check reports that honestly as `NOT_RUN`, identically to the
+    subprocess-`Jail` path.
+    """
+    if not reproducer.exists():
+        return reproducer
+    staged = jail_root / f"reproducer-{reproducer.name}"
+    shutil.copyfile(reproducer, staged)
+    return staged
+
+
+def _run_gate_sequence(
+    jail_root: Path,
+    command_runner: CommandRunner,
+    source: Path,
+    candidate_diff: str,
+    reproducer: Path,
+    baseline: VerificationBaseline,
+    renewed_fuzz: RenewedFuzzConfig | None,
+) -> GateMatrix:
+    """The compile/reproducer-replay/regression/renewed-fuzz sequence shared by both
+    the subprocess-`Jail` and `ContainerJail` branches of `run_verification` — SEC-47's
+    original gate logic, unchanged by #181/SEC-57, factored out so the isolation
+    backend a caller picked (`Jail.root` vs `ContainerJailRunner.root`, `_jail_command_
+    runner` vs `_container_jail_command_runner`) is the only thing that differs between
+    the two callers below.
+
+    `jail_root` must be the writable scratch directory (host-side) the ``command_
+    runner`` will translate/resolve paths against, and must still be open/mounted for
+    the whole call.
+    """
+    # `_copy_source_tree`'s destination lives inside `jail_root` so `Jail.resolve()`'s
+    # containment check (the subprocess path) — and `ContainerJailRunner`'s prefix
+    # rewrite (the container path) — are both checking/translating something real, not
+    # a directory the jail has no relationship to.
+    verify_root = jail_root / source.name
+    _copy_source_tree(source, verify_root, baseline.ignored_names)
+
+    # No `stdin` channel on either jail backend (see both command-runner docstrings):
+    # write the candidate diff to a file inside the jail and pass its path to
+    # `git apply` instead of piping it. Written outside `verify_root` so it never
+    # becomes a stray file inside the copied source tree that the build/ctest steps
+    # could see.
+    diff_path = jail_root / ".brahmadatta-candidate.patch"
+    diff_path.write_text(candidate_diff)
+
+    apply_result = command_runner(
+        ["git", "apply", "--whitespace=nowarn", str(diff_path)],
+        verify_root,
+        None,
+        baseline.timeout_seconds,
+    )
+    if not apply_result.ok:
         return _matrix(
-            compile_=compile_gate,
-            reproducer=reproducer_gate,
-            regression=regression_gate,
-            renewed_fuzzing=renewed_fuzzing_gate,
+            compile_=_fail(GateName.COMPILE, "git apply", apply_result),
+            reproducer=_not_run(
+                GateName.REPRODUCER_ELIMINATED,
+                "Not run: candidate diff did not apply in the fresh worktree.",
+            ),
+            regression=_not_run(
+                GateName.REGRESSION_PRESERVED,
+                "Not run: candidate diff did not apply in the fresh worktree.",
+            ),
+            renewed_fuzzing=_not_run(
+                GateName.RENEWED_FUZZING,
+                "Not run: candidate diff did not apply in the fresh worktree.",
+            ),
         )
+
+    build_dir = verify_root / baseline.build_dir
+    configure_result = command_runner(
+        ["cmake", "-S", ".", "-B", baseline.build_dir, *baseline.configure_args],
+        verify_root,
+        None,
+        baseline.timeout_seconds,
+    )
+    if not configure_result.ok:
+        return _matrix(
+            compile_=_fail(GateName.COMPILE, "cmake configure", configure_result),
+            reproducer=_not_run(
+                GateName.REPRODUCER_ELIMINATED,
+                "Not run: configure failed before a replay binary existed.",
+            ),
+            regression=_not_run(
+                GateName.REGRESSION_PRESERVED,
+                "Not run: configure failed before the regression suite existed.",
+            ),
+            renewed_fuzzing=_not_run(
+                GateName.RENEWED_FUZZING,
+                "Not run: configure failed before a patched build existed to fuzz.",
+            ),
+        )
+
+    build_result = command_runner(
+        ["cmake", "--build", baseline.build_dir],
+        verify_root,
+        None,
+        baseline.timeout_seconds,
+    )
+    if not build_result.ok:
+        return _matrix(
+            compile_=_fail(GateName.COMPILE, "cmake build", build_result),
+            reproducer=_not_run(
+                GateName.REPRODUCER_ELIMINATED,
+                "Not run: build failed before a replay binary existed.",
+            ),
+            regression=_not_run(
+                GateName.REGRESSION_PRESERVED,
+                "Not run: build failed before the regression suite could run.",
+            ),
+            renewed_fuzzing=_not_run(
+                GateName.RENEWED_FUZZING,
+                "Not run: build failed before a patched build existed to fuzz.",
+            ),
+        )
+
+    compile_gate = _pass(GateName.COMPILE, "cmake")
+    reproducer_gate = _run_reproducer(
+        command_runner,
+        verify_root,
+        build_dir,
+        reproducer,
+        baseline,
+    )
+    regression_gate = _run_regressions(command_runner, verify_root, baseline)
+    # #40: the patched build exists and compiled cleanly — the one precondition this
+    # gate needs (see `_run_renewed_fuzz`'s own docstring for why it runs independently
+    # of the reproducer/regression outcome). Still inside the caller's `with ... as
+    # jail:` block: `verify_root` is deleted the moment it exits, and
+    # `run_libfuzzer_campaign` needs to `shutil.copytree` it into its own
+    # `ContainerJail` before that happens (mirrors D-106's identical concern for the
+    # original FUZZ path's crash-artifact copy-out).
+    renewed_fuzzing_gate = _run_renewed_fuzz(renewed_fuzz, verify_root)
+    return _matrix(
+        compile_=compile_gate,
+        reproducer=reproducer_gate,
+        regression=regression_gate,
+        renewed_fuzzing=renewed_fuzzing_gate,
+    )
 
 
 def _copy_source_tree(

@@ -22,7 +22,6 @@ than asserting the intent.
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -155,10 +154,17 @@ def probe_build_tools(
     tears its scratch directory down on `__exit__`, and there is no persistent log path
     to fall back on afterwards (see `pipeline.py`'s module docstring for why callers keep
     the whole configure/build/test sequence inside one `with Jail.create(...)` block).
+
+    #181/SEC-57: resolved via ``jail.which(name)``, not a module-level `shutil.which`
+    call — `shutil.which` resolves against the ORCHESTRATOR HOST's `PATH`, which is
+    correct for the subprocess `Jail` (same filesystem, same `PATH`) and silently wrong
+    for a container-backed jail with its own, differently-built filesystem. `Jail.which`
+    and `packages.sandbox.container_runner.ContainerJailRunner.which` each resolve this
+    correctly for their own backend — see either docstring.
     """
     probed: list[ToolVersion] = []
     for name in names:
-        path = shutil.which(name)
+        path = jail.which(name)
         if path is None:
             raise ToolchainError(f"required tool not found on PATH: {name}")
         result = jail.run([path, "--version"])

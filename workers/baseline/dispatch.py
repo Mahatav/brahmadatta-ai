@@ -157,6 +157,7 @@ support that is not real.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,7 @@ from contracts.enums import (
     Severity,
 )
 from contracts.schemas.common import ArtifactRef
+from contracts.schemas.missions import MissionPolicy
 from missions.models import (
     Artifact,
     BaselineReport,
@@ -195,6 +197,8 @@ from orchestrator.executors import (
 )
 from orchestrator.findings import record_finding
 from orchestrator.redaction import redact_sanitizer_report
+from packages.sandbox.container import ContainerJailPolicy
+from packages.sandbox.errors import JailError
 from workers.baseline.run import BaselineOutcome, run_baseline_stage
 
 __all__: list[str] = []
@@ -203,6 +207,47 @@ __all__: list[str] = []
 #: XML copy `run_baseline_stage` writes before its jail tears down. See
 #: `_log_ref_artifact`'s own docstring for the bug this closes (D-100).
 BASELINE_LOG_ARTIFACT_KIND = "baseline_ctest_junit"
+
+#: #181/SEC-57 — `docker run`/`docker wait`/`docker logs` overhead the subprocess-`Jail`
+#: path never pays, added on top of `SandboxPolicy.max_seconds` for `ContainerJailPolicy.
+#: wall_clock_seconds`. Same reasoning as `workers/fuzzing/dispatch.py`'s
+#: `_CONTAINER_WALL_CLOCK_BUFFER_SECONDS` / `orchestrator/verify_dispatch.py`'s
+#: `_CONTAINER_STARTUP_BUFFER_SECONDS`; kept as its own constant for the same "not
+#: coupled to a different job kind's own budget" reason those two give.
+_CONTAINER_STARTUP_BUFFER_SECONDS = 60.0
+
+
+def _mission_policy(mission: Mission) -> MissionPolicy:
+    return MissionPolicy.model_validate(mission.policy or {})
+
+
+def _container_policy_for(mission: Mission) -> ContainerJailPolicy | None:
+    """#181/SEC-57 — build `run_baseline_stage`'s `container_policy` from this
+    mission's own sandbox policy, mirroring `workers/fuzzing/dispatch.py::
+    _container_policy`'s image/runtime/cpu/memory sizing (same `MissionPolicy.sandbox`
+    fields), keyed on `settings.SANDBOX_BUILD_IMAGE` instead of `SANDBOX_FUZZ_IMAGE` —
+    see that setting's own comment in `config/settings/base.py` for why BASELINE, unlike
+    FUZZ, falls back to the pre-#181 subprocess `Jail` rather than refusing to run when
+    it is unset.
+    """
+    image = getattr(settings, "SANDBOX_BUILD_IMAGE", "") or ""
+    if not image:
+        return None
+    mission_policy = _mission_policy(mission)
+    sandbox = mission_policy.sandbox
+    if sandbox.runtime == "subprocess-jail":
+        # `SandboxPolicy.runtime`'s own field description: "not a silent substitution"
+        # — a mission that explicitly asked for the subprocess-jail fallback gets it,
+        # even when `SANDBOX_BUILD_IMAGE` is configured for every other mission.
+        return None
+    runtime = sandbox.runtime if sandbox.runtime in ("docker", "podman") else "docker"
+    return ContainerJailPolicy(
+        image=image,
+        runtime=runtime,
+        cpu_limit=float(sandbox.cpu_limit),
+        memory_mb=sandbox.memory_mb,
+        wall_clock_seconds=float(sandbox.max_seconds) + _CONTAINER_STARTUP_BUFFER_SECONDS,
+    )
 
 #: `Finding.title`'s own field ceiling (`missions/models.py`).
 _TITLE_MAX_CHARS = 300
@@ -566,7 +611,12 @@ def _line_already_has_a_finding_from_another_tool(
 
 
 def _persist_compiler_diagnostics(
-    mission: Mission, source_dir: Path, outcome: BaselineOutcome, trace_id: str
+    mission: Mission,
+    source_dir: Path,
+    outcome: BaselineOutcome,
+    trace_id: str,
+    *,
+    image_digest: str | None = None,
 ) -> int:
     """Turn every `warning`/`error`-severity `BaselineOutcome.compiler_diagnostics`
     entry into a `Finding` row, plus one `StageToolRun` row recording the compiler
@@ -623,7 +673,10 @@ def _persist_compiler_diagnostics(
             stage=str(MissionStage.BASELINE),
             tool_name=outcome.compiler_id,
             tool_version=outcome.compiler_version,
-            image_digest=None,  # subprocess-jail path is unpinned — see toolchain.py
+            # #181/SEC-57: real when this mission ran under `ContainerJail` (a pinned
+            # image, `require_pinned`-checked by `run_baseline_stage`); `None`,
+            # honestly, on the subprocess-jail path — see toolchain.py.
+            image_digest=image_digest,
             flags=[
                 f"diagnostics:{len(outcome.compiler_diagnostics)}",
                 f"findings:{recorded}",
@@ -644,6 +697,17 @@ def _baseline_executor(ctx: ExecutorContext) -> ExecutorResult:
     Never raises on a red or broken build (that guarantee is `run_baseline_stage`'s;
     see its own docstring). Only a genuine programming error escapes, by design —
     swallowing it here would hide a real bug behind a fabricated `JobOutcome.FAILED`.
+
+    #181/SEC-57: `packages.sandbox.errors.JailError` (raised by `ContainerJailRunner`/
+    `ContainerJail` when the container runtime is unavailable — no `docker` CLI, no
+    daemon, a pinned image nobody built — the exact deployment gap `infrastructure/
+    compose/docker-compose.yml`'s own `SANDBOX_BUILD_IMAGE` comment names for the
+    containerized `worker` service) is the one exception this function does catch,
+    mirroring `workers/fuzzing/dispatch.py::_fuzz_executor`'s and `workers/
+    static_analysis/dispatch.py::_analyze_executor`'s identical handling of the
+    identical exception family around their own `ContainerJail`-backed calls. Without
+    this, a misconfigured `SANDBOX_BUILD_IMAGE` would crash the worker's claim loop
+    instead of reporting an ordinary, retryable-by-the-orchestrator `infra_failure`.
     """
     existing = BaselineReport.objects.filter(mission=ctx.mission).first()
     if existing is not None:
@@ -656,16 +720,46 @@ def _baseline_executor(ctx: ExecutorContext) -> ExecutorResult:
             result={"cancelled_before_start": True},
         )
 
-    outcome = run_baseline_stage(
-        mission_id=ctx.mission.id,
-        source_dir=ctx.source_dir,
-        workspace_root=ctx.workspace_root,
-    )
+    container_policy = _container_policy_for(ctx.mission)
+    try:
+        outcome = run_baseline_stage(
+            mission_id=ctx.mission.id,
+            source_dir=ctx.source_dir,
+            workspace_root=ctx.workspace_root,
+            container_policy=container_policy,
+        )
+    except JailError as exc:
+        return ExecutorResult(
+            outcome=JobOutcome.FAILED,
+            detail=f"Sandbox unavailable for the BASELINE stage: {exc}",
+            result={"infra_failure": True, "container_isolation": container_policy is not None},
+            error_code=ErrorCode.SANDBOX_UNAVAILABLE,
+            retry=False,
+        )
     # #23: findings before the terminal report — see `_persist_compiler_diagnostics`'s
     # own docstring for why the ordering matters.
-    _persist_compiler_diagnostics(ctx.mission, ctx.source_dir, outcome, ctx.trace_id)
+    _persist_compiler_diagnostics(
+        ctx.mission,
+        ctx.source_dir,
+        outcome,
+        ctx.trace_id,
+        image_digest=container_policy.image if container_policy is not None else None,
+    )
     report = _persist_report(ctx.mission, outcome)
-    return _executor_result(_fields_from_report(report), already_recorded=False)
+    base_result = _executor_result(_fields_from_report(report), already_recorded=False)
+    # #181/SEC-57: never silent either way — `False` here means this run used the
+    # subprocess-only `packages.sandbox.jail.Jail` (no network/filesystem isolation
+    # from the host) because `settings.SANDBOX_BUILD_IMAGE` is not configured (or this
+    # mission's own policy explicitly asked for `runtime="subprocess-jail"`), not that
+    # isolation was forgotten. See `_container_policy_for`.
+    return dataclasses.replace(
+        base_result,
+        result={
+            **base_result.result,
+            "container_isolation": container_policy is not None,
+            "isolation_mode": outcome.isolation_mode,
+        },
+    )
 
 
 @register_transition_policy(JobKind.BASELINE)

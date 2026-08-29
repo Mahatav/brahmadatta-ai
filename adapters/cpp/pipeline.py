@@ -45,7 +45,6 @@ the whole sequence (the D3 gate's own 15-minute ceiling is exactly that shape al
 
 from __future__ import annotations
 
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,7 +152,11 @@ def _configure_argv(
 
 
 def run_variant(
-    source_dir: Path | str, jail: Jail, variant: Variant = Variant.BASELINE
+    source_dir: Path | str,
+    jail: Jail,
+    variant: Variant = Variant.BASELINE,
+    *,
+    image_digest: str | None = None,
 ) -> BuildResult:
     """Configure, build, and CTest ``source_dir`` under ``variant``, entirely inside ``jail``.
 
@@ -161,6 +164,19 @@ def run_variant(
     must stay open until you are done reading `BuildResult.build_dir` — see the module
     docstring. Its `JailPolicy.wall_clock_seconds` covers the whole configure+build+ctest
     sequence, not each step individually.
+
+    ``jail`` is typed `Jail` for backward compatibility, but this function only ever calls
+    `jail.root` / `jail.run(argv, cwd=...)` / `jail.which(name)` on it — exactly the surface
+    `packages.sandbox.container_runner.ContainerJailRunner` also implements (#181/SEC-57).
+    `workers/baseline/run.py::run_baseline_stage` passes one of those in when BASELINE is
+    configured to run inside `ContainerJail` instead of the subprocess jail; nothing in
+    this function branches on which one it was actually handed.
+
+    ``image_digest``, when the caller already resolved one, is recorded verbatim on the
+    returned `BuildResult.toolchain.image_digest` — real pinning is only possible on the
+    container path (see `adapters/cpp/toolchain.py`'s module docstring on why the
+    subprocess-jail path's `image_digest` has always been `None`); this parameter is how
+    a container-backed caller reports it instead of this function guessing.
 
     **For any sanitizer variant** (`ASAN`, `UBSAN`, `ASAN_UBSAN`), ``jail`` must have been
     created with ``JailPolicy(memory_bytes=spec_for(variant).min_jail_memory_bytes)`` —
@@ -180,8 +196,8 @@ def run_variant(
     started = time.monotonic()
     detected = detect(source_dir)
 
-    cmake_path = shutil.which("cmake")
-    ctest_path = shutil.which("ctest")
+    cmake_path = jail.which("cmake")
+    ctest_path = jail.which("ctest")
     if cmake_path is None or ctest_path is None:
         raise ToolchainError(
             f"required tool missing on PATH: cmake={cmake_path!r} ctest={ctest_path!r}"
@@ -233,6 +249,7 @@ def run_variant(
         compiler_version=compiler_version,
         compiler_path=compiler_path,
         generator=generator,
+        image_digest=image_digest,
     )
 
     ctest_summary = run_ctest(build_dir, jail, ctest_path)

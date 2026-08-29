@@ -1,17 +1,24 @@
 """Sandbox isolation for jailed command execution.
 
-Two backends are planned. This package currently ships one:
+Two backends, both built:
 
-* **subprocess jail** (#81, here) - working-directory jail, resource limits, hard
+* **subprocess jail** (`jail.py`, #81) - working-directory jail, resource limits, hard
   timeout. Enough for a build and a test run. NOT enough for untrusted code.
-* **rootless container** (#15, not built) - required before fuzzing (#28) runs on D4.
+* **rootful-daemon container, `--network none`** (`container.py`, #15) - D-024's
+  isolation for untrusted target code and the fuzzer. `container_runner.py`
+  (#181/SEC-57) adapts it to `Jail`'s own call surface so `adapters/cpp/*` and
+  `orchestrator/verification.py` can drive either backend through the same call
+  sites — see that module's docstring for BASELINE/VERIFY's own wiring.
 
-`jail.py` opens with what that distinction means in practice. Read it before using this
-for anything.
+`jail.py`/`container.py` each open with what their own isolation guarantees are and are
+not. Read the one you are about to use before using it for anything.
 """
 
+from packages.sandbox.container import ContainerJail, ContainerJailPolicy, ContainerJailResult
+from packages.sandbox.container_runner import ContainerJailRunner
 from packages.sandbox.errors import (
     CancelledError,
+    ContainerUnavailableError,
     CpuExceededError,
     FileSizeExceededError,
     JailError,
@@ -28,6 +35,11 @@ from packages.sandbox.policy import JailPolicy
 __all__ = [
     "ISOLATION_MODE",
     "CancelledError",
+    "ContainerJail",
+    "ContainerJailPolicy",
+    "ContainerJailResult",
+    "ContainerJailRunner",
+    "ContainerUnavailableError",
     "CpuExceededError",
     "FileSizeExceededError",
     "Jail",

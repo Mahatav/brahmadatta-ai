@@ -323,6 +323,12 @@ services:
       # `gateway.*` importable at least as much as control-api does.
       MODEL_GATEWAY_ROOT: /app/services/model-gateway
       SANDBOX_FUZZ_IMAGE: ${SANDBOX_FUZZ_IMAGE:-}
+      # #181/SEC-57: DO NOT set this on THIS service — see docker-compose.yml's
+      # identical `worker` comment for the full reasoning (no `docker` CLI in this
+      # image, D-036 forbids the socket mount this profile's own `cap_drop: ["ALL"]`/
+      # `read_only: true` make especially pointed). Threaded through unset, same as
+      # SANDBOX_FUZZ_IMAGE above.
+      SANDBOX_BUILD_IMAGE: ${SANDBOX_BUILD_IMAGE:-}
     command: ${CONTROL_API_WORKER_CMD:-python manage.py run_worker}
     volumes:
       - evidence:/var/lib/brahmadatta/evidence
