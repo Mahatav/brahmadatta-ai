@@ -87,7 +87,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from adapters.cpp.errors import AdapterError, StepFailure
 from adapters.cpp.fuzzing import LibFuzzerRunResult, run_libfuzzer_campaign
@@ -124,6 +124,23 @@ from packages.sandbox.policy import DEFAULT_ENV_ALLOWLIST
 #: same allowlist, so this constant now exists mainly for `_subprocess_runner`, the
 #: still-available, still-tested non-jailed runner.
 _ENV_ALLOWLIST: tuple[str, ...] = DEFAULT_ENV_ALLOWLIST
+
+#: #288's "one level up the same pipeline" finding: `VerificationBaseline.configure_args`
+#: used to spell pktcfg's cache-entry names as an in-place literal tuple default, the
+#: same "a hardcoded pktcfg constant is standing in for per-target configuration" shape
+#: as `adapters/cpp/fuzzing.py`'s now-fixed `configure_argv`/`run_fuzzing_stage` — except
+#: this one was already a caller-overridable dataclass field, not an in-function literal,
+#: which is why `_sanitizers_enabled` above already recognises *any* target's own
+#: `-D<...SANITIZE...>=<truthy>` cache entry generically, not just pktcfg's. Named here,
+#: rather than left as an inline tuple, purely so that "this is pktcfg's own default, not
+#: a hardcoded assumption the rest of this module depends on" is visible at the
+#: definition site — a non-pktcfg `VerificationBaseline` caller passes its own
+#: `configure_args` (and gets the identical `_sanitizers_enabled`/memory-sizing behaviour
+#: `run_verification` already applies generically, see below).
+_PKTCFG_DEFAULT_CONFIGURE_ARGS: tuple[str, ...] = (
+    "-DPKTCFG_SANITIZE=ON",
+    "-DPKTCFG_WERROR=ON",
+)
 
 
 #: Matches a CMake cache-entry flag (`-D<NAME>=<VALUE>`) whose name mentions "SANITIZE",
@@ -277,10 +294,13 @@ class VerificationBaseline:
     """Deterministic checks expected for a CMake/CTest target."""
 
     build_dir: str = ".brahmadatta-verify-build"
-    configure_args: tuple[str, ...] = (
-        "-DPKTCFG_SANITIZE=ON",
-        "-DPKTCFG_WERROR=ON",
-    )
+    #: Defaults to pktcfg's own cache entries (see `_PKTCFG_DEFAULT_CONFIGURE_ARGS`) —
+    #: not a fixed requirement of this module. A non-pktcfg target passes its own
+    #: `configure_args` here (its own `-D<...SANITIZE...>=<truthy>` cache entry, or a
+    #: generic `-DCMAKE_C_FLAGS=-fsanitize=...`/`-DCMAKE_EXE_LINKER_FLAGS=...` pair the
+    #: way `adapters/cpp/pipeline.py::_configure_argv` does) and `_sanitizers_enabled`
+    #: below still recognises it correctly.
+    configure_args: tuple[str, ...] = _PKTCFG_DEFAULT_CONFIGURE_ARGS
     reproducer_repeats: int = 1
     expected_regression_tests: int | None = None
     timeout_seconds: int = 120
@@ -304,12 +324,20 @@ class RenewedFuzzConfig:
     run_libfuzzer_campaign`` and exists only so a test can inject a scripted result
     without a real Docker daemon, the same shape ``CommandRunner``/``runner=`` already
     gives the compile/reproducer/regression gates above.
+
+    ``cache_entries`` (#288) mirrors ``adapters.cpp.fuzzing.run_libfuzzer_campaign``'s
+    own parameter of the same name — ``None`` (the default) uses that function's own
+    ``DEFAULT_CACHE_ENTRIES`` (pktcfg's ``PKTCFG_SANITIZE``/``PKTCFG_FUZZ``), so this
+    gate is unaffected for pktcfg. A non-pktcfg patched target passes its own mapping
+    the same way ``harness_target``/``harness_binary`` already let it name its own
+    CMake target/binary.
     """
 
     container_policy: ContainerJailPolicy | None
     budget_seconds: int = 120
     harness_target: str = "pktcfg_fuzz"
     harness_binary: str = "pktcfg_fuzz"
+    cache_entries: Mapping[str, str] | None = None
     corpus_dir: str = "corpus"
     mission_ref: str = "renewed-fuzz"
     campaign_runner: Callable[..., LibFuzzerRunResult] | None = None
@@ -707,6 +735,7 @@ def _run_renewed_fuzz(config: RenewedFuzzConfig | None, verify_root: Path) -> Ga
             config.container_policy,
             harness_target=config.harness_target,
             harness_binary=config.harness_binary,
+            cache_entries=config.cache_entries,
             corpus_dir=config.corpus_dir,
             budget_seconds=config.budget_seconds,
             mission_ref=config.mission_ref,

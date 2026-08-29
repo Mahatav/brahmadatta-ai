@@ -1,8 +1,18 @@
-"""Mission-facing wrapper for the libFuzzer campaign (#28)."""
+"""Mission-facing wrapper for the libFuzzer campaign (#28).
+
+#288: `harness` used to be hardcoded to the literal `"pktcfg_fuzz_one_input"` in every
+`FuzzingOutcome` this module produced, regardless of what `run_libfuzzer_campaign` was
+actually asked to build and run — evidence that mislabels the harness the moment this
+stage is pointed at a second target. `run_fuzzing_stage` now takes the same
+`harness_target`/`harness_binary`/`cache_entries` parameters `run_libfuzzer_campaign`
+itself takes (defaulting to pktcfg's own values, so every existing pktcfg caller is
+unaffected) and reports the actual `harness_binary` it was given/used, on both the
+success and failure paths — never a literal default that could drift from reality."""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,10 +99,25 @@ def run_fuzzing_stage(
     source_dir: Path | str,
     *,
     policy: ContainerJailPolicy,
+    harness_target: str = "pktcfg_fuzz",
+    harness_binary: str = "pktcfg_fuzz",
+    cache_entries: Mapping[str, str] | None = None,
     budget_seconds: int = 1800,
     workspace_root: Path | str | None = None,
+    sanitizer_env: Mapping[str, str] | None = None,
 ) -> FuzzingOutcome:
     """Run the D4 live libFuzzer campaign and return an evidence-shaped outcome.
+
+    `harness_target`/`harness_binary`/`cache_entries` (#288) pass straight through to
+    `adapters.cpp.fuzzing.run_libfuzzer_campaign` — see that function's own docstring.
+    Defaults are pktcfg's own values, so a caller that does not pass them gets exactly
+    pktcfg's prior behaviour. `FuzzingOutcome.harness` always reports the actual
+    `harness_binary` this call was given, on the success path and every failure path —
+    never a hardcoded literal that could drift from what actually ran.
+
+    `sanitizer_env` (#289) passes straight through too — sanitizer runtime environment
+    (e.g. `{"ASAN_OPTIONS": "detect_leaks=0"}`) for the live campaign. `None` (the
+    default) adds nothing, unchanged from this parameter's absence before #289.
 
     `workspace_root` (D-106) mirrors `workers/baseline/run.py::run_baseline_stage`'s
     own parameter of the same name: scratch space that is NOT inside the
@@ -109,9 +134,13 @@ def run_fuzzing_stage(
         result = run_libfuzzer_campaign(
             source_dir,
             policy,
+            harness_target=harness_target,
+            harness_binary=harness_binary,
+            cache_entries=cache_entries,
             budget_seconds=budget_seconds,
             mission_ref=mission_id_str,
             workspace_root=workspace_root,
+            sanitizer_env=sanitizer_env,
         )
     except StepFailure as exc:
         return _not_run_from_failure(
@@ -125,6 +154,7 @@ def run_fuzzing_stage(
                 timed_out=exc.timed_out,
                 detail=exc.detail,
             ),
+            harness=harness_binary,
         )
     except (AdapterError, ValueError) as exc:
         message = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
@@ -137,15 +167,18 @@ def run_fuzzing_stage(
                 exit_code=-1,
                 first_error=message,
             ),
+            harness=harness_binary,
         )
 
     metrics = result.metrics
     if result.failure is not None:
-        return _not_run_from_failure(mission_id_str, recorded_at, result.failure)
+        return _not_run_from_failure(
+            mission_id_str, recorded_at, result.failure, harness=harness_binary
+        )
     return FuzzingOutcome(
         mission_id=mission_id_str,
         mode="LIVE_CAMPAIGN",
-        harness="pktcfg_fuzz_one_input",
+        harness=result.harness,
         engine=result.engine,
         runtime_seconds=result.runtime_seconds,
         executions=metrics.executions,
@@ -187,7 +220,7 @@ def emit_fuzzing_events(
             "kind": "stage_progress",
             "stage": _MISSION_STAGE_STRESS_TEST,
             "percent_complete": 0.0,
-            "detail": "cmake -DPKTCFG_FUZZ=ON; libFuzzer headless campaign",
+            "detail": f"libFuzzer headless campaign: {outcome.harness}",
         },
         "evidence_refs": [],
         "metrics": {},
@@ -219,11 +252,13 @@ def _not_run_from_failure(
     mission_id: str,
     recorded_at: datetime,
     failure: FuzzFailure,
+    *,
+    harness: str = "pktcfg_fuzz",
 ) -> FuzzingOutcome:
     return FuzzingOutcome(
         mission_id=mission_id,
         mode="NOT_RUN",
-        harness="pktcfg_fuzz_one_input",
+        harness=harness,
         engine="libFuzzer",
         runtime_seconds=0.0,
         executions=0,

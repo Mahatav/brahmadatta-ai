@@ -12,6 +12,45 @@ from workers.fuzzing.run import FuzzingOutcome
 PINNED_IMAGE = "llvm-fuzzer@sha256:" + "b" * 64
 
 
+def test_cli_passes_a_workspace_root_to_run_fuzzing_stage_by_default(monkeypatch) -> None:
+    """#292: the CLI never passed `workspace_root` through to `run_fuzzing_stage`, so
+    `ContainerJail.close()`'s own `shutil.rmtree` deleted any discovered crash artifact
+    the instant a real campaign returned — even though this CLI's JSON `artifact_refs`
+    claimed one existed. A default (non-`None`) `workspace_root` must always be passed,
+    with no extra flag required."""
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run_fuzzing_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return _outcome(crashes=0)
+
+    monkeypatch.setattr(cli, "run_fuzzing_stage", fake_run_fuzzing_stage)
+
+    cli.main(["--image", PINNED_IMAGE], stdout=io.StringIO(), stderr=io.StringIO())
+
+    assert "workspace_root" in captured_kwargs
+    assert captured_kwargs["workspace_root"] is not None
+
+
+def test_cli_workspace_root_flag_overrides_the_default(monkeypatch, tmp_path: Path) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run_fuzzing_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return _outcome(crashes=0)
+
+    monkeypatch.setattr(cli, "run_fuzzing_stage", fake_run_fuzzing_stage)
+    custom_workspace = tmp_path / "custom-workspace"
+
+    cli.main(
+        ["--image", PINNED_IMAGE, "--workspace-root", str(custom_workspace)],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert captured_kwargs["workspace_root"] == custom_workspace
+
+
 def test_cli_writes_d5_fuzzing_gate_evidence(monkeypatch, tmp_path: Path) -> None:
     output = tmp_path / "fuzzing.json"
 

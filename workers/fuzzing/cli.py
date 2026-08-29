@@ -1,4 +1,12 @@
-"""CLI for the D5 live libFuzzer campaign."""
+"""CLI for the D5 live libFuzzer campaign.
+
+#292: this CLI never passed `workspace_root` through to `run_fuzzing_stage`, so
+`ContainerJail.close()`'s own `shutil.rmtree` deleted any discovered crash artifact the
+instant the campaign returned — even though this CLI's own JSON `artifact_refs` output
+claimed one existed. `--workspace-root` (default `DEFAULT_WORKSPACE`, mirroring
+`workers/replay/cli.py`'s identical `--workspace`/`DEFAULT_WORKSPACE` pattern) fixes the
+one-call-site wiring gap; `run_fuzzing_stage`/`run_libfuzzer_campaign` already handled a
+supplied `workspace_root` correctly (D-106) — nothing else needed to change."""
 
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ from workers.fuzzing.run import FuzzingOutcome, emit_fuzzing_events, run_fuzzing
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPO_ROOT / "demo" / "repositories" / "pktcfg"
+DEFAULT_WORKSPACE = REPO_ROOT / ".d5-fuzz-workspace"
 
 
 def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout, stderr: TextIO = sys.stderr) -> int:
@@ -31,6 +40,7 @@ def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout, stderr: 
                 cpu_limit=args.cpu_limit,
             ),
             budget_seconds=args.budget_seconds,
+            workspace_root=args.workspace_root,
         )
     except Exception as exc:
         print(f"D5 fuzzing gate failed to run: {exc}", file=stderr)
@@ -93,6 +103,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None, help="Optional JSON evidence output path.")
     parser.add_argument("--events", action="store_true", help="Include mission events.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        default=DEFAULT_WORKSPACE,
+        help=(
+            "Host-side scratch space (D-106) that survives the campaign's own "
+            "ContainerJail teardown, so a discovered crash artifact's bytes are still "
+            "readable after this command returns (#292 — without this, the JSON "
+            "output's artifact_refs point at bytes ContainerJail.close() already deleted)."
+        ),
+    )
     return parser
 
 

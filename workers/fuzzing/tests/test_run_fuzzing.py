@@ -157,6 +157,96 @@ def test_run_fuzzing_stage_reports_toolchain_blocker(
     assert "not pinned" in outcome.failure.first_error
 
 
+# ---------------------------------------------------------------------------------
+# #288: `FuzzingOutcome.harness` must reflect what was actually configured/run, on
+# every path (success, StepFailure, AdapterError/ValueError, and a shaped
+# `result.failure`) — never the literal `"pktcfg_fuzz_one_input"` this module used to
+# hardcode regardless of the target.
+# ---------------------------------------------------------------------------------
+
+
+def test_run_fuzzing_stage_reports_the_actual_harness_binary_on_a_live_campaign(
+    monkeypatch: pytest.MonkeyPatch, pktcfg_source: Path
+) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs) -> LibFuzzerRunResult:  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return LibFuzzerRunResult(
+            harness=kwargs["harness_binary"],
+            engine="libFuzzer",
+            runtime_seconds=1.0,
+            metrics=LibFuzzerMetrics(executions=10, corpus_size=1),
+            toolchain=_toolchain(),
+        )
+
+    monkeypatch.setattr("workers.fuzzing.run.run_libfuzzer_campaign", fake_run)
+    outcome = run_fuzzing_stage(
+        uuid.uuid4(),
+        pktcfg_source,
+        policy=ContainerJailPolicy(image=PINNED_IMAGE),
+        harness_target="stb_fuzz",
+        harness_binary="stb_fuzz",
+        cache_entries={"STB_SANITIZE": "ON", "STB_FUZZ": "ON"},
+    )
+
+    assert outcome.harness == "stb_fuzz", (
+        "a non-pktcfg target's harness must never be reported as pktcfg's own default"
+    )
+    assert captured_kwargs["harness_target"] == "stb_fuzz"
+    assert captured_kwargs["cache_entries"] == {"STB_SANITIZE": "ON", "STB_FUZZ": "ON"}
+
+
+def test_run_fuzzing_stage_defaults_harness_to_pktcfgs_own_value_when_unspecified(
+    monkeypatch: pytest.MonkeyPatch, pktcfg_source: Path
+) -> None:
+    def fake_run(*args, **kwargs) -> LibFuzzerRunResult:  # type: ignore[no-untyped-def]
+        return LibFuzzerRunResult(
+            harness=kwargs["harness_binary"],
+            engine="libFuzzer",
+            runtime_seconds=1.0,
+            metrics=LibFuzzerMetrics(executions=10, corpus_size=1),
+            toolchain=_toolchain(),
+        )
+
+    monkeypatch.setattr("workers.fuzzing.run.run_libfuzzer_campaign", fake_run)
+    outcome = run_fuzzing_stage(
+        uuid.uuid4(), pktcfg_source, policy=ContainerJailPolicy(image=PINNED_IMAGE)
+    )
+
+    assert outcome.harness == "pktcfg_fuzz"
+
+
+def test_run_fuzzing_stage_reports_the_requested_harness_even_on_a_build_failure(
+    monkeypatch: pytest.MonkeyPatch, pktcfg_source: Path
+) -> None:
+    """A configure/build failure must still name the harness that was *asked for*, not
+    silently fall back to pktcfg's — evidence for a failed non-pktcfg campaign must not
+    look like a failed pktcfg one."""
+    from adapters.cpp.errors import BuildStep, StepFailure
+
+    def fake_run(*args, **kwargs) -> LibFuzzerRunResult:  # type: ignore[no-untyped-def]
+        raise StepFailure(
+            step=BuildStep.BUILD,
+            target="stb",
+            command=("cmake", "--build", "build", "--target", "stb_fuzz"),
+            exit_code=2,
+            first_error="No rule to make target 'stb_fuzz'",
+        )
+
+    monkeypatch.setattr("workers.fuzzing.run.run_libfuzzer_campaign", fake_run)
+    outcome = run_fuzzing_stage(
+        "mission-stb",
+        pktcfg_source,
+        policy=ContainerJailPolicy(image=PINNED_IMAGE),
+        harness_target="stb_fuzz",
+        harness_binary="stb_fuzz",
+    )
+
+    assert outcome.mode == "NOT_RUN"
+    assert outcome.harness == "stb_fuzz"
+
+
 def test_emit_fuzzing_events_for_crash_campaign() -> None:
     outcome = FuzzingOutcome(
         mission_id=str(uuid.uuid4()),
