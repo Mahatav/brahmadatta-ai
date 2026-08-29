@@ -101,6 +101,42 @@ def broken_configure_source(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def pre_cmake_policy_floor_source(tmp_path: Path) -> Path:
+    """A private copy of pktcfg whose `cmake_minimum_required` predates CMake 4.0's
+    policy floor — mirroring the real situation #290 found running BASELINE against
+    Magma's libpng target: `cmake_minimum_required(VERSION 3.1)` (libpng's own,
+    unmodified) is rejected outright by CMake >= 4.0 ("Compatibility with CMake < 3.5
+    has been removed from CMake") unless `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` is also
+    passed. `3.1` (not `3.5` itself) matches libpng's real, still-current
+    `CMakeLists.txt` exactly, and is a real value CMake genuinely rejects — confirmed
+    interactively against the CMake installed in this environment (4.2.3) before this
+    fixture was written.
+
+    Exercises `adapters/cpp/pipeline.py::run_variant`'s `extra_cache_entries`
+    parameter / `adapters/cpp/variants.py::VariantSpec.with_extra_cache_entries`: this
+    fixture's CONFIGURE step fails without the extra cache entry and succeeds with it
+    (`test_pipeline.py`), and the CMakeLists.txt is otherwise byte-for-byte pktcfg, so
+    a successful build still reports the same 8 real ctest cases.
+    """
+    dest = tmp_path / "pktcfg-pre-cmake-3-5"
+    shutil.copytree(PKTCFG_SOURCE, dest)
+    cmakelists = dest / "CMakeLists.txt"
+    text = cmakelists.read_text()
+    assert text.startswith("cmake_minimum_required(VERSION 3.16)"), (
+        "fixture assumes pktcfg's own CMakeLists.txt still opens with "
+        "cmake_minimum_required(VERSION 3.16) — update this fixture if that changed"
+    )
+    cmakelists.write_text(
+        text.replace(
+            "cmake_minimum_required(VERSION 3.16)",
+            "cmake_minimum_required(VERSION 3.1)",
+            1,
+        )
+    )
+    return dest
+
+
+@pytest.fixture
 def broken_compile_source(tmp_path: Path) -> Path:
     """A private copy of pktcfg with a source file that fails to compile.
 

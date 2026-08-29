@@ -52,6 +52,7 @@ from __future__ import annotations
 import shutil
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -256,11 +257,21 @@ def run_baseline_stage(
     *,
     jail_policy: JailPolicy | None = None,
     container_policy: ContainerJailPolicy | None = None,
+    extra_cmake_args: Mapping[str, str] | None = None,
 ) -> BaselineOutcome:
     """Run the baseline stage for one mission. Never raises on a red or broken build —
     every failure mode this module knows about is converted into a `BaselineOutcome` with
     `passed=False` and `failure` populated. Only a programming error (a bug in this
     module) escapes as an unhandled exception.
+
+    ``extra_cmake_args`` (#290): extra CMake ``-D`` cache entries threaded verbatim into
+    `adapters/cpp/pipeline.py::run_variant`'s `extra_cache_entries` parameter — the
+    operator's escape hatch for a real, pre-2021 CMake target whose own
+    `cmake_minimum_required` predates CMake 4.0's policy floor and would otherwise fail
+    CONFIGURE before this stage can produce even a legitimate red result. `workers/
+    baseline/dispatch.py` is the one caller that populates this, from
+    `MissionPolicy.baseline_extra_cmake_args` (`contracts/schemas/missions.py`) on the
+    authorizing mission. `None` (the default) is the pre-#290 behavior, unchanged.
 
     Opens exactly one jail for the whole configure+build+ctest sequence and closes it
     before returning — its scratch directory, including `BuildResult.build_dir`, does not
@@ -336,7 +347,11 @@ def run_baseline_stage(
                     ignore=shutil.ignore_patterns(*_CONTAINER_SOURCE_COPY_IGNORED_NAMES),
                 )
             build_result = run_variant(
-                build_source, jail, Variant.BASELINE, image_digest=image_digest
+                build_source,
+                jail,
+                Variant.BASELINE,
+                image_digest=image_digest,
+                extra_cache_entries=extra_cmake_args,
             )
             adapter_name = build_result.detected.build_system.value
             # #23: structurally parse the compiler diagnostics out of the SAME

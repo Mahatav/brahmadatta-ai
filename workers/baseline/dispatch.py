@@ -18,6 +18,20 @@ plan):
 This module intentionally does not import `orchestrator.transitions` — see this
 package's own docstring, "The one rule that matters more than the type signatures."
 
+## Extra CMake cache flags for a real, pre-2021 target (#290)
+
+`_baseline_executor` reads `MissionPolicy.baseline_extra_cmake_args`
+(`contracts/schemas/missions.py`) off the mission's own policy and passes it straight
+through as `run_baseline_stage`'s `extra_cmake_args` — the operator's escape hatch for
+a real third-party CMake target whose own `cmake_minimum_required` predates CMake
+4.0's policy floor (e.g. `{"CMAKE_POLICY_VERSION_MINIMUM": "3.5"}` for a target like
+libpng). Without it, BASELINE cannot reach even a legitimate red result against such a
+target — CONFIGURE fails outright before this stage's own D3-gate machinery gets a
+chance to run. See `adapters/cpp/variants.py::VariantSpec.with_extra_cache_entries`
+for the mechanism and `workers/baseline/tests/test_extra_cmake_args.py` /
+`adapters/cpp/tests/test_pipeline.py` for the regression coverage (a synthetic
+pre-3.5 `CMakeLists.txt` that fails CONFIGURE without the flag and succeeds with it).
+
 ## Idempotency (D-061 §3 rule 2)
 
 `BaselineReport` is a `OneToOneField(Mission)` (`missions/models.py`), i.e. a real
@@ -721,12 +735,14 @@ def _baseline_executor(ctx: ExecutorContext) -> ExecutorResult:
         )
 
     container_policy = _container_policy_for(ctx.mission)
+    extra_cmake_args = _mission_policy(ctx.mission).baseline_extra_cmake_args
     try:
         outcome = run_baseline_stage(
             mission_id=ctx.mission.id,
             source_dir=ctx.source_dir,
             workspace_root=ctx.workspace_root,
             container_policy=container_policy,
+            extra_cmake_args=extra_cmake_args,
         )
     except JailError as exc:
         return ExecutorResult(

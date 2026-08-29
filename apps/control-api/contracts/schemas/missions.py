@@ -104,6 +104,28 @@ class MissionPolicy(StrictSchema):
         "here as the addition it is (backend-developer's minor-contract-detail "
         "authority per its own role brief).",
     )
+    baseline_extra_cmake_args: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=20,
+        description="Extra CMake `-D` cache entries (key -> value, no leading `-D` "
+        "and no surrounding quotes) merged into BASELINE's own configure step "
+        "(adapters/cpp/variants.py::VariantSpec.with_extra_cache_entries), the "
+        "operator-supplied value winning on a key collision with the variant's own "
+        "fixed cache entries. The escape hatch for a real, pre-2021 third-party "
+        "CMake target whose own `cmake_minimum_required` predates CMake 4.0's "
+        "policy floor: e.g. {\"CMAKE_POLICY_VERSION_MINIMUM\": \"3.5\"} for a target "
+        "like libpng that declares `cmake_minimum_required(VERSION 3.1)`, which "
+        "CMake >= 4.0 otherwise rejects outright before BASELINE can reach even a "
+        "legitimate red result (#290). Applied only to BASELINE, not to the "
+        "sanitizer variants, which are driven by `adapters/cpp/pipeline.py::"
+        "run_variant`'s own generic `CMAKE_C_FLAGS`/`CMAKE_EXE_LINKER_FLAGS` path "
+        "independently of this field. An authorizing operator's own choice about "
+        "their own authorized target, not attacker-controlled target content — "
+        "same trust boundary as `PatchPolicy.allowed_paths` above. Added by #290 — "
+        "not present in the original architecture spec's MissionPolicy listing, so "
+        "documented here as the addition it is (backend-developer's "
+        "minor-contract-detail authority per its own role brief).",
+    )
 
 
 class MissionCreateRequest(StrictSchema):
