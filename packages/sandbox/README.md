@@ -293,7 +293,7 @@ with ContainerJail.create(policy, mission_ref=str(mission.id)) as sandbox:
 | 4. Docker socket never bind-mounted | structural — the only `-v` this module ever emits is the worktree | `test_no_call_shape_can_mount_the_docker_socket` (this package) and `tests/architecture/test_container_isolation.py` (repo-wide) |
 | 5. `--read-only` + sized tmpfs; worktree is the only writable mount | `_docker_run_args`, `ContainerJailPolicy.tmpfs_mb` | `test_the_root_filesystem_is_read_only`, `test_tmp_is_writable_scratch_under_the_read_only_root` |
 | 6. `--memory`/`--cpus`/`--pids-limit`, wall-clock kill | `ContainerJailPolicy`, `ContainerJail.run` | `test_memory_limit_is_passed_to_the_runtime_and_enforced`, `test_wall_clock_timeout_is_reported_and_the_container_is_removed` |
-| 7. Teardown + orphan reaper, on crash and cancel | `ContainerJail.close`/`cancel`, module-level `reap_orphans` | `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182) |
+| 7. Teardown + orphan reaper, on crash and cancel, scoped to the calling mission | `ContainerJail.close`/`cancel`, module-level `reap_orphans` | `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182), `test_reap_orphans_leaves_a_sibling_missions_container_untouched`, `test_reap_orphans_refuses_an_unscoped_sweep_by_default` (#293) |
 | 8. Never called "rootless" | `IsolationMode.CONTAINER_NO_NETWORK` | code review — there is no test for a docstring, this is what one looks like |
 
 ## Why this module's teardown is simpler than `jail.py`'s
@@ -337,19 +337,53 @@ Linux (the finale's actual deployment target) has no such split.
 process that started the container. If the orchestrator itself is killed
 (`SIGKILL`, OOM, a host crash) with a container still running, no Python code runs
 to clean it up. Every container this module starts carries the label
-`brahmadatta.sandbox=1` specifically so the *next* process to boot can find and
-remove it:
+`brahmadatta.sandbox=1` specifically so a *later* call can find and remove it — but
+that label is shared by every mission's containers on the same daemon, so `label`
+alone is **not** a scope boundary. Pass `mission_ref` (this codebase's real call
+site, `orchestrator.teardown.DockerSandboxReaper.teardown_mission`, already has a
+mission id in hand):
 
 ```python
 from packages.sandbox.container import reap_orphans
 
-removed = reap_orphans()   # call once, early, at orchestrator startup
+removed = reap_orphans(mission_ref=str(mission_id))
 # removed is a list[ContainerRemoval]: one entry per container this call *found*,
 # each honestly reporting whether `docker rm -f` actually succeeded — check
 # `.removed`/`.error` rather than assuming every container found was removed
 # (SEC-51, #182: this used to be a bare list of ids, "found" and "removed"
 # collapsed into the same claim).
 ```
+
+**#293:** calling `reap_orphans()` with no `mission_ref` now raises
+`UnscopedReapRefusedError` instead of silently sweeping the whole daemon. On a host
+running more than one mission concurrently — a real dogfooding scenario, and a
+plausible production one — an unscoped sweep on `label` alone removes live sibling
+missions' containers along with genuine orphans, not just this mission's own. That
+used to be reachable by simply omitting the keyword argument, and nothing in this
+codebase's actual call graph relied on it (the one production caller already had a
+mission id). If you genuinely have no mission context at all — a rare, deliberate,
+host-wide sweep, e.g. decommissioning a host you have already confirmed has zero
+other active missions — pass `unscoped_sweep=True` explicitly:
+
+```python
+removed = reap_orphans(unscoped_sweep=True)  # removes EVERY sandbox container on
+                                              # this daemon, including any started
+                                              # by other, unrelated missions.
+```
+
+**Design tension worth naming, not hiding:** a *true* startup-time global cleanup
+with no mission context (e.g. "the DB was wiped, or a container's owning mission
+row no longer exists, sweep the daemon clean") cannot supply a real `mission_ref` —
+that is exactly what `unscoped_sweep=True` is for, and exactly why it still exists
+as an explicit, loudly-logged opt-in rather than being removed outright.
+`orchestrator.teardown.recover_orphaned_compute` (startup crash recovery) does not
+need it today: it already knows which missions are non-terminal and calls
+`teardown_started_compute` once per mission id, so every reap it triggers has a real
+`mission_ref`. It is not currently wired into any process entry point (`AppConfig.
+ready()`, a management command) — nothing in this repository actually needs the
+unscoped path yet — but if a future caller needs to reap containers with no
+surviving mission record at all, `unscoped_sweep=True` is the place that decision
+has to be made explicit, not a default anyone can reach by omission.
 
 ## What this module does not do
 

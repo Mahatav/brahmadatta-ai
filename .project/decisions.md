@@ -18393,3 +18393,123 @@ implications note above.
 consistent with the backend-developer role's own documented minor-contract-detail
 authority for exactly this class of `MissionPolicy` field); cybersecurity retains
 standing authority to reopen this field's security posture on the flagged follow-up.
+## D-165 — #293: `reap_orphans()` refuses an unscoped remove-everything default; requires `mission_ref` or an explicit `unscoped_sweep=True` opt-in · 2026-08-29 · backend-developer
+
+**Decision** — `packages/sandbox/container.py::reap_orphans()` no longer sweeps every
+`brahmadatta.sandbox`-labelled container on the daemon when `mission_ref` is simply
+omitted. It now raises `UnscopedReapRefusedError` (new, `packages/sandbox/errors.py`)
+unless the caller either passes `mission_ref` (the normal case, scoping the `docker rm
+-f` sweep to that mission's own `brahmadatta.mission=<ref>` label) or explicitly passes
+`unscoped_sweep=True` (a deliberate, host-wide sweep with no mission context at all).
+Filed from a real dogfooding session (2026-08-29) running Brahmadatta's own STRESS_TEST
+pipeline against `stb_image` concurrently with sibling sessions' sandbox containers on
+the same shared Docker daemon — a live container vanished mid-campaign
+(`Error response from daemon: No such container: ...`), a symptom consistent with,
+though not proven caused by, an unscoped reap sweep against a live sibling container.
+
+**Call-site audit (every real call to `reap_orphans()` in the codebase, found by grep,
+per the assigning agent's explicit instruction to check each one rather than assume)**:
+
+1. `orchestrator.teardown.DockerSandboxReaper.teardown_mission` (wired into
+   `teardown_started_compute` and, transitively, `recover_orphaned_compute` — the two
+   established call sites per that module's own docstring) — **already passed
+   `mission_ref=str(mission_id)`** before this change (landed with #146/#179's SEC-51
+   honest-exit-code work). This is the only production call site in the codebase today,
+   and it already had a real mission id in hand; no functional change required here
+   beyond confirming the new required-parameter contract does not break it (it does
+   not — verified by test run below).
+2. `packages/sandbox/tests/test_container_jail.py::
+   test_reap_orphans_removes_a_container_this_process_never_saw` — the one place in the
+   codebase that called `reap_orphans()` unscoped, simulating a container from a killed
+   process with no in-process record and, critically, **no mission label at all** (it
+   is started with only `--label brahmadatta.sandbox=1`). Updated to pass
+   `unscoped_sweep=True` explicitly — this is exactly the legitimate no-mission-context
+   case the opt-in exists for, not a workaround.
+3. `packages/sandbox/README.md`'s own worked example previously documented
+   `removed = reap_orphans()   # call once, early, at orchestrator startup` as the
+   recommended usage — itself part of the problem (correct-looking documentation
+   recommending the dangerous default). Rewritten to show the `mission_ref=`-scoped
+   call as the norm and the `unscoped_sweep=True` opt-in as the deliberate exception,
+   with the design tension below spelled out inline.
+
+**The real design tension (documented, not silently worked around, per the assigning
+agent's explicit instruction)** — a *true* host-wide cleanup with no surviving mission
+context (e.g. the database was wiped, a container's owning mission row no longer
+exists, or a host is being decommissioned) genuinely cannot supply a `mission_ref`,
+because by definition it does not know which mission(s) it is cleaning up after. That
+case is real and is why `unscoped_sweep=True` still exists rather than being deleted
+outright — but nothing in this codebase's actual call graph needs it today.
+`orchestrator.teardown.recover_orphaned_compute` (the startup crash-recovery entry
+point named in `container.py`'s own docstring as the reason this function exists) does
+not need it either: it already enumerates non-terminal `Mission` rows and calls
+`teardown_started_compute` once per mission id, so every reap it triggers already has a
+real `mission_ref`. It is also not currently wired into any process entry point
+(`AppConfig.ready()`, a management command) — confirmed by grep, `recover_orphaned_
+compute` has zero callers outside its own test file today. If a future caller needs to
+reap containers with no surviving mission record at all, `unscoped_sweep=True` is where
+that decision must be made explicit and loud (it logs a warning naming exactly what it
+is about to do), not a default anyone reaches by omitting a keyword argument.
+
+**Options considered**
+
+- **(a) Make `mission_ref` a required positional/keyword argument with no default,
+  full stop.** Rejected — this permanently removes the one legitimate host-wide-sweep
+  use case (disaster recovery with no surviving mission record) rather than making it
+  deliberate, and would force a future caller who genuinely needs it to either bypass
+  this function or reimplement its `docker rm -f`/exit-code-honesty logic elsewhere,
+  reintroducing the exact SEC-51 (#182) bug this module already fixed once.
+- **(b) Keep the default unscoped, add a loud log line when `mission_ref` is
+  `None`.** Rejected — a log line is not a control. This is precisely the "loudly warn"
+  half of the assigning agent's fix direction, correctly identified as the *weaker* of
+  the two acceptable options; a caller (or a future refactor) can still reach the
+  dangerous behavior by doing nothing differently at all, which is the exact failure
+  mode #293 reports.
+- **(c, chosen) Refuse by default; require an explicitly-named opt-in
+  (`unscoped_sweep=True`) for the host-wide case.** Closes the reachable-by-omission
+  path completely — the only way to get the old behavior now is to type the words
+  `unscoped_sweep=True`, which cannot happen by accident, forgetting a keyword, or a
+  copy-pasted call site missing one argument. Grep for `unscoped_sweep` also makes
+  every deliberate host-wide sweep in the codebase, present or future, trivially
+  auditable in one search — the property a cybersecurity reviewer most needs from this
+  kind of blast-radius control.
+
+**Pros and cons of (c)** — Pro: the one real production call site required zero
+functional change (it already passed `mission_ref`), so this closes the gap with no
+behavior change to anything running today. Pro: the refusal happens before any `docker`
+command runs at all (verified by
+`test_reap_orphans_refuses_an_unscoped_sweep_by_default`, which fails the test itself
+if `_run_cli` is ever invoked before the refusal) — no partial listing or partial
+removal can happen on the way to the exception. Con: a future genuinely-orphaned-with-
+no-mission-record cleanup path has one extra required decision to make explicit
+(`unscoped_sweep=True`) rather than falling out "for free" from calling the function
+with no arguments — accepted as the entire point of the fix, not a cost to offset.
+
+**Cost implications** — none; no new infrastructure, no new dependency.
+
+**Security implications** — closes a real cross-mission blast-radius / isolation-
+boundary gap on any host running concurrent missions (the exact scenario #293 was filed
+from): a `mission_ref`-scoped `reap_orphans()` call can no longer remove a sibling
+mission's live, in-progress sandbox container merely because a caller omitted a keyword
+argument. Regression-tested against real Docker containers, not mocks (see test run
+below): two containers carrying different `brahmadatta.mission` labels, both genuinely
+present on the shared daemon at once, prove the scoped call removes only its own
+mission's container and leaves the sibling's running.
+
+**Scalability implications** — none; `reap_orphans()`'s `docker ps`/`rm -f` call
+pattern is unchanged, only the required-argument contract at its boundary.
+
+**Recommendation** — Merge, contingent on cybersecurity review per CLAUDE.md's standing
+rule for isolation/sandboxing-sensitive changes (explicitly requested on the PR, not
+self-merged). Reviewer should confirm: (1) the refusal genuinely happens before any
+`docker` command executes (not just before removal) — verified by
+`test_reap_orphans_refuses_an_unscoped_sweep_by_default`'s raising fake; (2) no
+legitimate cleanup path loses real functionality — the one production call site
+(`DockerSandboxReaper.teardown_mission`) needed no change, and the one test that
+needed the opt-in (`test_reap_orphans_removes_a_container_this_process_never_saw`)
+is the exact no-mission-context case the opt-in is for, not a workaround around a
+caller that should have had a `mission_ref` available.
+
+**Final approval authority** — cybersecurity (isolation/sandboxing security review,
+per CLAUDE.md's standing rule); CTO for the underlying architectural question of
+whether a truly unscoped host-wide sweep should exist in this codebase at all, if
+that is ever contested.

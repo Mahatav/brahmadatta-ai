@@ -29,6 +29,7 @@ from packages.sandbox.container import (
     ContainerJailPolicy,
     ContainerUnavailableError,
     LimitKind,
+    UnscopedReapRefusedError,
     probe_egress,
     reap_orphans,
 )
@@ -207,6 +208,50 @@ def test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success(monk
     assert by_id["good123"].error == ""
     assert by_id["wedged456"].removed is False
     assert "removal in progress" in by_id["wedged456"].error
+
+
+def test_reap_orphans_refuses_an_unscoped_sweep_by_default(monkeypatch):
+    """#293: `reap_orphans()` used to sweep every `brahmadatta.sandbox` container on
+    the daemon when `mission_ref` was simply omitted -- the reachable default, since
+    no call site was forced to supply one. It must now refuse outright rather than
+    silently falling back to "remove everything", and must never even list
+    containers (let alone `rm -f` one) before refusing."""
+
+    def fake_run_cli(runtime: str, args: list[str], *, timeout: float):
+        raise AssertionError(
+            "reap_orphans must refuse before running any docker command when "
+            "mission_ref is omitted and unscoped_sweep is not explicitly True"
+        )
+
+    monkeypatch.setattr("packages.sandbox.container._run_cli", fake_run_cli)
+
+    with pytest.raises(UnscopedReapRefusedError, match="mission_ref"):
+        reap_orphans()
+
+    with pytest.raises(UnscopedReapRefusedError, match="unscoped_sweep"):
+        reap_orphans(mission_ref=None)
+
+
+def test_reap_orphans_unscoped_sweep_requires_explicit_opt_in(monkeypatch):
+    """The old unscoped behaviour still exists for the one legitimate case with no
+    mission context at all (#293's documented design tension), but only when a
+    caller deliberately opts in by name -- not as a default anyone reaches by
+    omission."""
+    calls: list[list[str]] = []
+
+    def fake_run_cli(runtime: str, args: list[str], *, timeout: float):
+        calls.append(args)
+        if args[:2] == ["ps", "-aq"]:
+            return subprocess.CompletedProcess([runtime, *args], 0, "orphan789\n", "")
+        return subprocess.CompletedProcess([runtime, *args], 0, "", "")
+
+    monkeypatch.setattr("packages.sandbox.container._run_cli", fake_run_cli)
+
+    removed = reap_orphans(unscoped_sweep=True)
+
+    assert [r.container_id for r in removed] == ["orphan789"]
+    # No `label=brahmadatta.mission=...` filter -- genuinely unscoped, as requested.
+    assert calls[0] == ["ps", "-aq", "--filter", f"label={SANDBOX_LABEL}"]
 
 
 # --- docker socket never mounted (condition 4) -- pure, no docker needed -----------
@@ -447,8 +492,17 @@ def test_cleanup_on_a_populated_worktree():
 def test_reap_orphans_removes_a_container_this_process_never_saw():
     """Condition 7's crash-recovery half: a container started entirely outside any
     `ContainerJail` instance — simulating what a killed orchestrator would leave
-    behind — is still found and removed by `reap_orphans()`, because it only ever
-    looks for the label on the daemon, never at in-process state."""
+    behind, with no mission label and no mission context to scope a sweep to — is
+    still found and removed by `reap_orphans()`, because it only ever looks for the
+    label on the daemon, never at in-process state.
+
+    #293: this scenario has no `mission_ref` to give (the container carries no
+    `brahmadatta.mission` label at all, exactly like a container from a killed
+    process the current boot never heard of), so it is the one legitimate case for
+    the explicit `unscoped_sweep=True` opt-in rather than a plain `reap_orphans()`
+    call — see `test_reap_orphans_refuses_an_unscoped_sweep_by_default` for proof
+    that the plain call is refused.
+    """
     name = "brahmadatta-sandbox-orphan-test"
     created = subprocess.run(
         [
@@ -462,7 +516,7 @@ def test_reap_orphans_removes_a_container_this_process_never_saw():
     container_id = created.stdout.strip()
     try:
         assert name in _running_container_names()
-        removed = reap_orphans()
+        removed = reap_orphans(unscoped_sweep=True)
         # `docker ps -aq` reports ids, not names — reap_orphans returns exactly what
         # it received back from the daemon.
         matches = [
@@ -476,6 +530,60 @@ def test_reap_orphans_removes_a_container_this_process_never_saw():
         assert name not in _running_container_names()
     finally:
         subprocess.run([RUNTIME, "rm", "-f", name], capture_output=True, timeout=15)
+
+
+@needs_docker
+def test_reap_orphans_leaves_a_sibling_missions_container_untouched():
+    """#293's core regression: two containers, from two different missions, both
+    genuinely present on the shared daemon at once (this session's exact dogfooding
+    scenario -- concurrent missions, one shared Docker daemon). A `mission_ref`-
+    scoped `reap_orphans()` call for mission A must remove only mission A's
+    container and leave mission B's live and running, proving the sweep's blast
+    radius is one mission, not the whole host.
+    """
+    mission_a, mission_b = "mission-a-293", "mission-b-293"
+    name_a = "brahmadatta-sandbox-293-mission-a"
+    name_b = "brahmadatta-sandbox-293-mission-b"
+
+    def _start(name: str, mission_ref: str) -> str:
+        created = subprocess.run(
+            [
+                RUNTIME, "run", "-d", "--name", name,
+                "--label", f"{SANDBOX_LABEL}=1",
+                "--label", f"brahmadatta.mission={mission_ref}",
+                "--network", "none", "--user", "10001:10001",
+                PROBE_IMAGE, "sleep", "60",
+            ],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return created.stdout.strip()
+
+    container_a = _start(name_a, mission_a)
+    container_b = _start(name_b, mission_b)
+    try:
+        assert {name_a, name_b} <= _running_container_names()
+
+        removed = reap_orphans(mission_ref=mission_a)
+
+        removed_ids = {r.container_id for r in removed}
+        assert any(
+            container_a.startswith(rid) or rid.startswith(container_a)
+            for rid in removed_ids
+        ), removed
+        assert not any(
+            container_b.startswith(rid) or rid.startswith(container_b)
+            for rid in removed_ids
+        ), removed
+
+        running = _running_container_names()
+        assert name_a not in running, "mission A's own container should be reaped"
+        assert name_b in running, (
+            "mission B's container was removed by a mission-A-scoped reap -- this "
+            "is exactly #293's cross-mission blast radius"
+        )
+    finally:
+        subprocess.run([RUNTIME, "rm", "-f", name_a], capture_output=True, timeout=15)
+        subprocess.run([RUNTIME, "rm", "-f", name_b], capture_output=True, timeout=15)
 
 
 @needs_docker
