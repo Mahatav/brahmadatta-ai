@@ -18610,6 +18610,140 @@ add the architecture test described above so a future `unscoped_sweep=True` prod
 call site fails CI rather than waiting for the next cybersecurity review to catch it.
 
 **Final approval authority** — cybersecurity (security verdict, this role's own
-standing authority per CLAUDE.md).</new_string>
-</invoke>
+standing authority per CLAUDE.md).
+
+---
+
+## D-167 — #288/#289/#291/#292: generalize the libFuzzer adapter beyond pktcfg · 2026-08-29 · backend-developer
+
+**Decision** — Fix all four issues together in one PR, since all four were found by the
+same dogfooding session (running the real STRESS_TEST pipeline against LAVA-M base64,
+Magma libpng, and stb_image — not just the built-in `pktcfg` demo fixture) and touch the
+same small set of files:
+
+1. **#288** — `adapters/cpp/fuzzing.py::run_libfuzzer_campaign` gains a `cache_entries:
+   Mapping[str, str] | None = None` parameter, defaulting to the new
+   `DEFAULT_CACHE_ENTRIES = {"PKTCFG_SANITIZE": "ON", "PKTCFG_FUZZ": "ON"}` — the same
+   shape `adapters/cpp/variants.py::VariantSpec.cache_entries` already uses for
+   BASELINE/ASAN_UBSAN, per this issue's own "use it as your model" direction.
+   `harness_target`/`harness_binary` were already parameters; what was missing was a way
+   to override the *cache entries* that make a target's fuzz build reachable at all.
+   `workers/fuzzing/run.py::run_fuzzing_stage` threads `harness_target`/`harness_binary`/
+   `cache_entries` straight through and reports `FuzzingOutcome.harness` from the actual
+   `harness_binary` on every path — success, `StepFailure`, `AdapterError`/`ValueError`,
+   and a shaped `result.failure` — never the literal `"pktcfg_fuzz_one_input"` this
+   module hardcoded before (also fixed in `_events_from_metrics`'s `STAGE_PROGRESS`
+   payload and `emit_fuzzing_events`'s `STAGE_STARTED` detail string, same root cause).
+   `apps/control-api/orchestrator/verification.py::VerificationBaseline.configure_args`'
+   pktcfg default is now a named, documented module constant
+   (`_PKTCFG_DEFAULT_CONFIGURE_ARGS`) instead of an inline literal tuple — this field was
+   already caller-overridable and `_sanitizers_enabled` already recognises any target's
+   own `-D<...SANITIZE...>=<truthy>` cache entry generically, so no behavioural change
+   was needed there, only making "this is pktcfg's own default, not a hardcoded
+   assumption" visible at the definition site. `RenewedFuzzConfig` (the `#40` renewed-
+   fuzzing gate, which already generalised `harness_target`/`harness_binary`) gains the
+   matching `cache_entries` field for the same reason.
+2. **#289** — `run_libfuzzer_campaign` gains an opt-in `sanitizer_env: Mapping[str, str]
+   | None = None` parameter, mirroring `pipeline.py::run_reproducer`'s existing
+   `VariantSpec.runtime_env` precedent. Since `ContainerJailPolicy.extra_env` is frozen
+   and fixed at `ContainerJail.create()` time (applies to every command the sandbox
+   runs, not a per-`run()` env), this is implemented via `dataclasses.replace(policy,
+   extra_env={**policy.extra_env, **sanitizer_env})` before the sandbox is created —
+   never mutating the caller's own policy object. `None` (the default) adds nothing, so
+   pktcfg's behaviour is unchanged. Threaded through `run_fuzzing_stage` the same way.
+3. **#291** — `parse_libfuzzer_metrics` now classifies every discovered artifact by its
+   libFuzzer-assigned kind (`_artifact_kind`: `crash`/`leak` vs. `timeout`/`oom`/
+   `slow-unit`). Only `crash`/`leak`-kind artifacts are credited to `crashes_found`/
+   `unique_crashes`; a resource-limit artifact (hang, allocation blowup) remains visible
+   on `artifact_paths` — it is still real evidence — but is never folded into the crash
+   count. `sanitizers` is only populated when the artifact that actually *stopped the
+   run* (`_stopping_artifact` — the last "Test unit written to ..." line in the captured
+   output when more than one artifact is discovered, since a single `ContainerJail` run
+   stops at the first fault) is itself `crash`/`leak`-kind AND that output carries a
+   `SUMMARY: ...Sanitizer:` line — never "any sanitizer text anywhere in the session",
+   the exact stb_image repro (`gate.passed: True` from a single `slow-unit-*` artifact
+   with zero real sanitizer report). `LibFuzzerMetrics.sanitizers`'s bare-dataclass
+   default changed from `("address", "undefined")` to `()` to match (a failed
+   configure/build now correctly reports no sanitizers rather than guessing).
+4. **#292** — `workers/fuzzing/cli.py` now passes `--workspace-root` (default
+   `.d5-fuzz-workspace` under the repo root, mirroring `workers/replay/cli.py`'s
+   identical `--workspace`/`DEFAULT_WORKSPACE` pattern) through to `run_fuzzing_stage`.
+   `run_fuzzing_stage`/`run_libfuzzer_campaign` already handled a supplied
+   `workspace_root` correctly (D-106); this was a one-call-site wiring gap in the CLI
+   only, confirmed by grep — no other change needed.
+
+**Options considered** —
+- *#288*: thread cache-entry names through per-mission/per-target repository metadata
+  (the issue's own "likely via the existing target/repository metadata used elsewhere in
+  the mission contract" suggestion) vs. a plain function/dataclass parameter defaulting
+  to pktcfg's values. Chose the parameter: `workers/fuzzing/dispatch.py` (the real
+  Django job executor) does not yet carry per-target build metadata on `Mission` at all,
+  and inventing that plumbing was out of scope for a fix whose own acceptance criterion
+  is "pktcfg keeps working identically, a non-pktcfg caller can override" — the
+  parameter satisfies that today; wiring a specific target's metadata into it from a
+  real per-mission config store is future work for whichever role owns mission-target
+  metadata, not invented here.
+- *#291*: considered adding a new `sanitizer_confirmed: bool` field to
+  `LibFuzzerMetrics`/`FuzzingOutcome` instead of fixing `crashes_found`/`sanitizers`
+  directly. Rejected: `workers/fuzzing/cli.py::build_fuzzing_record`'s existing gate
+  formula (`sanitizer_confirmed = outcome.ran and outcome.crashes_found > 0 and
+  bool(outcome.sanitizers)`) already becomes correct once those two underlying fields
+  are correct, and `FuzzingOutcome.as_dict()`'s field set mirrors the strict
+  (`extra="forbid"`) `contracts.schemas.evidence.FuzzingReport` Pydantic schema — adding
+  a new key there was avoidable surface risk for no behavioural gain.
+- *#289*: considered classifying leak vs. crash into distinct finding categories (the
+  issue's own "and/or" second option) instead of / in addition to the env passthrough.
+  Implemented the env passthrough only (the issue's primary, and the task's requested
+  regression-test shape): it fixes the reachable false positive completely for a caller
+  that opts in, and is the same mechanism `variants.py`'s `_ASAN_OPTIONS` already uses
+  for the sanitized baseline/reproducer path, rather than a second classification scheme
+  living only in the fuzzing adapter.
+
+**Pros and cons of each** — The parameter-default approach (#288) is a smaller, faster,
+fully backward-compatible fix but does not by itself make the *orchestrator* choose
+per-target cache entries automatically — a caller still has to know and pass them. The
+env-passthrough approach (#289) is opt-in and does nothing until a caller asks for it,
+which means a caller who doesn't know about the leak-vs-crash distinction still gets the
+pre-#289 (over-inclusive) behaviour unless they explicitly suppress leaks — an honest
+residual, not a full fix of every possible false positive, but it directly satisfies
+what the issue asked for and does not change pktcfg's behaviour by default.
+
+**Cost implications** — none; no new infrastructure, dependencies, or services.
+
+**Security implications** — none of the four changes touch the sandbox isolation
+boundary itself (`ContainerJail`'s own hardening — `--network none`, `--cap-drop ALL`,
+non-root uid, no Docker-socket mount — is untouched; confirmed by diff review, only
+configure-argv construction, metrics classification, and CLI argument wiring changed).
+`sanitizer_env` (#289) is layered into `ContainerJailPolicy.extra_env`, the same
+allowlist-shaped mechanism the sandbox already uses for any other environment variable a
+caller sets — it does not add a new privilege or a new way to reach the host. This
+changes evidence-generation/verification-gate logic (#291 specifically changes what
+`sanitizer_confirmed` means), which CLAUDE.md's Git section names as needing a
+`cybersecurity` review recorded on the PR before merge; that review is requested as this
+PR's next step rather than self-merged, since the "non-isolation-boundary" self-merge
+precedent this session's other PRs used applies to the sandbox hardening boundary
+specifically, not to the verification-gate semantics #291 changes.
+
+**Scalability implications** — none.
+
+**Recommendation** — Merge once a `cybersecurity` review of the verification-gate
+changes (#291 principally; #288/#289/#292 are lower-risk parameter/wiring additions) is
+recorded on the PR, per CLAUDE.md's standing rule for changes to verification gates.
+Regression evidence: real (non-mocked) `docker`-backed tests prove a synthetic,
+deliberately non-pktcfg-named CMake target (`SYNTH_SANITIZE`/`SYNTH_FUZZ`/`synth_fuzz`,
+reproducing this session's `stb_image` dogfooding failure shape) builds and runs
+end-to-end through `run_fuzzing_stage` and reports its own harness label (#288); a real
+harness with a deliberate, unconditional memory leak is confirmed to trigger
+LeakSanitizer without suppression and to report zero crashes once `sanitizer_env`
+suppresses it (#289); a real CLI run (`workers.fuzzing.cli.main`, no monkeypatching)
+against pktcfg's own seeded defect proves a discovered crash artifact survives
+`ContainerJail.close()` when `--workspace-root` is supplied (#292). The full existing
+`adapters/cpp/tests`, `workers/fuzzing/tests`, `workers/baseline/tests`,
+`workers/replay/tests`, and `apps/control-api/orchestrator/tests` suites all pass
+unchanged (798 passed / 23 skipped in `apps/control-api`; 121 passed / 7 skipped / 1
+xfailed across the adapter/worker suites), confirming pktcfg's own PASS/FAIL outcomes
+are unaffected by this fix.
+
+**Final approval authority** — CTO (technical); a `cybersecurity` review is additionally
+required before merge per CLAUDE.md's standing rule for verification-gate changes.
 
