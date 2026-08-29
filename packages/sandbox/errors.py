@@ -119,3 +119,19 @@ class CancelledError(JailError):
     """`Jail.cancel()` was called, or the context exited while a command was running."""
 
     error_code = "SAFE_CANCELLATION_IN_PROGRESS"
+
+
+class UnscopedReapRefusedError(JailError):
+    """`packages.sandbox.container.reap_orphans()` was called with no `mission_ref`
+    and without the explicit `unscoped_sweep=True` opt-in (#293).
+
+    Every `brahmadatta.sandbox`-labelled container on the daemon carries the same
+    label regardless of which mission or process started it. A caller that omits
+    `mission_ref` is asking to remove *all* of them — on a host running more than one
+    mission concurrently, that includes live sibling missions' containers, not just
+    genuine orphans. This is refused by default rather than silently scoped or
+    silently allowed; see `reap_orphans`'s docstring for the deliberate,
+    no-mission-context escape hatch.
+    """
+
+    error_code = "SANDBOX_POLICY_VIOLATION"

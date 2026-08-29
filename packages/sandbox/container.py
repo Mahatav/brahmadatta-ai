@@ -27,7 +27,7 @@ container would. The ruling was **ACCEPTED, with eight binding conditions**
 | 4 | Docker socket never bind-mounted, anywhere | never appears in `_docker_run_args`; `tests/architecture/test_container_isolation.py` |
 | 5 | `--read-only` + sized tmpfs; the worktree is the only writable mount | `_docker_run_args`, `ContainerJailPolicy.tmpfs_mb` |
 | 6 | `--memory` / `--cpus` / `--pids-limit`, plus a wall-clock kill | `ContainerJailPolicy`, `_docker_run_args`, `ContainerJail.run` |
-| 7 | Teardown + an orphan reaper, on crash and on cancel | `ContainerJail.close`/`cancel`; module-level `reap_orphans`; `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182) |
+| 7 | Teardown + an orphan reaper, on crash and on cancel, scoped to the calling mission | `ContainerJail.close`/`cancel`; module-level `reap_orphans`; `test_cleanup_on_*`, `test_reap_orphans_removes_a_container_this_process_never_saw`, `test_reap_orphans_reports_a_failed_removal_rather_than_claiming_success` (SEC-51, #182), `test_reap_orphans_leaves_a_sibling_missions_container_untouched`, `test_reap_orphans_refuses_an_unscoped_sweep_by_default` (#293) |
 | 8 | The deviation is recorded and never called "rootless" | `IsolationMode.CONTAINER_NO_NETWORK` [Δ #15] in `contracts.enums`, never `ROOTLESS_CONTAINER` |
 
 **Condition 8 is not decoration.** `JailResult.isolation_mode` below is the string
@@ -78,6 +78,7 @@ from packages.sandbox.errors import (
     ContainerUnavailableError,
     JailError,
     LimitKind,
+    UnscopedReapRefusedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -276,10 +277,10 @@ def reap_orphans(
     runtime: str = "docker",
     label: str = SANDBOX_LABEL,
     mission_ref: str | None = None,
+    unscoped_sweep: bool = False,
     timeout: float = 15.0,
 ) -> list[ContainerRemoval]:
-    """Remove every container carrying `label`, regardless of which process — or
-    whether any live process at all — started it.
+    """Remove containers carrying `label`, scoped to one mission's own containers.
 
     This is the entire mechanism behind D-024 condition 7's "orphan reaper... on
     crash". `ContainerJail.close()` handles the normal-exit, failure and cancel cases
@@ -288,6 +289,20 @@ def reap_orphans(
     live. There is no in-process hook for "my own process just died" — the label on the
     daemon is what survives that, and this function is what the *next* process boot
     calls to find and clear it.
+
+    #293: `label=brahmadatta.sandbox` is shared by every mission's containers on the
+    same Docker daemon — it is not, by itself, a scope boundary. On a host running more
+    than one mission concurrently (a real dogfooding scenario, and a plausible
+    production one), a caller that swept on `label` alone would remove live sibling
+    missions' containers along with genuine orphans, not just its own. `mission_ref` is
+    therefore now **required** unless the caller explicitly opts into a host-wide sweep
+    via `unscoped_sweep=True` — the unscoped "remove everything with this label" mode
+    is a deliberate, rare action (e.g. decommissioning a host already confirmed to have
+    zero other active missions), never a default. Every real call site in this codebase
+    (`orchestrator.teardown.DockerSandboxReaper.teardown_mission`) has a mission id in
+    hand and passes `mission_ref`; there is currently no production call site that
+    needs `unscoped_sweep=True` — see `packages/sandbox/README.md` for the discussion
+    of why that escape hatch still exists.
 
     SEC-51 (#182): every container found is now genuinely attempted, and its `rm -f`
     exit code is inspected and reported rather than assumed. `docker rm -f` failing
@@ -299,9 +314,32 @@ def reap_orphans(
     `ContainerRemoval` per container this call *found*, each honestly reporting whether
     the removal actually succeeded, so a caller can log or assert on either count.
     """
+    if mission_ref is None and not unscoped_sweep:
+        raise UnscopedReapRefusedError(
+            "reap_orphans() refuses to sweep every "
+            f"`{label}` container on this daemon by default (#293) -- on a host "
+            "running more than one mission concurrently this would remove live "
+            "sibling missions' containers, not just orphans. Pass "
+            "`mission_ref=<mission id>` to scope the sweep to one mission's own "
+            "containers (the normal case). Pass `unscoped_sweep=True` only for a "
+            "deliberate, host-wide sweep with no mission context at all -- it "
+            "removes every sandbox container on this daemon regardless of owner."
+        )
+    if mission_ref is not None and unscoped_sweep:
+        logger.warning(
+            "reap_orphans: both mission_ref=%s and unscoped_sweep=True were passed; "
+            "scoping to mission_ref anyway rather than sweeping the whole daemon",
+            mission_ref,
+        )
     filters = ["--filter", f"label={label}"]
     if mission_ref is not None:
         filters += ["--filter", f"label=brahmadatta.mission={mission_ref}"]
+    else:
+        logger.warning(
+            "reap_orphans: unscoped_sweep=True with no mission_ref -- removing "
+            "every `%s` container on this daemon regardless of owning mission",
+            label,
+        )
     listed = _run_cli(runtime, ["ps", "-aq", *filters], timeout=timeout)
     ids = [line for line in listed.stdout.split() if line]
     results: list[ContainerRemoval] = []
