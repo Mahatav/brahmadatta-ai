@@ -46,6 +46,7 @@ the whole sequence (the D3 gate's own 15-minute ceiling is exactly that shape al
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -157,8 +158,19 @@ def run_variant(
     variant: Variant = Variant.BASELINE,
     *,
     image_digest: str | None = None,
+    extra_cache_entries: Mapping[str, str] | None = None,
 ) -> BuildResult:
     """Configure, build, and CTest ``source_dir`` under ``variant``, entirely inside ``jail``.
+
+    ``extra_cache_entries`` (#290): additional CMake ``-D`` cache entries merged into
+    ``variant``'s own `VariantSpec.cache_entries` (`VariantSpec.with_extra_cache_entries`,
+    `adapters/cpp/variants.py`) before configure runs, ``extra_cache_entries`` winning on
+    a key collision. This is the operator's escape hatch for a real, pre-2021 CMake target
+    whose own `cmake_minimum_required` predates CMake 4.0's policy floor — e.g.
+    ``{"CMAKE_POLICY_VERSION_MINIMUM": "3.5"}`` for a target like libpng that declares
+    `cmake_minimum_required(VERSION 3.1)`, which CMake >= 4.0 otherwise rejects outright
+    before this adapter's own configure step has any other way to proceed. `None` (the
+    default) is the pre-#290 behavior, unchanged: a variant's own fixed cache entries only.
 
     ``jail`` must be an already-open `packages.sandbox.Jail` (inside its `with` block) and
     must stay open until you are done reading `BuildResult.build_dir` — see the module
@@ -213,6 +225,8 @@ def run_variant(
 
     tools = probe_build_tools(jail)
     spec = spec_for(variant)
+    if extra_cache_entries:
+        spec = spec.with_extra_cache_entries(extra_cache_entries)
     build_dir = jail.root / f"build-{variant.value.lower()}"
     build_dir.mkdir(parents=True, exist_ok=True)
 

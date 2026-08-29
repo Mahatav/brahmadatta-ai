@@ -29,6 +29,33 @@ def broken_configure_source(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def pre_cmake_policy_floor_source(tmp_path: Path) -> Path:
+    """A private copy of pktcfg whose `cmake_minimum_required` predates CMake 4.0's
+    policy floor — mirroring #290's real finding running BASELINE against Magma's
+    libpng target. See `adapters/cpp/tests/conftest.py`'s identical fixture for the
+    full rationale; kept as its own copy here rather than a cross-package import,
+    matching this file's existing convention (`broken_configure_source` above is
+    already duplicated the same way, not imported from `adapters/cpp/tests`).
+    """
+    dest = tmp_path / "pktcfg-pre-cmake-3-5"
+    shutil.copytree(PKTCFG_SOURCE, dest)
+    cmakelists = dest / "CMakeLists.txt"
+    text = cmakelists.read_text()
+    assert text.startswith("cmake_minimum_required(VERSION 3.16)"), (
+        "fixture assumes pktcfg's own CMakeLists.txt still opens with "
+        "cmake_minimum_required(VERSION 3.16) — update this fixture if that changed"
+    )
+    cmakelists.write_text(
+        text.replace(
+            "cmake_minimum_required(VERSION 3.16)",
+            "cmake_minimum_required(VERSION 3.1)",
+            1,
+        )
+    )
+    return dest
+
+
+@pytest.fixture
 def warning_producing_source(tmp_path: Path) -> Path:
     """A real copy of pktcfg with one real, compiler-diagnostic-producing function
     appended to `src/config.c` (#23) — never a mutation of the committed tree.

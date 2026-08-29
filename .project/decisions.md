@@ -18261,3 +18261,135 @@ for a human merge decision.
 **Final approval authority** — cybersecurity (security severity/verdict, this role's own
 standing authority, per CLAUDE.md); the two CTO calls D-162 already named (bare-metal
 worker investment, allowlist permanence) remain separate and unblocked by this verdict.
+
+## D-164 — #290: an escape hatch for extra CMake `-D` cache flags in BASELINE's configure step · 2026-08-29 · backend-developer
+
+**Decision** — Add `MissionPolicy.baseline_extra_cmake_args: dict[str, str]`
+(`apps/control-api/contracts/schemas/missions.py`), threaded through
+`workers/baseline/dispatch.py::_baseline_executor` ->
+`workers/baseline/run.py::run_baseline_stage`'s new `extra_cmake_args` parameter ->
+`adapters/cpp/pipeline.py::run_variant`'s new `extra_cache_entries` parameter ->
+`adapters/cpp/variants.py::VariantSpec.with_extra_cache_entries` (new), which merges
+the operator-supplied entries into the `BASELINE` variant's own `cache_entries` before
+`_configure_argv` builds CMake's argv, the operator's value winning on a key collision.
+
+**The problem this closes**: as filed in #290 (found dogfooding BASELINE against
+Magma's real libpng target), CMake >= 4.0 removed compatibility with policies older
+than 3.5 and refuses to configure any project whose own
+`cmake_minimum_required(VERSION X)` names `X < 3.5` — which is every CMake project
+written before roughly 2021, libpng included — unless the caller also passes
+`-DCMAKE_POLICY_VERSION_MINIMUM=3.5`. `demo/repositories/pktcfg` never surfaced this
+because it was authored fresh with `cmake_minimum_required(VERSION 3.16)`. Without this
+change, BASELINE could not reach even a legitimate red result against any such target —
+a structural ceiling on what this system can ingest at all, independent of the
+fuzzing-generality gaps tracked separately in #288/#289/#291/#292.
+
+**Regression proof, not just a parameter that compiles** — confirmed against the real
+`cmake` binary installed in this environment (4.2.3), both directions:
+`adapters/cpp/tests/conftest.py::pre_cmake_policy_floor_source` (and its identical
+`workers/baseline/tests/conftest.py` copy, matching that file's existing
+non-shared-fixture convention) is a private copy of pktcfg with
+`cmake_minimum_required(VERSION 3.16)` changed to `VERSION 3.1` — libpng's own real,
+current value — nothing else touched, so a successful build still reports the same 8
+real ctest cases.
+`adapters/cpp/tests/test_pipeline.py::test_a_pre_cmake_3_5_target_fails_configure_without_the_escape_hatch`
+proves CONFIGURE fails clearly (a `StepFailure`, CMake's own "Compatibility with CMake
+< 3.5" text captured in `detail`) without the new parameter, and
+`...test_a_pre_cmake_3_5_target_configures_and_builds_with_the_escape_hatch` proves the
+identical target configures and builds (8/8 ctest passed) once
+`extra_cache_entries={"CMAKE_POLICY_VERSION_MINIMUM": "3.5"}` is supplied.
+`workers/baseline/tests/test_extra_cmake_args.py` repeats both halves one layer up, at
+`run_baseline_stage`, plus a third test asserting pktcfg's own unmodified call shape
+(no `extra_cmake_args` at all) is unaffected.
+
+**Options considered:**
+1. **A field on `VariantSpec` itself** (as the assignment's own fix direction first
+   suggested) — rejected as the primary mechanism: `VariantSpec` instances are the
+   fixed, shared `_SPECS` table entries `spec_for` hands to every caller
+   (`adapters/cpp/variants.py`), so a mutable or per-mission field there would either
+   have to break that sharing (a fresh `VariantSpec` per mission) or become global
+   state leaking across missions. Kept the frozen, shared-by-value design; added the
+   merge as a method (`with_extra_cache_entries`) that returns a NEW `VariantSpec`
+   instead, called only at the one BASELINE call site that has mission-specific data
+   to merge in.
+2. **`MissionPolicy` field, threaded through the executor** (chosen) — matches this
+   repo's own established pattern for exactly this class of change: `renewed_fuzz_seconds`
+   (#40/D-144) and `patch_generation_attempts` (#168 T4) are both fields the assignment's
+   own fix direction pointed at as precedent, added by backend-developer under the
+   role's documented "minor-contract-detail authority," each with the identical
+   "Added by #N — not present in the original architecture spec's MissionPolicy
+   listing" disclosure this entry's field description repeats verbatim in spirit.
+   `MissionPolicy` is already the mechanism `SandboxPolicy`/`PatchPolicy` use for
+   exactly this kind of "operator picks per-mission, defaults stay off" knob.
+3. **An environment variable / global setting** — rejected: a single, deployment-wide
+   `-D` flag cannot express "this mission's target needs this, that mission's does
+   not," and would apply the flag to every mission including pktcfg's own baseline
+   (whose CONFIGURE never needed it and whose test suite — #41's standing
+   prohibition — must never gain a dependency it did not have).
+4. **Auto-detect and inject the flag unconditionally on every CONFIGURE** (silently
+   adding `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` to every BASELINE run regardless of
+   what the target asked for) — rejected: masking a real `cmake_minimum_required`
+   incompatibility by force is exactly the kind of "confidence substitutes for
+   verification" shortcut CLAUDE.md's non-negotiable rules forbid, and it silently
+   changes CMake's policy behavior for every target, including ones where that
+   matters for correctness. An explicit, operator-authorized, per-mission opt-in
+   keeps the decision visible and attributable to the person who authorized the
+   target, not baked into the adapter's default behavior.
+
+**Pros and cons of each:**
+* Option 1 — Pro: keeps all variant-shaping data in one place. Con: breaks the
+  fixed-shared-spec invariant every other part of this module relies on
+  (`test_every_variant_has_a_spec`, `spec_for`'s own "always the same instance"
+  contract) for a need that is fundamentally per-mission, not per-variant.
+* Option 2 (chosen) — Pro: reuses an already-reviewed, already-tested mechanism
+  (`MissionPolicy` -> `mission.policy` JSONField -> `_mission_policy()` parse, already
+  wired for `sandbox`/`patch`/`fuzz_seconds`) with a clear operator-authorization
+  boundary and a contract-doc precedent for exactly this kind of addition. Con: adds
+  one more field to an already-growing schema; mitigated by `max_length=20` on the
+  dict and the same `StrictSchema(extra="forbid")` validation every other field gets.
+* Option 3 — Pro: zero code change. Con: cannot express per-mission need, and risks
+  quietly reintroducing the flag on missions where the target's own
+  `cmake_minimum_required` correctness matters.
+* Option 4 — Pro: zero operator friction. Con: violates the verification-over-
+  confidence rule and silently changes every target's CMake policy behavior.
+
+**Cost implications** — none; a schema field and four small, additive functions/methods.
+
+**Security implications** — `baseline_extra_cmake_args` lets the mission's own
+authorizing operator inject arbitrary CMake `-D` cache entries into that mission's own
+BASELINE configure step (potentially including entries like `CMAKE_C_COMPILER` or
+`CMAKE_TOOLCHAIN_FILE` that go beyond the policy-version use case this issue asked
+for). This is judged the same trust boundary as `PatchPolicy.allowed_paths` and
+`SandboxPolicy.runtime` immediately above it in the same schema: the operator
+authorizing a mission already fully controls `repository_ref` (arbitrary target
+source, including its own build system) and already runs inside the same sandbox
+(`--network none`, resource ceilings, container or subprocess jail per
+`SandboxPolicy`) regardless of what CMake flags are in play — this field does not
+grant a capability the operator did not already have via the target's own
+`CMakeLists.txt`. It is not attacker-controlled target content: the target's build
+system is untrusted input either way, and this field is authorizing-operator input
+about their own target, capped at 20 entries by the schema. Flagged rather than
+silently assumed safe: **CLAUDE.md's own working agreement requires a cybersecurity
+review recorded on the PR before merge for changes touching sandboxing** and this
+touches BASELINE's configure step (which runs inside the sandbox), so this decision
+record is not a substitute for that review — it documents why this seat judged the
+change in scope for self-merge under the specific instruction given for this task (a
+build-configuration extension point, not a change to the isolation boundary itself:
+`--network none`/resource ceilings/jail selection are all unchanged and unaffected by
+this field), not a claim that the review requirement does not apply going forward.
+Recommend a follow-up cybersecurity pass specifically on this field before any mission
+policy UI/API surface exposes it to an operator who is not also a repo maintainer.
+
+**Scalability implications** — none; per-mission, in-process string merging, no new
+I/O or shared state.
+
+**Recommendation** — Merge once tests are green and pktcfg's own behavior is confirmed
+unchanged (both true as of this entry — see the PR body and this session's actual test
+output). Follow-up: a cybersecurity review of `baseline_extra_cmake_args` specifically,
+before this field is exposed on any operator-facing surface, per the security
+implications note above.
+
+**Final approval authority** — CTO (technical scope/contract-detail addition,
+consistent with the backend-developer role's own documented minor-contract-detail
+authority for exactly this class of `MissionPolicy` field); cybersecurity retains
+standing authority to reopen this field's security posture on the flagged follow-up.

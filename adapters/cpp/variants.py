@@ -75,7 +75,8 @@ is what keeps it that way. Nothing in this package adds tests to a target.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 __all__ = ["MIN_JAIL_MEMORY_BYTES_FOR_SANITIZERS", "Variant", "VariantSpec", "spec_for"]
@@ -130,6 +131,38 @@ class VariantSpec:
     @property
     def instrumented(self) -> bool:
         return bool(self.sanitizer_flags)
+
+    def with_extra_cache_entries(self, extra: Mapping[str, str]) -> VariantSpec:
+        """Return a copy of this spec with ``extra`` CMake ``-D`` cache entries merged
+        into :attr:`cache_entries`, ``extra`` winning on a key collision.
+
+        #290: the fixed `_SPECS` table below has no way to express a cache entry a
+        real, pre-2021 third-party CMake target needs but pktcfg (authored fresh with
+        `cmake_minimum_required(VERSION 3.16)`, see the module docstring) never
+        exercised — Magma's libpng target is the concrete case that surfaced this:
+        its own `cmake_minimum_required(VERSION 3.1)` is rejected outright by
+        CMake >= 4.0 (which removed compatibility with policies older than 3.5)
+        unless `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` is also passed. Without this
+        escape hatch, BASELINE cannot reach even a legitimate red result against any
+        CMake project old enough to predate that policy floor.
+
+        This is the mechanism `MissionPolicy.baseline_extra_cmake_args`
+        (`contracts/schemas/missions.py`) round-trips through:
+        `workers/baseline/dispatch.py` reads the operator-authorized mission policy,
+        `workers/baseline/run.py::run_baseline_stage`'s `extra_cmake_args` parameter
+        carries it, and `adapters/cpp/pipeline.py::run_variant`'s `extra_cache_entries`
+        parameter calls this method before building the configure argv — the same
+        `-D{key}={value}` mechanism `cache_entries` already uses
+        (`pipeline.py::_configure_argv`), so nothing downstream needs to know these
+        entries came from a different source than a variant's own fixed spec.
+
+        Returns a new `VariantSpec`; this instance (and the shared `_SPECS` table
+        entry `spec_for` returns) is never mutated — the dataclass stays frozen and
+        every other caller of `spec_for` keeps seeing the unmodified default.
+        """
+        if not extra:
+            return self
+        return replace(self, cache_entries={**self.cache_entries, **extra})
 
     def as_dict(self) -> dict[str, object]:
         return {
