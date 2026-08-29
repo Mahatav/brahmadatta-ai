@@ -115,6 +115,94 @@ def fuzz_image() -> str:
     return digest
 
 
+def _write_non_pktcfg_synthetic_target(root: Path, *, with_leak_harness: bool = False) -> None:
+    """A tiny, real CMake C project with option/target names deliberately unrelated to
+    pktcfg's — `SYNTH_SANITIZE`/`SYNTH_FUZZ`/`synth_fuzz`, mirroring exactly the
+    dogfooding repro this session hit against `stb_image` (`STB_SANITIZE`/`STB_FUZZ`/
+    `stb_fuzz`) and LAVA-M base64. Before #288's fix, `run_libfuzzer_campaign` always
+    emitted the literal `-DPKTCFG_SANITIZE=ON -DPKTCFG_FUZZ=ON`, which CMake silently
+    no-ops for a project that has no such option — `synth_fuzz` never gets built, and
+    `cmake --build ... --target synth_fuzz` fails with "No rule to make target".
+
+    `with_leak_harness` adds a second fuzz executable, `synth_leak_fuzz`, whose
+    `LLVMFuzzerTestOneInput` unconditionally leaks 64 bytes on every single input,
+    regardless of content — deterministic, real LeakSanitizer bait for #289's own
+    regression proof, independent of #288's harness-generalization proof.
+    """
+    (root / "fuzz").mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "corpus").mkdir(parents=True, exist_ok=True)
+    (root / "corpus" / "seed").write_bytes(b"hello")
+
+    cmakelists = """
+cmake_minimum_required(VERSION 3.16)
+project(synth C)
+set(CMAKE_C_STANDARD 11)
+
+option(SYNTH_SANITIZE "Build with ASan/UBSan" OFF)
+option(SYNTH_FUZZ "Build the libFuzzer harness(es)" OFF)
+
+add_library(synth STATIC src/lib.c)
+target_include_directories(synth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+if(SYNTH_SANITIZE)
+  set(SYNTH_SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+  target_compile_options(synth PUBLIC ${SYNTH_SAN_FLAGS})
+  target_link_options(synth PUBLIC ${SYNTH_SAN_FLAGS})
+endif()
+
+if(SYNTH_FUZZ)
+  target_compile_options(synth PRIVATE -fsanitize=fuzzer-no-link)
+
+  add_executable(synth_fuzz fuzz/harness.c)
+  target_link_libraries(synth_fuzz PRIVATE synth)
+  target_compile_options(synth_fuzz PRIVATE -fsanitize=fuzzer)
+  target_link_options(synth_fuzz PRIVATE -fsanitize=fuzzer)
+"""
+    if with_leak_harness:
+        cmakelists += """
+  add_executable(synth_leak_fuzz fuzz/leak_harness.c)
+  target_link_libraries(synth_leak_fuzz PRIVATE synth)
+  target_compile_options(synth_leak_fuzz PRIVATE -fsanitize=fuzzer)
+  target_link_options(synth_leak_fuzz PRIVATE -fsanitize=fuzzer)
+"""
+    cmakelists += "endif()\n"
+    (root / "CMakeLists.txt").write_text(cmakelists)
+
+    (root / "src" / "lib.c").write_text(
+        "#include <stddef.h>\n"
+        "#include <stdint.h>\n"
+        "int synth_process(const uint8_t *data, size_t size) {\n"
+        "    (void)data;\n"
+        "    return (int)size;\n"
+        "}\n"
+    )
+    (root / "fuzz" / "harness.c").write_text(
+        "#include <stddef.h>\n"
+        "#include <stdint.h>\n"
+        "int synth_process(const uint8_t *data, size_t size);\n"
+        "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n"
+        "    synth_process(data, size);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    if with_leak_harness:
+        (root / "fuzz" / "leak_harness.c").write_text(
+            "#include <stddef.h>\n"
+            "#include <stdint.h>\n"
+            "#include <stdlib.h>\n"
+            "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n"
+            "    (void)data;\n"
+            "    (void)size;\n"
+            "    // Deliberate, unconditional leak — real LeakSanitizer bait, on every\n"
+            "    // single input, independent of #288's harness-generalization proof.\n"
+            "    volatile void *leaked = malloc(64);\n"
+            "    (void)leaked;\n"
+            "    return 0;\n"
+            "}\n"
+        )
+
+
 @needs_real_fuzz_run
 def test_real_libfuzzer_campaign_finds_the_seeded_heap_overflow(fuzz_image: str) -> None:
     """The end-to-end path #189 exists to prove: a real pinned image, run through the
@@ -257,3 +345,124 @@ def test_run_fuzzing_stage_reports_cleanly_when_the_pinned_image_cannot_be_found
     assert outcome.mode == "NOT_RUN"
     assert outcome.failure is not None
     assert outcome.ran is False
+
+
+# ---------------------------------------------------------------------------------
+# #288/#289 — the same real, non-mocked path as the pktcfg tests above, driven against
+# a target that is deliberately NOT pktcfg (its own option/target names), the actual
+# proof this session's four-target dogfooding run asked for.
+# ---------------------------------------------------------------------------------
+
+
+@needs_real_fuzz_run
+def test_real_campaign_drives_a_non_pktcfg_target_and_reports_its_own_harness(
+    fuzz_image: str, tmp_path: Path
+) -> None:
+    """#288's real, end-to-end regression proof: a target whose CMake cache options and
+    fuzz target are named nothing like pktcfg's builds and runs successfully through the
+    exact same `run_fuzzing_stage` entry point pktcfg uses, and the reported harness
+    label matches what actually ran — never pktcfg's own default.
+
+    Before this fix, this call would have silently forced `-DPKTCFG_SANITIZE=ON
+    -DPKTCFG_FUZZ=ON` onto this project's configure step (which defines no such
+    options), so `cmake --build ... --target synth_fuzz` would fail with "No rule to
+    make target 'synth_fuzz'" — the exact `gmake: *** No rule to make target
+    'pktcfg_fuzz'`-shaped failure this session's stb_image dogfooding run hit.
+    """
+    synthetic_source = tmp_path / "synth-target"
+    synthetic_source.mkdir()
+    _write_non_pktcfg_synthetic_target(synthetic_source)
+
+    policy = ContainerJailPolicy(
+        image=fuzz_image, memory_mb=1024, cpu_limit=2.0, wall_clock_seconds=90.0
+    )
+
+    outcome = run_fuzzing_stage(
+        "test-288-non-pktcfg-target",
+        synthetic_source,
+        policy=policy,
+        harness_target="synth_fuzz",
+        harness_binary="synth_fuzz",
+        cache_entries={"SYNTH_SANITIZE": "ON", "SYNTH_FUZZ": "ON"},
+        budget_seconds=10,
+    )
+
+    assert outcome.mode == "LIVE_CAMPAIGN", (
+        f"expected a real campaign against the synthetic target, got mode="
+        f"{outcome.mode!r} failure={outcome.failure.as_dict() if outcome.failure else None}"
+    )
+    assert outcome.executions > 0, "libFuzzer reported zero executions against the synthetic target"
+    assert outcome.harness == "synth_fuzz", (
+        "a non-pktcfg target's reported harness must be its own, never pktcfg's default "
+        "(#288)"
+    )
+
+
+@needs_real_fuzz_run
+def test_real_campaign_suppresses_a_deliberate_leak_when_sanitizer_env_disables_it(
+    fuzz_image: str, tmp_path: Path
+) -> None:
+    """#289's real, end-to-end regression proof: a harness that leaks memory on every
+    single input (no real memory-safety crash anywhere in it) is, by default, reported
+    as `sanitizer_confirmed`-shaped evidence (a real `leak-*` artifact with its own
+    `SUMMARY: LeakSanitizer:` line) — and once leak detection is suppressed via
+    `sanitizer_env`, the identical harness runs clean for the same budget: no crash, no
+    artifact, `sanitizer_confirmed` is impossible to construct as True from this outcome.
+    """
+    synthetic_source = tmp_path / "synth-leak-target"
+    synthetic_source.mkdir()
+    _write_non_pktcfg_synthetic_target(synthetic_source, with_leak_harness=True)
+
+    policy = ContainerJailPolicy(
+        image=fuzz_image, memory_mb=1024, cpu_limit=2.0, wall_clock_seconds=90.0
+    )
+
+    # First: leak detection NOT suppressed — the leak is real and must be found, proving
+    # this is a genuine LeakSanitizer bait, not a scenario that never triggers at all.
+    unsuppressed = run_fuzzing_stage(
+        "test-289-leak-unsuppressed",
+        synthetic_source,
+        policy=policy,
+        harness_target="synth_leak_fuzz",
+        harness_binary="synth_leak_fuzz",
+        cache_entries={"SYNTH_SANITIZE": "ON", "SYNTH_FUZZ": "ON"},
+        budget_seconds=30,
+    )
+    assert unsuppressed.mode == "LIVE_CAMPAIGN", (
+        f"expected a real campaign, got mode={unsuppressed.mode!r} "
+        f"failure={unsuppressed.failure.as_dict() if unsuppressed.failure else None}"
+    )
+    assert unsuppressed.unique_crashes >= 1, (
+        "the deliberate leak was not detected at all — this harness is not a valid "
+        "LeakSanitizer regression fixture (adjust the budget/allocation, not the "
+        "assertion)"
+    )
+    assert "LeakSanitizer" in unsuppressed.run_output_excerpt
+
+    # Second: identical harness, `sanitizer_env` suppresses leak detection (#289's own
+    # fix) — the same leak must now report clean, no false "sanitizer_confirmed".
+    suppressed = run_fuzzing_stage(
+        "test-289-leak-suppressed",
+        synthetic_source,
+        policy=policy,
+        harness_target="synth_leak_fuzz",
+        harness_binary="synth_leak_fuzz",
+        cache_entries={"SYNTH_SANITIZE": "ON", "SYNTH_FUZZ": "ON"},
+        budget_seconds=15,
+        sanitizer_env={"ASAN_OPTIONS": "detect_leaks=0"},
+    )
+    assert suppressed.mode == "LIVE_CAMPAIGN", (
+        f"expected a real campaign, got mode={suppressed.mode!r} "
+        f"failure={suppressed.failure.as_dict() if suppressed.failure else None}"
+    )
+    assert suppressed.unique_crashes == 0, (
+        "a leak-only harness must report zero crashes once leak detection is "
+        "suppressed via sanitizer_env (#289)"
+    )
+    assert suppressed.crashes_found == 0
+    assert not suppressed.artifact_refs
+    sanitizer_confirmed = suppressed.ran and suppressed.crashes_found > 0 and bool(suppressed.sanitizers)
+    assert sanitizer_confirmed is False, (
+        "the D5 gate formula (workers/fuzzing/cli.py::build_fuzzing_record) must not be "
+        "constructible as sanitizer_confirmed=True from a suppressed leak"
+    )

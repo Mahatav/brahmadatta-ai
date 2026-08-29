@@ -3,14 +3,49 @@
 This is intentionally narrower than `pipeline.py`: it only answers #28 for the
 demo `pktcfg` target and similarly-shaped CMake targets that expose a libFuzzer
 harness behind a CMake cache option. Reproducer replay remains separate (#83).
+
+Generalizing beyond pktcfg (#288/#289/#291)
+--------------------------------------------
+Three related gaps, found by running this module's real entry points against four
+non-pktcfg targets (LAVA-M base64, Magma libpng, stb_image), fixed together here:
+
+* **#288** — `configure_argv` used to hardcode the literal CMake cache-option names
+  `-DPKTCFG_SANITIZE=ON -DPKTCFG_FUZZ=ON`, so a target with its own naturally-named
+  options (`STB_SANITIZE`/`STB_FUZZ`, say) silently failed to build its fuzz target at
+  all — CMake no-ops an unrecognized `-D` cache variable rather than erroring.
+  `run_libfuzzer_campaign` now takes a `cache_entries` mapping, exactly the shape
+  `adapters/cpp/variants.py::VariantSpec.cache_entries` already uses for BASELINE/
+  ASAN_UBSAN, defaulting to `DEFAULT_CACHE_ENTRIES` (pktcfg's own two options) so pktcfg
+  itself is completely unaffected. `harness_target`/`harness_binary` were already
+  parameters before this fix; what was missing was a way to override the *cache entries*
+  that make the target buildable in the first place.
+* **#289** — no way to pass sanitizer runtime environment (`ASAN_OPTIONS`, e.g.
+  `detect_leaks=0`) into the live campaign, unlike `pipeline.py::run_reproducer`, which
+  already applies `VariantSpec.runtime_env` for exactly this reason. `sanitizer_env` is
+  the equivalent knob here — opt-in (`None` by default, preserving pktcfg's prior
+  behaviour exactly: no extra env, same as before this parameter existed).
+* **#291** — `parse_libfuzzer_metrics` used to fold `slow-unit-*`/`timeout-*`/`oom-*`
+  artifacts into the same `crashes_found`/`unique_crashes` bucket as real `crash-*`/
+  `leak-*` sanitizer reports, and defaulted `sanitizers` to `("address", "undefined")`
+  whenever sanitizer text appeared *anywhere* in the session output, not tied to
+  whichever artifact actually stopped the run. Both are fixed by classifying each
+  discovered artifact by its libFuzzer-assigned kind (`_artifact_kind`) and only
+  crediting `crashes_found`/`unique_crashes`/`sanitizers` from the kinds
+  (`crash`, `leak`) that are actually sanitizer-relevant, gated on the *stopping*
+  artifact's own output carrying a `SUMMARY: ...Sanitizer:` line (`_stopping_artifact`).
+  A `slow-unit`/`timeout`/`oom` artifact remains visible on `artifact_paths` (it is
+  still real evidence of a hang/resource-limit finding) but never counts as a crash and
+  never sets `sanitizers`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import shutil
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +62,7 @@ from .errors import BuildStep, StepFailure, ToolchainError, first_error_line
 from .toolchain import ToolVersion, require_pinned
 
 __all__ = [
+    "DEFAULT_CACHE_ENTRIES",
     "FUZZ_ARTIFACT_DIR",
     "FUZZ_BUILD_DIR",
     "MAX_DURABLE_ARTIFACT_BYTES",
@@ -69,6 +105,65 @@ _SANITIZER_RE = re.compile(r"SUMMARY:\s*([A-Za-z]+Sanitizer):")
 _CMAKE_VERSION_RE = re.compile(r"cmake version\s+([0-9][0-9A-Za-z.\-+]*)")
 _CLANG_VERSION_RE = re.compile(r"(?:Apple clang|clang) version\s+([0-9][0-9A-Za-z.\-+]*)")
 
+#: Matches the libFuzzer-assigned artifact kind out of a discovered artifact's own
+#: (already workspace-relative) path — `crash-*`/`leak-*` are real sanitizer-relevant
+#: findings, `timeout-*`/`oom-*`/`slow-unit-*` are resource-limit artifacts (a hang or an
+#: allocation blowup, not necessarily a memory-safety defect). See `_artifact_kind` and
+#: the module docstring's "#291" section.
+_ARTIFACT_KIND_RE = re.compile(r"(?:^|/)(crash|leak|timeout|oom|slow-unit)-")
+
+#: Artifact kinds whose discovery is actually evidence of a sanitizer-relevant finding.
+#: `timeout`/`oom`/`slow-unit` are real findings too (CWE-400-shaped, typically) but are
+#: never memory-safety crashes on their own — #291's whole point.
+_SANITIZER_RELEVANT_KINDS = frozenset({"crash", "leak"})
+
+#: pktcfg's own CMake cache-entry names for turning on ASan/UBSan and building the
+#: libFuzzer harness target (`demo/repositories/pktcfg/CMakeLists.txt`'s `PKTCFG_SANITIZE`/
+#: `PKTCFG_FUZZ` options). This is the *default* value of `run_libfuzzer_campaign`'s
+#: `cache_entries` parameter — never a literal baked into the configure argv (#288) — so
+#: pktcfg keeps working identically while a target with its own naturally-named options
+#: (or none at all, driven entirely through generic `-DCMAKE_C_FLAGS=`/
+#: `-DCMAKE_EXE_LINKER_FLAGS=`, the way `adapters/cpp/pipeline.py::_configure_argv`
+#: already does for `VariantSpec.sanitizer_flags`) can pass its own mapping instead. Order
+#: matters only in that it reproduces pktcfg's own historical argv order exactly (dict
+#: insertion order, Python 3.7+).
+DEFAULT_CACHE_ENTRIES: Mapping[str, str] = {"PKTCFG_SANITIZE": "ON", "PKTCFG_FUZZ": "ON"}
+
+
+def _artifact_kind(path: str) -> str | None:
+    """The libFuzzer-assigned kind (`crash`/`leak`/`timeout`/`oom`/`slow-unit`) encoded in
+    a discovered artifact's file name, or `None` if it does not match any of them (never
+    silently treated as sanitizer-relevant when unrecognised)."""
+    match = _ARTIFACT_KIND_RE.search(path)
+    return match.group(1) if match else None
+
+
+def _stopping_artifact(discovered: set[str], output: str) -> str | None:
+    """Which discovered artifact actually stopped this campaign, for #291's "only the
+    stopping artifact's own output can confirm a sanitizer finding" rule.
+
+    In the common case there is at most one: a single `ContainerJail` run executes the
+    harness once and libFuzzer itself stops at the first crash/leak/timeout/OOM it hits,
+    so `discovered` has 0 or 1 entries. When there is more than one (a test double
+    supplying a pre-populated `artifact_paths`, or a merge-mode session this module does
+    not otherwise support), the artifact whose "Test unit written to ..."-style line
+    appears *last* in the captured output is the one that actually ended the run — session
+    output is append-only and libFuzzer writes that line immediately before exiting.
+    Falls back to the lexicographically last path when the output carries no such line at
+    all (nothing to order by), which is deterministic rather than arbitrary."""
+    if not discovered:
+        return None
+    if len(discovered) == 1:
+        return next(iter(discovered))
+    write_order = [
+        _normalize_crash_artifact(match.group("path").rstrip("'\""))
+        for match in _CRASH_RE.finditer(output)
+    ]
+    for path in reversed(write_order):
+        if path in discovered:
+            return path
+    return max(discovered)
+
 
 @dataclass(frozen=True, slots=True)
 class LibFuzzerMetrics:
@@ -80,7 +175,12 @@ class LibFuzzerMetrics:
     coverage: int = 0
     corpus_size: int = 0
     artifact_paths: tuple[str, ...] = ()
-    sanitizers: tuple[str, ...] = ("address", "undefined")
+    #: Populated only when a `crash`/`leak`-kind artifact actually stopped the run AND
+    #: that stopping artifact's own captured output carries a `SUMMARY: ...Sanitizer:`
+    #: line (#291) — empty otherwise, including for a clean run, a build/configure
+    #: failure (`LibFuzzerMetrics()`'s own bare default), and a `timeout`/`oom`/
+    #: `slow-unit` stop. Never defaults to "address"/"undefined" as a guess.
+    sanitizers: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -211,15 +311,29 @@ def parse_libfuzzer_metrics(
     for match in _CRASH_RE.finditer(output):
         discovered.add(_normalize_crash_artifact(match.group("path").rstrip("'\"")))
 
-    sanitizer_names = {
-        name.replace("Sanitizer", "").lower() for name in _SANITIZER_RE.findall(output)
+    # #291: only `crash`/`leak`-kind artifacts count as a crash. `timeout`/`oom`/
+    # `slow-unit` (and anything unrecognised) remain visible on `artifact_paths` — they
+    # are real evidence — but are never folded into `crashes_found`/`unique_crashes`.
+    sanitizer_relevant = {
+        path for path in discovered if _artifact_kind(path) in _SANITIZER_RELEVANT_KINDS
     }
-    sanitizers = tuple(sorted(sanitizer_names)) or ("address", "undefined")
+
+    # #291: `sanitizers` is only ever populated when the artifact that actually stopped
+    # the run is itself `crash`/`leak`-kind AND that run's own captured output contains a
+    # `SUMMARY: ...Sanitizer:` line — never "any sanitizer text anywhere in the session".
+    stopping = _stopping_artifact(discovered, output)
+    stopping_is_sanitizer_relevant = (
+        stopping is not None and _artifact_kind(stopping) in _SANITIZER_RELEVANT_KINDS
+    )
+    sanitizer_names = tuple(
+        sorted({name.replace("Sanitizer", "").lower() for name in _SANITIZER_RE.findall(output)})
+    )
+    sanitizers = sanitizer_names if stopping_is_sanitizer_relevant else ()
 
     return LibFuzzerMetrics(
         executions=executions,
-        crashes_found=len(discovered),
-        unique_crashes=len(discovered),
+        crashes_found=len(sanitizer_relevant),
+        unique_crashes=len(sanitizer_relevant),
         coverage=coverage,
         corpus_size=corpus_size,
         artifact_paths=tuple(sorted(discovered)),
@@ -241,12 +355,35 @@ def run_libfuzzer_campaign(
     *,
     harness_target: str = "pktcfg_fuzz",
     harness_binary: str = "pktcfg_fuzz",
+    cache_entries: Mapping[str, str] | None = None,
     corpus_dir: str = "corpus",
     budget_seconds: int = 1800,
     mission_ref: str = "libfuzzer",
     workspace_root: Path | str | None = None,
+    sanitizer_env: Mapping[str, str] | None = None,
 ) -> LibFuzzerRunResult:
     """Build and run a libFuzzer harness in a no-network container.
+
+    `cache_entries` (#288) is the same shape `adapters/cpp/variants.py::VariantSpec.
+    cache_entries` uses for BASELINE/ASAN_UBSAN: `-D<key>=<value>` CMake cache entries
+    applied at configure time. `None` (the default) uses `DEFAULT_CACHE_ENTRIES` —
+    pktcfg's own `PKTCFG_SANITIZE`/`PKTCFG_FUZZ` options — so this call is completely
+    unchanged for pktcfg. A target with its own naturally-named options (or none at all)
+    passes its own mapping instead of being forced to literally reuse pktcfg's names,
+    which is the #288 bug: CMake silently no-ops an unrecognised `-D` cache variable
+    rather than erroring, so a mismatched name looks like success until the build step
+    fails with "No rule to make target".
+
+    `sanitizer_env` (#289) is sanitizer runtime environment (`ASAN_OPTIONS`, e.g.
+    `"detect_leaks=0"`, mirroring `pipeline.py::run_reproducer`'s own `VariantSpec.
+    runtime_env` precedent) merged into the container's environment for every command run
+    in this campaign's sandbox, including the fuzz binary itself. `None` (the default)
+    adds nothing — pktcfg's behaviour is unchanged; without this, the very first
+    LeakSanitizer report a real target's harness produces is indistinguishable from a
+    genuine memory-safety crash (see the module docstring's "#289" note and this
+    parameter is what lets a caller suppress that class of false positive deliberately,
+    the same way `adapters/cpp/variants.py`'s `_ASAN_OPTIONS` does for the sanitized
+    baseline/reproducer path).
 
     `workspace_root` (D-106; mirrors `workers/baseline/run.py::run_baseline_stage`'s
     existing `workspace_root` parameter) is host-side scratch space that is NOT
@@ -264,6 +401,15 @@ def run_libfuzzer_campaign(
     source = Path(source_dir).resolve()
     if not source.is_dir():
         raise ToolchainError(f"source directory does not exist: {source}")
+
+    resolved_cache_entries = DEFAULT_CACHE_ENTRIES if cache_entries is None else cache_entries
+    if sanitizer_env:
+        # `ContainerJailPolicy.extra_env` (frozen) is fixed at `ContainerJail.create()`
+        # time and applies to every command this sandbox runs, not a per-`run()` env —
+        # `dataclasses.replace` is the only way to layer #289's caller-supplied sanitizer
+        # options on top of whatever the caller's own `policy.extra_env` already carries,
+        # without mutating the caller's policy object.
+        policy = dataclasses.replace(policy, extra_env={**policy.extra_env, **sanitizer_env})
 
     with ContainerJail.create(policy, mission_ref=mission_ref) as sandbox:
         target_source = sandbox.root / "source"
@@ -292,8 +438,7 @@ def run_libfuzzer_campaign(
             "-B",
             build_dir,
             "-DCMAKE_BUILD_TYPE=Debug",
-            "-DPKTCFG_SANITIZE=ON",
-            "-DPKTCFG_FUZZ=ON",
+            *(f"-D{key}={value}" for key, value in resolved_cache_entries.items()),
             "-DCMAKE_C_COMPILER=clang",
         ]
         configure = sandbox.run(configure_argv)
@@ -373,7 +518,11 @@ def run_libfuzzer_campaign(
             configure=configure,
             build=build,
             run=run,
-            events=tuple(_events_from_metrics(metrics, runtime_seconds=run.wall_seconds)),
+            events=tuple(
+                _events_from_metrics(
+                    metrics, runtime_seconds=run.wall_seconds, harness=harness_binary
+                )
+            ),
             durable_artifacts=durable_artifacts,
         )
 
@@ -548,7 +697,7 @@ def _failed_result(
 
 
 def _events_from_metrics(
-    metrics: LibFuzzerMetrics, *, runtime_seconds: float
+    metrics: LibFuzzerMetrics, *, runtime_seconds: float, harness: str
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -557,7 +706,7 @@ def _events_from_metrics(
                 "kind": "fuzzing",
                 "report": {
                     "mode": "LIVE_CAMPAIGN",
-                    "harness": "pktcfg_fuzz_one_input",
+                    "harness": harness,
                     "engine": "libFuzzer",
                     "runtime_seconds": runtime_seconds,
                     "executions": metrics.executions,
