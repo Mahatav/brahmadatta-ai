@@ -13,11 +13,12 @@ Two safety properties are expressed in the types rather than in validation code:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 #: Shape shared by `fuzz_harness_target`/`fuzz_harness_binary` below: a bare CMake
 #: target/binary name, never a path. `run_libfuzzer_campaign` (`adapters/cpp/fuzzing.
@@ -29,7 +30,41 @@ from pydantic import Field
 #: the schema boundary rather than producing a confusing "No rule to make target" or a
 #: `RUNTIME_OUTPUT_DIRECTORY`-relative path that does not mean what the operator
 #: intended.
+#:
+#: #313/D-174: the character class alone still let a bare `.` or `..` through (both
+#: legal single characters in `[A-Za-z0-9_.+-]`), and more generally any dot-only or
+#: dot-dot-containing value — traversal-shaped even though nothing downstream ever
+#: joins this into a filesystem path across a `/` today (the class never allowed `/`,
+#: so an actual `../..`-style escape was never reachable; this closes the character-
+#: level gap cybersecurity flagged in #312's review rather than a live exploit path).
+#: This character class is unchanged — the dot-traversal exclusion is enforced by
+#: `_validate_harness_names` below instead of by extending this pattern, because
+#: pydantic-core's regex engine (Rust `regex`, not Python `re`) does not support
+#: look-around, so `(?!\.+$)`/`(?!.*\.\.)` cannot live in a `Field(pattern=...)`
+#: string. The validator rejects a value that is nothing but dots (covers `.`, `..`,
+#: `...`, ...) and a value containing any `..` run anywhere, even inside an otherwise
+#: -legal name (`foo..bar`). A single dot used as a real separator (`foo.bar`) still
+#: passes, since CMake and the dogfooding targets this repo actually uses
+#: (`pktcfg_fuzz`, `njson_fuzz`, `synth_fuzz`, `synth_leak_fuzz`, `subdirsynth_fuzz`,
+#: `stb_fuzz` — none of which contain a dot at all) are unaffected either way.
 _HARNESS_NAME_PATTERN = r"^[A-Za-z0-9_.+-]{1,200}$"
+
+#: #313/D-174: allowlist for `fuzz_cache_entries`/`fuzz_sanitizer_env` *keys* only —
+#: values stay unrestricted (see those fields' own docstrings for why: legitimate
+#: CMake cache values and sanitizer-option strings are themselves arbitrary paths and
+#: option lists, e.g. `ASAN_OPTIONS=detect_leaks=0:log_path=/tmp/asan`). Every real key
+#: this codebase's own tests already send — `PKTCFG_SANITIZE`, `PKTCFG_FUZZ`,
+#: `NJSON_SANITIZE`, `NJSON_FUZZ`, `SYNTH_SANITIZE`, `SYNTH_FUZZ`,
+#: `SUBDIRSYNTH_SANITIZE`, `SUBDIRSYNTH_FUZZ`, `STB_SANITIZE`, `STB_FUZZ`,
+#: `ASAN_OPTIONS`, `CMAKE_POLICY_VERSION_MINIMUM`, `CMAKE_VERBOSE_MAKEFILE`, `FOO` —
+#: is a CMake-cache-variable-shaped or environment-variable-shaped identifier: starts
+#: with a letter or underscore, then letters/digits/underscores only. That is also
+#: exactly the shape that makes `CMAKE_TOOLCHAIN_FILE=/etc/passwd`-style keys (a key
+#: with an embedded `=`), whitespace, or shell-metacharacter keys impossible to express
+#: — not because argv-list execution needed the backstop (it already prevented shell
+#: interpretation, D-173), but because a key is supposed to name a variable, and
+#: nothing downstream has ever needed one that does not.
+_CACHE_KEY_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 
 from contracts.authorization import AuthorizationRecord
 from contracts.enums import (
@@ -163,6 +198,22 @@ class MissionPolicy(StrictSchema):
         "field changes nothing about pktcfg's existing behaviour. Added by #301, "
         "same authority note as `fuzz_harness_target` above.",
     )
+
+    @field_validator("fuzz_harness_target", "fuzz_harness_binary")
+    @classmethod
+    def _validate_harness_names(cls, value: str) -> str:
+        """#313/D-174: reject `.`, `..`, any dot-only value, and any value containing
+        a `..` run anywhere - path-traversal-shaped even though the character class
+        (`_HARNESS_NAME_PATTERN`) never allowed a `/` for an actual traversal to walk
+        across. Runs after the `pattern=` charset check, using Python `re` (which
+        supports the look-around pydantic-core's Rust regex engine does not)."""
+        if re.fullmatch(r"\.+", value) or ".." in value:
+            raise ValueError(
+                "must be a bare CMake target/binary name, not '.', '..', or any "
+                f"value containing a '..' run: {value!r}"
+            )
+        return value
+
     fuzz_cache_entries: dict[str, str] | None = Field(
         default=None,
         max_length=20,
@@ -176,7 +227,10 @@ class MissionPolicy(StrictSchema):
         "options — so a mission that does not set this field is byte-for-byte "
         "unaffected by #301. An explicit `{}` is a distinct, deliberate choice (no "
         "cache entries at all), not a synonym for `None`. Added by #301, same "
-        "authority note as `fuzz_harness_target` above.",
+        "authority note as `fuzz_harness_target` above. #313/D-174: keys are "
+        "validated against `_CACHE_KEY_PATTERN` (see `_validate_cache_entry_keys` "
+        "below); values are intentionally left unrestricted since a legitimate CMake "
+        "cache value is itself an arbitrary string or path.",
     )
     fuzz_sanitizer_env: dict[str, str] = Field(
         default_factory=dict,
@@ -187,8 +241,37 @@ class MissionPolicy(StrictSchema):
         "run_libfuzzer_campaign`'s `sanitizer_env` parameter, #289). Empty (the "
         "default) adds nothing — pktcfg's own prior behaviour, unaffected unless an "
         "operator sets this. Added by #301, same authority note as "
-        "`fuzz_harness_target` above.",
+        "`fuzz_harness_target` above. #313/D-174: keys are validated against "
+        "`_CACHE_KEY_PATTERN`, same as `fuzz_cache_entries`; values stay "
+        "unrestricted for the same reason (e.g. `ASAN_OPTIONS` values are "
+        "colon-separated option strings, not identifiers).",
     )
+
+    @field_validator("fuzz_cache_entries", "fuzz_sanitizer_env")
+    @classmethod
+    def _validate_cache_entry_keys(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        """#313/D-174: reject keys shaped like `CMAKE_TOOLCHAIN_FILE=/etc/passwd` —
+        i.e. containing `=`, whitespace, or any other shell/CMake metacharacter —
+        before they ever reach `run_libfuzzer_campaign`'s argv-list `-D<key>=<value>`
+        construction. Argv-list execution already prevents shell interpretation
+        (D-173); this is defense in depth so a malformed key fails loudly at the
+        schema boundary with a clear reason, rather than silently producing a
+        `-D<key>=<value>=<attacker-value>`-shaped cache entry that CMake itself would
+        have to reject (or worse, accept in some confusing way). Values are
+        deliberately not validated here — see the fields' own docstrings."""
+        if value is None:
+            return value
+        bad_keys = [key for key in value if not re.match(_CACHE_KEY_PATTERN, key)]
+        if bad_keys:
+            raise ValueError(
+                "cache entry keys must look like a CMake cache variable or "
+                "environment variable name (start with a letter or underscore, "
+                "then letters/digits/underscores only) — rejected: "
+                f"{bad_keys!r}"
+            )
+        return value
 
 
 class MissionCreateRequest(StrictSchema):

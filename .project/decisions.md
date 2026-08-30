@@ -19511,3 +19511,80 @@ not required, for a future PR.
 
 **Final approval authority** — cybersecurity (this review, severity/verdict, per this role's
 standing authority); CTO retains authority to arbitrate if this verdict is disputed.
+
+---
+
+## D-174 — MissionPolicy input hardening: dot-traversal-shaped harness names and
+unrestricted cache-entry/sanitizer-env keys · 2026-08-30 · `backend-developer` seat
+
+**Decision.** Implemented both defense-in-depth follow-ups D-173 recorded as non-blocking
+(#313): (1) `fuzz_harness_target`/`fuzz_harness_binary` now reject a bare `.`, `..`, any
+dot-only value, and any value containing a `..` run anywhere; (2)
+`fuzz_cache_entries`/`fuzz_sanitizer_env` now validate every *key* against a CMake-cache-
+variable/environment-variable-shaped allowlist (`^[A-Za-z_][A-Za-z0-9_]*$`), rejecting a key
+containing `=`, whitespace, or shell-metacharacters — closing the exact
+`CMAKE_TOOLCHAIN_FILE=/etc/passwd`/`LD_PRELOAD=...`-shaped gap D-173 confirmed live. Neither
+change alters behaviour for any value already used anywhere in this codebase's own test
+suites, confirmed by running them, not assumed.
+
+**Options considered.**
+1. *Extend `Field(pattern=...)` with negative lookaround* (`(?!\.+$)(?!.*\.\.)`) — tried
+   first; rejected. Pydantic v2/pydantic-core validates `pattern=` with the Rust `regex`
+   crate, which does not support look-around at all (`SchemaError: look-around ... is not
+   supported`) — confirmed by actually hitting the error, not by reading the crate's docs
+   secondhand. A `Field(pattern=...)` string is the wrong tool for this specific rule
+   regardless of language, since the property being expressed ("not dot-only, no `..` run")
+   is not itself a fixed-width regular language.
+2. *Move the whole `_HARNESS_NAME_PATTERN` charset check into a `field_validator` using
+   Python's `re`* (which does support look-around) — rejected as unnecessary churn: the
+   original charset check works fine as a `Field(pattern=...)`, is already correct, and
+   still needs to stay for the OpenAPI-documented constraint. Only the new dot-traversal
+   rule needed Python `re`'s look-around.
+3. **Keep `Field(pattern=...)` for the unchanged charset, add a separate `@field_validator`
+   for the dot-traversal rule (Python `re`, runs after the pattern check)** — adopted. Same
+   split for the cache-entry key allowlist: a `@field_validator` on both
+   `fuzz_cache_entries` and `fuzz_sanitizer_env` checking every key against
+   `_CACHE_KEY_PATTERN`, values left untouched.
+4. *A dedicated `CacheEntryKey`/`HarnessName` `Annotated` type reused across both fields* —
+   considered for the cache-key case (both fields share the identical rule); a single
+   `@field_validator("fuzz_cache_entries", "fuzz_sanitizer_env")` decorator achieves the same
+   sharing with less indirection for two fields, so the `Annotated` type was not worth the
+   extra abstraction at this scale. Revisit if a third field ever needs the same shape.
+
+**Pros and cons of each.** Option 1 is the most compact if it worked, but pydantic-core's
+regex engine genuinely does not support it — not a style preference, a hard capability gap.
+Option 2 would consolidate all name/key validation into Python `re`, trading the OpenAPI
+schema's own documented `pattern` string (still useful, still accurate for the charset it
+does check) for a less self-documenting "read the validator" contract. Option 3 keeps the
+OpenAPI-visible constraint honest for what it actually checks (the charset) while adding the
+narrower rule where it has to live; the tradeoff is that the OpenAPI dump does not fully
+describe the dot-traversal exclusion or the cache-key allowlist — both are only enforced at
+runtime and documented in the field's own docstring text (which the OpenAPI dump does
+include verbatim, so it is not undocumented, just not machine-checkable from the schema
+alone). Judged acceptable: this is API-internal input hardening the frontend does not need
+to pre-validate against (a rejected value round-trips as a normal 422/ValidationError either
+way), not a new contract shape a client needs to construct requests to satisfy in advance.
+
+**Cost implications** — none; pure validation logic, no new infrastructure or dependency.
+
+**Security implications** — closes the two specific gaps D-173 recorded, both confirmed
+still non-exploitable before this change (argv-list execution only, no shell interpolation
+anywhere in either field's consumption path — unchanged by this PR) and now also closed at
+the schema boundary as defense in depth, per D-173's own framing ("worth tightening if this
+surface grows"). Cache-entry/sanitizer-env *values* remain deliberately unrestricted — a
+legitimate CMake cache value or sanitizer option string is itself an arbitrary path/option
+list (e.g. `ASAN_OPTIONS=detect_leaks=0:log_path=/tmp/asan.log`), and the same operator-trust
+boundary already accepted for `baseline_extra_cmake_args` (#290) and the pre-#313 shape of
+these two fields (#301) still applies to values; only keys — which are supposed to name a
+variable, never carry a value's own content — are constrained.
+
+**Scalability implications** — none.
+
+**Recommendation** — Merge once tests are green (they are — see PR). This is input-
+validation hardening on an already-reviewed, already-non-exploitable surface (D-173); no new
+cybersecurity review is required to close #313 itself, though normal PR review remains open
+to any agent who wants to look.
+
+**Final approval authority** — CTO (technical; standing authority already granted per
+CLAUDE.md's "Claude has standing authority to merge PRs once gates pass" for a non-blocking
+hardening follow-up with no contract or architecture change).

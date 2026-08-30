@@ -1722,7 +1722,7 @@
                 "type": "null"
               }
             ],
-            "description": "CMake `-D<key>=<value>` cache entries FUZZ's configure step applies (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `cache_entries` parameter) — the target's own naturally-named sanitizer/fuzz-enable options (e.g. `{\"STB_SANITIZE\": \"ON\", \"STB_FUZZ\": \"ON\"}` for a target that does not use pktcfg's `PKTCFG_*` names). `None` (the default, and the only value that reproduces pktcfg's exact prior behaviour) defers to `run_libfuzzer_campaign`'s own `DEFAULT_CACHE_ENTRIES` — pktcfg's two options — so a mission that does not set this field is byte-for-byte unaffected by #301. An explicit `{}` is a distinct, deliberate choice (no cache entries at all), not a synonym for `None`. Added by #301, same authority note as `fuzz_harness_target` above.",
+            "description": "CMake `-D<key>=<value>` cache entries FUZZ's configure step applies (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `cache_entries` parameter) — the target's own naturally-named sanitizer/fuzz-enable options (e.g. `{\"STB_SANITIZE\": \"ON\", \"STB_FUZZ\": \"ON\"}` for a target that does not use pktcfg's `PKTCFG_*` names). `None` (the default, and the only value that reproduces pktcfg's exact prior behaviour) defers to `run_libfuzzer_campaign`'s own `DEFAULT_CACHE_ENTRIES` — pktcfg's two options — so a mission that does not set this field is byte-for-byte unaffected by #301. An explicit `{}` is a distinct, deliberate choice (no cache entries at all), not a synonym for `None`. Added by #301, same authority note as `fuzz_harness_target` above. #313/D-174: keys are validated against `_CACHE_KEY_PATTERN` (see `_validate_cache_entry_keys` below); values are intentionally left unrestricted since a legitimate CMake cache value is itself an arbitrary string or path.",
             "title": "Fuzz Cache Entries"
           },
           "fuzz_harness_binary": {
@@ -1743,7 +1743,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Sanitizer runtime environment (e.g. `{\"ASAN_OPTIONS\": \"detect_leaks=0\"}`) merged into FUZZ's container environment for the live campaign (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `sanitizer_env` parameter, #289). Empty (the default) adds nothing — pktcfg's own prior behaviour, unaffected unless an operator sets this. Added by #301, same authority note as `fuzz_harness_target` above.",
+            "description": "Sanitizer runtime environment (e.g. `{\"ASAN_OPTIONS\": \"detect_leaks=0\"}`) merged into FUZZ's container environment for the live campaign (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `sanitizer_env` parameter, #289). Empty (the default) adds nothing — pktcfg's own prior behaviour, unaffected unless an operator sets this. Added by #301, same authority note as `fuzz_harness_target` above. #313/D-174: keys are validated against `_CACHE_KEY_PATTERN`, same as `fuzz_cache_entries`; values stay unrestricted for the same reason (e.g. `ASAN_OPTIONS` values are colon-separated option strings, not identifiers).",
             "maxProperties": 20,
             "title": "Fuzz Sanitizer Env",
             "type": "object"
