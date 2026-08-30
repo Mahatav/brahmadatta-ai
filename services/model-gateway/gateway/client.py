@@ -11,7 +11,7 @@ import http.client
 import json
 from collections.abc import Iterator
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from gateway.errors import LiveGenerationError
@@ -48,12 +48,33 @@ from gateway.errors import LiveGenerationError
 #: real defect behind a retry instead of surfacing it. `IncompleteRead` (like the three
 #: exceptions already here) is unambiguously about the remote end, never about this
 #: module's own request-building.
+#:
+#: #298: `urllib.error.HTTPError` is a subclass of `URLError` (verified:
+#: `HTTPError.__mro__` includes `URLError` and `OSError` on every Python version this
+#: project runs), so it was ALREADY being caught by the `URLError` branch above before
+#: this fix — but `_transport_error` below only ever called `str(exc)` on it, which for
+#: an `HTTPError` is just `"HTTP Error 500: Internal Server Error"` (the status line),
+#: never the response body. Ollama returns its actual, actionable error — e.g. `{"error":
+#: "model requires more system memory (8.4 GiB) than is available (7.7 GiB)"}` — as a
+#: JSON body on exactly this kind of non-2xx response, and that body was being read
+#: nowhere and discarded. Found live: #298, a real HTTP 500 from `codellama:7b-instruct`
+#: exceeding this dev machine's `model-host` memory allocation, surfaced to the operator
+#: as an opaque "did not respond" transport error instead of the specific, actionable
+#: reason Ollama already provided. `HTTPError` is not added to this tuple (it already
+#: matched via `URLError`); `_transport_error` now special-cases it to read and surface
+#: that body instead of discarding it.
 _TRANSPORT_EXCEPTIONS: tuple[type[Exception], ...] = (
     TimeoutError,
     URLError,
     OSError,
     http.client.IncompleteRead,
 )
+
+#: #298: read at most this many bytes of an HTTP error body. Ollama's own error bodies
+#: are a small JSON object; this bound exists only so a misbehaving or malicious
+#: endpoint returning an enormous error body cannot make this chokepoint buffer an
+#: unbounded amount of memory while composing an error message about a capacity problem.
+_MAX_ERROR_BODY_BYTES = 8192
 
 
 def post_json(
@@ -118,6 +139,8 @@ def iter_response_lines(
 
 
 def _transport_error(url: str, timeout_sec: float, exc: Exception) -> LiveGenerationError:
+    if isinstance(exc, HTTPError):
+        return _http_error(url, timeout_sec, exc)
     if isinstance(exc, TimeoutError):
         reason = f"timed out after {timeout_sec:.0f}s"
     else:
@@ -126,6 +149,54 @@ def _transport_error(url: str, timeout_sec: float, exc: Exception) -> LiveGenera
         f"local model endpoint at {url!r} did not respond: {reason}.",
         details={"url": url, "timeout_sec": timeout_sec, "cause": type(exc).__name__},
     )
+
+
+def _http_error(url: str, timeout_sec: float, exc: HTTPError) -> LiveGenerationError:
+    """#298: the endpoint DID respond — with a non-2xx status and (for Ollama at
+    least) a JSON body naming the real reason, e.g. an OOM/capacity refusal. Read and
+    surface that body instead of the generic transport wording above, which reduced
+    every one of these to a status line and threw the actual reason away.
+
+    `exc.read()` is safe to call exactly once here: `urlopen` raises `HTTPError`
+    before this chokepoint's own `except` block ever touches the response, so nothing
+    upstream of this function has consumed the body first.
+    """
+    try:
+        raw_body = exc.read(_MAX_ERROR_BODY_BYTES + 1)
+    except OSError:
+        raw_body = b""
+    truncated = len(raw_body) > _MAX_ERROR_BODY_BYTES
+    body_text = raw_body[:_MAX_ERROR_BODY_BYTES].decode("utf-8", errors="replace")
+    if truncated:
+        body_text += " …(truncated)"
+
+    detail_text = _http_error_detail_text(body_text) or (exc.reason or "no response body")
+    return LiveGenerationError(
+        f"local model endpoint at {url!r} returned HTTP {exc.code}: {detail_text}",
+        details={
+            "url": url,
+            "timeout_sec": timeout_sec,
+            "cause": "HTTPError",
+            "http_status": exc.code,
+            "response_body": body_text,
+        },
+    )
+
+
+def _http_error_detail_text(body_text: str) -> str:
+    """Pull Ollama's own `{"error": "..."}` shape out of an HTTP error body when
+    present; fall back to the raw body text for any other JSON or non-JSON shape so
+    nothing about a body this chokepoint does not specifically recognise is lost."""
+    stripped = body_text.strip()
+    if not stripped:
+        return ""
+    try:
+        decoded = json.loads(stripped)
+    except json.JSONDecodeError:
+        return stripped
+    if isinstance(decoded, dict) and isinstance(decoded.get("error"), str):
+        return decoded["error"]
+    return stripped
 
 
 def _auth_headers(bearer_token: str | None) -> dict[str, str]:

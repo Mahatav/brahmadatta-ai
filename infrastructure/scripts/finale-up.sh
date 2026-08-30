@@ -184,5 +184,30 @@ if command -v pgrep >/dev/null 2>&1; then
   fi
 fi
 
+# #298: same soft/informational shape as the fuzz-worker note above. `model-host` is
+# `profiles: ["model"]`-gated — this script's own `${finale_profiles[@]}` never
+# includes it, and per this script's own `--profile` placement constraint (see the
+# "validating the finale configuration" comment above: `--profile` must precede the
+# subcommand, so `"$@"` — appended AFTER `config`/`up` throughout this script — could
+# not carry `--profile model` even if an operator tried), the only way `model-host`
+# is running here is a separate, independent `docker compose --profile model up -d`
+# against this same project. Checked directly by container name (not `docker compose
+# ps`, which is scoped to the CURRENT invocation's active profiles and would not see
+# a service started under a different one) so this note still fires either way.
+model_host_container="${COMPOSE_PROJECT_NAME:-brahmadatta-finale}-model-host"
+if docker ps --filter "name=^${model_host_container}$" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -qx "${model_host_container}"; then
+  echo "  note: ${model_host_container} is up. Before a mission depends on it, run the" >&2
+  echo "        #298 memory pre-flight explicitly — this is NOT part of this script or" >&2
+  echo "        model-host's own healthcheck (see docker-compose.finale.yml's model-host" >&2
+  echo "        comment for why: ollama list proves the server answers, not that the" >&2
+  echo "        model fits in MODEL_HOST_MEM_LIMIT):" >&2
+  echo "        python -m gateway.tools.model_prep doctor --check-memory \\" >&2
+  echo "          --endpoint http://model-host:11434/api --bearer-token \"\${MODEL_HOST_BEARER_TOKEN}\"" >&2
+  echo "        A clear 'insufficient-memory' result here is a capacity decision for" >&2
+  echo "        whoever owns this hardware (model choice / MODEL_HOST_MEM_LIMIT / host" >&2
+  echo "        RAM, tracked in .project/decisions.md — not resolved by this script) —" >&2
+  echo "        not something to discover live during a mission." >&2
+fi
+
 echo
 echo "  Rollback:  docs/06-operations/71-ingress-and-proxy-contract.md §7"

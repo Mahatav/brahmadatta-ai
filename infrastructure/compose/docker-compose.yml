@@ -373,6 +373,24 @@ services:
       # Unaffected by the loopback-only bind: `ollama list` execs inside this same
       # container/namespace, which always reaches its own loopback regardless of what
       # the external interface exposes.
+      #
+      # #298: this proves the Ollama SERVER is up; it does not, and deliberately does
+      # not, prove the CONFIGURED MODEL actually fits in the memory `mem_limit`
+      # (above) gives this container. That is a real, live-observed failure mode —
+      # Ollama returns a genuine HTTP 500 ("model requires more system memory than is
+      # available") only once something actually tries to load the model — and the
+      # only way to check it ahead of time is to trigger a real (cold, ~60-190s)
+      # model load, which does not belong in a `healthcheck:` polled every 10s with
+      # retries: a failing model would mean this stack retries a slow cold load
+      # ~12 times before giving up, and a passing one would keep the model loaded and
+      # re-probed on every interval instead of being released between missions
+      # (`keep_alive`, D-123/D-125). Run
+      # `python -m gateway.tools.model_prep doctor --check-memory` once, explicitly,
+      # after this container is healthy and before a mission depends on it — see that
+      # command's own `plan` subcommand for the full operator sequence. This is a
+      # capacity check, not a liveness check; a failure here is Mahatav's call
+      # (model choice / MODEL_HOST_MEM_LIMIT / host RAM), not something this compose
+      # file or the gateway can fix by retrying.
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s

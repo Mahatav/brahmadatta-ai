@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 
@@ -15,6 +17,11 @@ from gateway.ollama import (
     patch_candidate_from_model_text,
 )
 from gateway.schemas import GenerationRequest
+
+
+def _ollama_http_error(status: int, body: dict[str, Any], *, reason: str = "Internal Server Error") -> HTTPError:
+    payload = json.dumps(body).encode("utf-8")
+    return HTTPError("http://127.0.0.1:11434/api/chat", status, reason, None, io.BytesIO(payload))
 
 
 class FakeHTTPResponse:
@@ -148,6 +155,66 @@ def test_ollama_backend_default_timeout_matches_the_named_constant() -> None:
     fix is only true for callers that go through settings."""
     assert OllamaCodeLlamaBackend().timeout_sec == DEFAULT_OLLAMA_TIMEOUT_SECONDS
     assert DEFAULT_OLLAMA_TIMEOUT_SECONDS == 300.0
+
+
+def test_ollama_backend_surfaces_actionable_error_on_memory_capacity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """#298, live-observed: Ollama refuses to load `codellama:7b-instruct` with a real
+    HTTP 500 because the model-host container's actual memory is smaller than the
+    model needs. Before this fix, this reached `PATCH_GENERATE` as an opaque
+    "did not respond" transport error deep inside a live generation call — this test
+    is the regression guard that the failure is now a clear, actionable
+    `LiveGenerationError` instead: it names the model, the required and available
+    amounts, states plainly that a retry will not help, and points at the one compose
+    knob (`MODEL_HOST_MEM_LIMIT`) an operator would actually check.
+    """
+
+    def fake_urlopen(request: Any, timeout: float) -> Any:
+        raise _ollama_http_error(
+            500,
+            {"error": "model requires more system memory (8.4 GiB) than is available (7.7 GiB)"},
+        )
+
+    monkeypatch.setattr("gateway.client.urlopen", fake_urlopen)
+
+    with pytest.raises(LiveGenerationError) as excinfo:
+        OllamaCodeLlamaBackend().generate(request_)
+
+    message = str(excinfo.value)
+    assert "8.4 GiB" in message
+    assert "7.7 GiB" in message
+    assert "MODEL_HOST_MEM_LIMIT" in message
+    assert DEFAULT_CODELLAMA_MODEL in message
+    assert "retrying will not help" in message
+
+    assert excinfo.value.details["capacity_error"] is True
+    assert excinfo.value.details["model_required"] == "8.4 GiB"
+    assert excinfo.value.details["model_available"] == "7.7 GiB"
+    assert excinfo.value.details["model_name"] == DEFAULT_CODELLAMA_MODEL
+    # The original, now-surfaced Ollama detail (#298's `gateway.client` fix) is still
+    # present underneath the friendlier message, not thrown away a second time.
+    assert excinfo.value.details["http_status"] == 500
+
+
+def test_ollama_backend_does_not_rewrite_unrelated_server_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    request_: GenerationRequest,
+) -> None:
+    """The capacity-specific rewrap must only fire for the one specific, recognised
+    Ollama wording — every other server error still reaches the caller as the
+    (#298-fixed, now body-surfacing) generic `LiveGenerationError`, unrewritten."""
+
+    def fake_urlopen(request: Any, timeout: float) -> Any:
+        raise _ollama_http_error(500, {"error": "an unrelated ollama failure"})
+
+    monkeypatch.setattr("gateway.client.urlopen", fake_urlopen)
+
+    with pytest.raises(LiveGenerationError, match="an unrelated ollama failure") as excinfo:
+        OllamaCodeLlamaBackend().generate(request_)
+
+    assert "capacity_error" not in excinfo.value.details
 
 
 def test_ollama_candidate_parser_accepts_json_inside_text() -> None:

@@ -19056,3 +19056,133 @@ tradeoff with a hardened `dev-up.sh` check to compensate) or a compose-structura
 deployment-configuration changes per CLAUDE.md); CTO/cybersecurity for the
 `MODEL_HOST_BEARER_TOKEN` follow-up specifically, since that one has a real security
 dimension this fix does not resolve.
+
+## D-171
+
+**Decision** — Fix #298's *failure mode*, not its root cause: when Ollama refuses to
+load `codellama:7b-instruct` because the model-host container's actual memory is
+smaller than the model needs, surface that as a clear, actionable error at the
+earliest point available (an explicit, opt-in operator preflight command) and as a
+clear, actionable error if it still happens live — never again as a bare, opaque HTTP
+500 discovered mid-`PATCH_GENERATE`. **This decision explicitly does NOT resolve
+whether the real competition machine has enough memory for this model** — that is a
+hardware/resource-allocation call (more RAM, a smaller/quantized model, or a
+`MODEL_HOST_MEM_LIMIT` tradeoff) only Mahatav can make, tracked separately below.
+
+**Root cause (out of scope for this fix, restated for the record)** — `codellama:
+7b-instruct` needs ~8.4 GiB resident; this dev machine's Docker allocation for
+`model-host` only frees 7.7 GiB. D-123 already flagged this exact memory-capacity
+boundary as a pending, not-yet-resolved question; #298 is that same boundary
+producing a real, live HTTP 500 from Ollama (`"model requires more system memory
+(8.4 GiB) than is available (7.7 GiB)"`) rather than a theoretical sizing concern.
+**This entry does not decide the competition machine's actual available RAM, does not
+pick a smaller/quantized model, and does not change `MODEL_HOST_MEM_LIMIT`'s value or
+default (`8g`) in either compose file.** All three remain D-123's and Mahatav's open
+question. If the real competition machine has comparable or lower available memory to
+this dev machine, PATCH_GENERATE will still fail for a capacity reason — it will just
+fail with a message an operator can act on, at the earliest point this fix could put
+one, instead of a bare 500 with no context.
+
+**What was actually swallowed, found reading the code (not assumed)** —
+`gateway.client.post_json`/`get_json`/`iter_response_lines` already caught
+`urllib.error.HTTPError` before this fix (confirmed: `HTTPError.__mro__` puts it under
+`URLError`, already in `_TRANSPORT_EXCEPTIONS`), but `_transport_error` only ever
+called `str(exc)` on it — `"HTTP Error 500: Internal Server Error"`, the status line
+only. Ollama's actual, actionable reason arrives as a JSON body
+(`{"error": "model requires more system memory (8.4 GiB) than is available (7.7
+GiB)"}`) on exactly this kind of response, and that body was read nowhere. This is
+the concrete mechanism behind "a confusing mid-generation HTTP 500 from deep inside a
+patch-generation call" named in this issue: the useful information was already being
+sent by Ollama and thrown away one layer below where anyone could see it.
+
+**Options considered**
+1. Change the model, or lower `MODEL_HOST_MEM_LIMIT`'s competing allocation, or ask
+   for more competition-machine RAM. — Rejected for THIS fix by explicit scope: all
+   three are real tradeoffs (cost, latency, schedule, hardware access) that belong to
+   whoever owns the competition hardware, not something to pick unilaterally while
+   fixing error handling. Doing so here would also hide the fact that a decision is
+   still needed, by making the symptom go away on this one dev machine without
+   confirming the competition machine is any different.
+2. Add a static pre-flight that compares the model's on-disk/manifest size (Ollama's
+   own `/api/show` or `/api/tags` `size` field) against the container's memory limit
+   or `/proc/meminfo`, computed by this codebase itself. — Rejected: Ollama's real
+   resident-memory need is not simply the model file's size (it includes context
+   window, KV cache, and runtime overhead that vary by request shape and Ollama
+   version) — that is exactly why the file size and the observed 8.4 GiB in this
+   issue differ. A self-computed estimate risks being confidently wrong in either
+   direction; Ollama's own real load attempt is the only check that asks the actual
+   question ("does this specific load fit") rather than an approximation of it.
+3. **Chosen, two parts**: (a) stop discarding Ollama's own HTTP error body in
+   `gateway.client`, so any server-reported reason (this one and any Ollama returns
+   in the future) reaches the caller instead of a generic transport-failure string;
+   (b) recognise this one specific, high-value wording in `gateway.ollama` and turn
+   it into an explicit, named capacity error with the required/available amounts and
+   `MODEL_HOST_MEM_LIMIT` named as the compose knob to check — real information
+   Ollama already computed, not a guess this codebase makes independently.
+4. Fold a real memory-triggering generation call into `model-host`'s own `healthcheck:`
+   (polled every 10s, 12 retries). — Rejected: a cold model load is ~60-190s
+   (D-123, confirmed live); a failing model would mean Docker retries a slow cold
+   load repeatedly before giving up, and a passing one would keep re-probing (and
+   per D-123/D-125's `keep_alive` reasoning, keeping the model resident) on every
+   interval instead of being released between missions. This is a capacity check,
+   not a liveness check, and does not belong on a liveness cadence.
+5. **Chosen**: add `--check-memory` (opt-in, off by default) to the existing
+   `gateway.tools.model_prep doctor` command — this repo's one existing "run this
+   explicitly before you trust the model host" idiom (already step 2 of
+   `model_prep.py plan`'s printed operator sequence) — which makes one real, minimal
+   generation call to force Ollama's own memory check to run once, on demand, instead
+   of on every healthcheck poll. Reference it from both compose files' `model-host`
+   healthcheck comments and from `finale-up.sh`'s post-start assertions (a soft,
+   informational reminder, mirroring the existing `fuzz-worker` reminder there — never
+   a hard `fail`, since `model-host` is `profiles: ["model"]`-gated and not part of
+   `finale-up.sh`'s own default profile set).
+
+**Pros and cons** — Pro: the fix is entirely within this role's authority (error
+handling and diagnosability, not model choice or memory allocation); every existing
+caller of `gateway.client`'s three functions benefits from the body-surfacing fix, not
+just the one Ollama-specific wording; the capacity-specific rewrap in `gateway.ollama`
+only fires on the one recognised pattern (regression-tested to confirm unrelated
+5xx errors are NOT rewritten) so nothing about an unrelated failure is mislabeled.
+Con: `--check-memory` is opt-in, not automatic — an operator who never runs it (or
+never reads `finale-up.sh`'s reminder) gets no earlier warning than before; this is a
+deliberate tradeoff (a real, possibly-190s side-effecting call must not run on every
+routine `doctor` invocation) but it does mean this fix cannot, by itself, force the
+early warning to happen — it only makes the warning clear and actionable once someone
+asks for it, or once a live mission hits it for real.
+
+**Cost implications** — none. No infrastructure, model, or memory-limit change.
+
+**Security implications** — none. `gateway.client._http_error` bounds how much of an
+error body it reads (`_MAX_ERROR_BODY_BYTES = 8192`) specifically so a misbehaving or
+malicious endpoint returning an oversized error body cannot turn this into an
+unbounded-memory read while composing an error message about a memory problem.
+`LiveGenerationError.details["response_body"]` carries only server-generated error
+text, never a request header or the bearer token (`OllamaCodeLlamaBackend.
+bearer_token` remains `repr=False` and is not part of the response body this fix
+reads).
+
+**Scalability implications** — none directly. Indirectly: this fix does not change
+whether `codellama:7b-instruct` fits on any given host; it only changes what an
+operator learns when it does not, and when they learn it.
+
+**Explicitly unresolved by this entry, still needing Mahatav's input** — the real
+question issue #298 raises: does the actual AI Kavach competition machine have
+enough available memory for `model-host`'s configured model, with headroom for the
+rest of the stack running concurrently? If it is tight or unknown, the real choices
+remain (a) a smaller/quantized model, (b) reducing `MODEL_HOST_MEM_LIMIT`'s competing
+allocation elsewhere, or (c) more RAM on that machine if that is controllable — none
+of which this entry or its code changes decide. D-123's own memory-capacity question
+is likewise still open. Recommended next step: run
+`python -m gateway.tools.model_prep doctor --check-memory` (this fix's new command)
+against the actual competition hardware, while it is still reachable for changes,
+rather than finding out live.
+
+**Recommendation** — Merge now (diagnostics/error-handling, not a sandbox-isolation
+or architecture change; self-merge authority per this role's scope). Escalate the
+restated root-cause question above to Mahatav explicitly, separately from this PR,
+before the competition machine is finalized.
+
+**Final approval authority** — devops (this fix: error handling, diagnosability,
+compose/script documentation — standing self-merge authority per CLAUDE.md). Mahatav
+(the actual memory-capacity/model-choice/hardware decision this fix deliberately does
+not make).
