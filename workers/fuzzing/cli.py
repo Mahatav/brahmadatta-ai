@@ -6,7 +6,17 @@ instant the campaign returned — even though this CLI's own JSON `artifact_refs
 claimed one existed. `--workspace-root` (default `DEFAULT_WORKSPACE`, mirroring
 `workers/replay/cli.py`'s identical `--workspace`/`DEFAULT_WORKSPACE` pattern) fixes the
 one-call-site wiring gap; `run_fuzzing_stage`/`run_libfuzzer_campaign` already handled a
-supplied `workspace_root` correctly (D-106) — nothing else needed to change."""
+supplied `workspace_root` correctly (D-106) — nothing else needed to change.
+
+#301: `--harness-target`/`--harness-binary`/`--cache-entry`/`--sanitizer-env` expose
+`run_fuzzing_stage`'s own same-named parameters (already real since #296/#288/#289) to
+an operator running this CLI directly against a non-pktcfg target — before this, the
+only way to drive a second target through this stage at all was to bypass this CLI and
+call `run_fuzzing_stage` from a one-off script, exactly what the #301 dogfooding session
+had to do. Every one of these flags defaults to pktcfg's own values (unset
+`--cache-entry`/`--sanitizer-env` mean "use `run_libfuzzer_campaign`'s own default /
+no extra env," not an empty override), so a pktcfg invocation with none of these flags
+is completely unaffected."""
 
 from __future__ import annotations
 
@@ -23,10 +33,34 @@ from workers.fuzzing.run import FuzzingOutcome, emit_fuzzing_events, run_fuzzing
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE = REPO_ROOT / "demo" / "repositories" / "pktcfg"
 DEFAULT_WORKSPACE = REPO_ROOT / ".d5-fuzz-workspace"
+DEFAULT_HARNESS_TARGET = "pktcfg_fuzz"
+DEFAULT_HARNESS_BINARY = "pktcfg_fuzz"
+
+
+def _parse_kv_pairs(pairs: list[str] | None, *, flag: str) -> dict[str, str]:
+    """Parse repeated `KEY=VALUE` arguments into a dict, in the order given (a later
+    duplicate key wins, matching how `dict()` construction already behaves for
+    `MissionPolicy.fuzz_cache_entries`/`fuzz_sanitizer_env`, #301)."""
+    result: dict[str, str] = {}
+    for pair in pairs or ():
+        if "=" not in pair:
+            raise argparse.ArgumentTypeError(f"{flag} expects KEY=VALUE, got: {pair!r}")
+        key, _, value = pair.partition("=")
+        if not key:
+            raise argparse.ArgumentTypeError(f"{flag} expects a non-empty KEY, got: {pair!r}")
+        result[key] = value
+    return result
 
 
 def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout, stderr: TextIO = sys.stderr) -> int:
     args = _parser().parse_args(argv)
+
+    try:
+        cache_entries = _parse_kv_pairs(args.cache_entry, flag="--cache-entry") or None
+        sanitizer_env = _parse_kv_pairs(args.sanitizer_env, flag="--sanitizer-env") or None
+    except argparse.ArgumentTypeError as exc:
+        print(str(exc), file=stderr)
+        return 2
 
     try:
         outcome = run_fuzzing_stage(
@@ -39,8 +73,12 @@ def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout, stderr: 
                 memory_mb=args.memory_mb,
                 cpu_limit=args.cpu_limit,
             ),
+            harness_target=args.harness_target,
+            harness_binary=args.harness_binary,
+            cache_entries=cache_entries,
             budget_seconds=args.budget_seconds,
             workspace_root=args.workspace_root,
+            sanitizer_env=sanitizer_env,
         )
     except Exception as exc:
         print(f"D5 fuzzing gate failed to run: {exc}", file=stderr)
@@ -103,6 +141,45 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None, help="Optional JSON evidence output path.")
     parser.add_argument("--events", action="store_true", help="Include mission events.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    parser.add_argument(
+        "--harness-target",
+        default=DEFAULT_HARNESS_TARGET,
+        help=(
+            "#301: the CMake target name to build (`cmake --build ... --target "
+            "<this>`). Default is pktcfg's own target name — unset, this flag "
+            "changes nothing about the pktcfg invocation."
+        ),
+    )
+    parser.add_argument(
+        "--harness-binary",
+        default=DEFAULT_HARNESS_BINARY,
+        help=(
+            "#301: the built executable's bare file name inside the FUZZ build "
+            "directory. Default is pktcfg's own binary name."
+        ),
+    )
+    parser.add_argument(
+        "--cache-entry",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "#301: a CMake `-D<KEY>=<VALUE>` cache entry for the target's own "
+            "sanitizer/fuzz-enable options (repeatable). Omitted entirely (the "
+            "default), `run_libfuzzer_campaign` uses its own `DEFAULT_CACHE_ENTRIES` "
+            "— pktcfg's `PKTCFG_SANITIZE=ON`/`PKTCFG_FUZZ=ON` — unchanged. Example: "
+            "--cache-entry STB_SANITIZE=ON --cache-entry STB_FUZZ=ON"
+        ),
+    )
+    parser.add_argument(
+        "--sanitizer-env",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "#301: sanitizer runtime environment for the live campaign (repeatable), "
+            "e.g. --sanitizer-env ASAN_OPTIONS=detect_leaks=0. Omitted entirely (the "
+            "default) adds nothing, matching pktcfg's prior behaviour."
+        ),
+    )
     parser.add_argument(
         "--workspace-root",
         type=Path,

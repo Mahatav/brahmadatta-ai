@@ -40,6 +40,7 @@ from pathlib import Path
 
 import pytest
 
+from adapters.cpp.fuzzing import ZERO_EXECUTION_INFRA_FAILURE_STEP
 from packages.sandbox.container import ContainerJailPolicy
 from workers.fuzzing.run import run_fuzzing_stage
 
@@ -466,3 +467,172 @@ def test_real_campaign_suppresses_a_deliberate_leak_when_sanitizer_env_disables_
         "the D5 gate formula (workers/fuzzing/cli.py::build_fuzzing_record) must not be "
         "constructible as sanitizer_confirmed=True from a suppressed leak"
     )
+
+
+# ---------------------------------------------------------------------------------
+# #302 — real, end-to-end regression proof for both findings: a subdirectory-declared
+# fuzz target resolves correctly (finding 1), and a genuine 0-execution infra failure
+# is now distinguishable from a real clean campaign in the returned outcome (finding 2).
+# ---------------------------------------------------------------------------------
+
+
+def _write_subdirectory_synthetic_target(root: Path) -> None:
+    """A real CMake C project whose fuzz harness is declared in a SUBDIRECTORY's own
+    `CMakeLists.txt` (`fuzz/CMakeLists.txt`, pulled in via `add_subdirectory(fuzz)`) —
+    the exact real-world layout #302 names (nlohmann/json's own `fuzz/CMakeLists.txt`)
+    that a flat `f"{build_dir}/{harness_binary}"` path cannot resolve: CMake's own
+    default `RUNTIME_OUTPUT_DIRECTORY` for a subdirectory-declared target mirrors the
+    *source* subdirectory structure under `build_dir` (i.e. `<build_dir>/fuzz/
+    subdir_fuzz`, not `<build_dir>/subdir_fuzz`) unless something overrides it.
+    """
+    (root / "fuzz").mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "corpus").mkdir(parents=True, exist_ok=True)
+    (root / "corpus" / "seed").write_bytes(b"hello")
+
+    (root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\n"
+        "project(subdirsynth C)\n"
+        "set(CMAKE_C_STANDARD 11)\n"
+        "option(SUBDIRSYNTH_SANITIZE \"Build with ASan/UBSan\" OFF)\n"
+        "option(SUBDIRSYNTH_FUZZ \"Build the libFuzzer harness\" OFF)\n"
+        "add_library(subdirsynth STATIC src/lib.c)\n"
+        "target_include_directories(subdirsynth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)\n"
+        "if(SUBDIRSYNTH_SANITIZE)\n"
+        "  set(SUBDIRSYNTH_SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -g)\n"
+        "  target_compile_options(subdirsynth PUBLIC ${SUBDIRSYNTH_SAN_FLAGS})\n"
+        "  target_link_options(subdirsynth PUBLIC ${SUBDIRSYNTH_SAN_FLAGS})\n"
+        "endif()\n"
+        "if(SUBDIRSYNTH_FUZZ)\n"
+        "  target_compile_options(subdirsynth PRIVATE -fsanitize=fuzzer-no-link)\n"
+        "  add_subdirectory(fuzz)\n"
+        "endif()\n"
+    )
+    (root / "fuzz" / "CMakeLists.txt").write_text(
+        "add_executable(subdirsynth_fuzz harness.c)\n"
+        "target_link_libraries(subdirsynth_fuzz PRIVATE subdirsynth)\n"
+        "target_compile_options(subdirsynth_fuzz PRIVATE -fsanitize=fuzzer)\n"
+        "target_link_options(subdirsynth_fuzz PRIVATE -fsanitize=fuzzer)\n"
+    )
+    (root / "src" / "lib.c").write_text(
+        "#include <stddef.h>\n"
+        "#include <stdint.h>\n"
+        "int subdirsynth_process(const uint8_t *data, size_t size) {\n"
+        "    (void)data;\n"
+        "    return (int)size;\n"
+        "}\n"
+    )
+    (root / "fuzz" / "harness.c").write_text(
+        "#include <stddef.h>\n"
+        "#include <stdint.h>\n"
+        "int subdirsynth_process(const uint8_t *data, size_t size);\n"
+        "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n"
+        "    subdirsynth_process(data, size);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+
+
+@needs_real_fuzz_run
+def test_real_campaign_resolves_a_subdirectory_placed_harness_binary(
+    fuzz_image: str, tmp_path: Path
+) -> None:
+    """#302 finding 1's real, end-to-end regression proof: a fuzz target declared in a
+    SUBDIRECTORY's own CMakeLists.txt (not the project's top level, unlike pktcfg's own
+    `pktcfg_fuzz`) is built AND actually executed successfully — before the fix, this
+    would have built fine (`cmake --build` succeeds regardless of where the binary
+    lands) and then failed at run time with `exec: .../subdirsynth_fuzz: not found`,
+    because the binary lands at `<build_dir>/fuzz/subdirsynth_fuzz` by CMake's own
+    default, not the flat `<build_dir>/subdirsynth_fuzz` this module assumes.
+    """
+    synthetic_source = tmp_path / "subdir-synth-target"
+    synthetic_source.mkdir()
+    _write_subdirectory_synthetic_target(synthetic_source)
+
+    policy = ContainerJailPolicy(
+        image=fuzz_image, memory_mb=1024, cpu_limit=2.0, wall_clock_seconds=90.0
+    )
+
+    outcome = run_fuzzing_stage(
+        "test-302-subdirectory-harness",
+        synthetic_source,
+        policy=policy,
+        harness_target="subdirsynth_fuzz",
+        harness_binary="subdirsynth_fuzz",
+        cache_entries={"SUBDIRSYNTH_SANITIZE": "ON", "SUBDIRSYNTH_FUZZ": "ON"},
+        budget_seconds=10,
+    )
+
+    assert outcome.mode == "LIVE_CAMPAIGN", (
+        "expected a real campaign against the subdirectory-declared target, got "
+        f"mode={outcome.mode!r} "
+        f"failure={outcome.failure.as_dict() if outcome.failure else None} -- a "
+        "'not found'/exec-failure-shaped NOT_RUN here is exactly #302 finding 1's bug"
+    )
+    assert outcome.executions > 0, (
+        "libFuzzer reported zero executions against the subdirectory-declared target "
+        "-- the binary was built but never actually ran (#302 finding 1)"
+    )
+
+
+@needs_real_fuzz_run
+def test_real_campaign_zero_execution_infra_failure_is_distinguishable_from_a_clean_campaign(
+    fuzz_image: str, tmp_path: Path
+) -> None:
+    """#302 finding 2's real, end-to-end regression proof: pointing a real campaign at a
+    harness binary name that was never actually built (configure and build both
+    genuinely succeed — only the RUN step's own exec fails, mirroring the exact
+    "binary not found at the resolved path" shape #302 names) now comes back as its
+    own distinct, clearly-labelled failure — never `failure: None, executions: 0`,
+    which would be indistinguishable from a real clean campaign that found nothing.
+    """
+    synthetic_source = tmp_path / "synth-target-for-zero-exec"
+    synthetic_source.mkdir()
+    _write_non_pktcfg_synthetic_target(synthetic_source)
+
+    policy = ContainerJailPolicy(
+        image=fuzz_image, memory_mb=1024, cpu_limit=2.0, wall_clock_seconds=90.0
+    )
+
+    # `harness_target` really is built (so CONFIGURE/BUILD both genuinely succeed) but
+    # `harness_binary` names a file that build produces under a different name --
+    # `run_argv`'s own exec then genuinely fails to find anything at the resolved path,
+    # which is exactly the class of infra failure #302 names (a missing binary, a
+    # missing corpus dir, ...), reproduced here without needing a broken image.
+    outcome = run_fuzzing_stage(
+        "test-302-zero-execution-infra-failure",
+        synthetic_source,
+        policy=policy,
+        harness_target="synth_fuzz",
+        harness_binary="this_binary_was_never_built",
+        cache_entries={"SYNTH_SANITIZE": "ON", "SYNTH_FUZZ": "ON"},
+        budget_seconds=10,
+    )
+
+    assert outcome.mode == "NOT_RUN", (
+        f"expected a distinctly-failed outcome, got mode={outcome.mode!r} "
+        f"executions={outcome.executions} -- indistinguishable from a real clean "
+        "campaign is exactly #302 finding 2's bug"
+    )
+    assert outcome.executions == 0
+    assert outcome.failure is not None
+    assert outcome.failure.step == ZERO_EXECUTION_INFRA_FAILURE_STEP, (
+        f"expected the #302 finding-2 distinct failure step, got "
+        f"{outcome.failure.step!r} -- first_error={outcome.failure.first_error!r}"
+    )
+
+    # The other half of "distinguishable": a REAL clean/successful campaign against the
+    # very same target (the harness that does exist) must still report LIVE_CAMPAIGN
+    # with real executions, never collapse into this same failure shape.
+    clean = run_fuzzing_stage(
+        "test-302-real-clean-campaign-for-contrast",
+        synthetic_source,
+        policy=policy,
+        harness_target="synth_fuzz",
+        harness_binary="synth_fuzz",
+        cache_entries={"SYNTH_SANITIZE": "ON", "SYNTH_FUZZ": "ON"},
+        budget_seconds=10,
+    )
+    assert clean.mode == "LIVE_CAMPAIGN"
+    assert clean.executions > 0
+    assert clean.failure is None
