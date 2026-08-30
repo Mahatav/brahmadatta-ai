@@ -1,0 +1,548 @@
+<title>Brahmadatta AI Submission</title>
+<meta charset="utf-8" />
+<meta name="description" content="AI Kavach / Terrier Cyber Quest 2026 — five-slide submission for Brahmadatta AI, an authorised defensive Cyber-Reasoning System." />
+<style>
+  @import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Fragment+Mono:ital@0;1&display=swap");
+
+  :root {
+    --field:      #141C8C;
+    --field-deep: #0D1252;
+    --white:      #F4F3EE;
+    --veil:       #9FA1C9;
+    --rule:       #7276B5;
+    --faint:      #4A50A4;
+    --verified:   #39E08A;
+    --warning:    #FFB020;
+    --critical:   #FF6B66;
+    --serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+    --mono:  "Fragment Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--field-deep);
+    color: var(--white);
+    font-family: var(--mono);
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+
+  .deck { display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 28px 0 60px; }
+  .doc-head {
+    width: 1280px; max-width: calc(100vw - 32px);
+    display: flex; justify-content: space-between;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--veil);
+  }
+  .doc-head b { color: var(--white); }
+
+  .slide-wrap { transform-origin: top center; }
+  .slide {
+    position: relative;
+    width: 1280px; height: 720px;
+    background: var(--field);
+    overflow: hidden;
+  }
+
+  /* ---- frame + crop marks ---- */
+  .frame { position: absolute; inset: 40px; border: 1px solid var(--rule); pointer-events: none; }
+  .ck { position: absolute; width: 16px; height: 16px; background: var(--field); }
+  .ck::before, .ck::after { content: ""; position: absolute; background: var(--white); }
+  .ck::before { width: 15px; height: 1px; }
+  .ck::after  { width: 1px; height: 15px; }
+  .ck.tl { top: 32px; left: 32px; } .ck.tl::before,.ck.tl::after { top: 8px; left: 8px; }
+  .ck.tr { top: 32px; right: 32px; } .ck.tr::before,.ck.tr::after { top: 8px; right: 8px; }
+  .ck.bl { bottom: 32px; left: 32px; } .ck.bl::before,.ck.bl::after { bottom: 8px; left: 8px; }
+  .ck.br { bottom: 32px; right: 32px; } .ck.br::before,.ck.br::after { bottom: 8px; right: 8px; }
+
+  .pad { position: absolute; inset: 40px; padding: 32px 46px 32px;
+    display: flex; flex-direction: column; }
+
+  /* ---- type ---- */
+  .eyebrow { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--veil); }
+  .eyebrow b { color: var(--white); }
+
+  h1 { font-family: var(--serif); font-weight: 400; letter-spacing: 0.005em;
+    margin: 20px 0 0; line-height: 0.98; }
+  h1 .t { color: var(--veil); }
+  .h-xl { font-size: 58px; }
+  .h-lg { font-size: 50px; }
+  .h-md { font-size: 43px; }
+  .h-sm { font-size: 36px; }
+
+  .dek { font-size: 15.5px; line-height: 1.5; color: var(--veil); max-width: 930px; margin-top: 16px; }
+  .dek b { color: var(--white); font-weight: 400; }
+
+  .rule { height: 1px; background: var(--rule); border: 0; }
+  .rule.heavy { height: 2px; background: var(--white); }
+
+  .lbl { font-size: 11px; letter-spacing: 0.13em; text-transform: uppercase;
+    color: var(--veil); margin-bottom: 10px; }
+  .lbl .n { color: var(--white); }
+
+  p { margin: 0 0 8px; font-size: 13.5px; line-height: 1.44; }
+  .sm p, .sm li { font-size: 12px; line-height: 1.4; }
+  .xs p, .xs li { font-size: 11px; line-height: 1.34; }
+  b { font-weight: 400; color: var(--white); }
+  .veil { color: var(--veil); }
+  .g { color: var(--verified); }
+  .w { color: var(--warning); }
+  .c { color: var(--critical); }
+
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { position: relative; padding-left: 16px; margin-bottom: 7px; font-size: 12.5px; line-height: 1.42; color: var(--veil); }
+  li:last-child { margin-bottom: 0; }
+  li::before { content: "\00B7"; position: absolute; left: 3px; top: -1px; color: var(--rule); }
+  li b { color: var(--white); }
+
+  .cols { display: grid; gap: 34px; }
+  .c2 { grid-template-columns: 1fr 1fr; }
+  .c3 { grid-template-columns: 1fr 1fr 1fr; }
+
+  .panel { position: relative; padding: 16px 18px 15px; }
+  .panel .ck2 { position: absolute; width: 10px; height: 10px; }
+  .panel .ck2::before { content: ""; position: absolute; width: 10px; height: 1px; background: var(--rule); }
+  .panel .ck2::after  { content: ""; position: absolute; width: 1px; height: 10px; background: var(--rule); }
+  .panel .ck2.a { top: 0; left: 0; } .panel .ck2.b { top: 0; right: 0; }
+  .panel .ck2.c { bottom: 0; left: 0; } .panel .ck2.d { bottom: 0; right: 0; }
+  .panel .ck2.b::before, .panel .ck2.d::before { right: 0; }
+  .panel .ck2.b::after,  .panel .ck2.d::after  { right: 0; }
+  .panel .ck2.c::before, .panel .ck2.d::before { bottom: 0; }
+  .panel .ck2.c::after,  .panel .ck2.d::after  { bottom: 0; }
+  .panel.good .ck2::before, .panel.good .ck2::after { background: var(--verified); }
+  .panel.warn .ck2::before, .panel.warn .ck2::after { background: var(--warning); }
+
+  .gate { font-size: 12.5px; line-height: 1.62; }
+  .gate .r { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: baseline; }
+  .gate .r .m { color: var(--veil); font-size: 10.5px; }
+
+  .strip { display: flex; justify-content: space-between; gap: 24px;
+    font-size: 11.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--veil); }
+  .strip .on { color: var(--verified); }
+
+  .stat { display: flex; gap: 30px; margin-top: 14px; }
+  .stat .fig { font-family: var(--serif); font-size: 32px; line-height: 1; }
+  .stat .cap { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--veil); display: block; margin-top: 4px; }
+
+  .grow { flex: 1 1 auto; min-height: 0; }
+  .foot { margin-top: auto; padding-top: 14px; }
+
+  .pageno { position: absolute; right: 46px; bottom: 18px; font-size: 10px; letter-spacing: 0.24em; color: var(--rule); }
+
+  /* diagram */
+  .diagram { display: block; }
+  .diagram text { font-family: var(--mono); }
+
+  figcaption { font-size: 10px; color: var(--veil); letter-spacing: 0.03em; margin-top: 8px; line-height: 1.4; }
+
+  a { color: var(--white); }
+
+  @media print {
+    @page { size: 1280px 720px; margin: 0; }
+    html, body { background: var(--field); }
+    .deck { gap: 0; padding: 0; }
+    .doc-head { display: none; }
+    .slide-wrap { transform: none !important; }
+    .slide { page-break-after: always; break-after: page; }
+  }
+</style>
+
+<div class="deck" id="deck">
+  <div class="doc-head">
+    <span>AI Kavach &middot; Terrier Cyber Quest 2026 &mdash; Initial Submission</span>
+    <span><b>Brahmadatta AI</b> &middot; 5 slides</span>
+  </div>
+
+  <!-- =================================================== SLIDE 1 -->
+  <div class="slide-wrap"><section class="slide">
+    <div class="frame"></div>
+    <span class="ck tl"></span><span class="ck tr"></span><span class="ck bl"></span><span class="ck br"></span>
+    <div class="pad">
+      <div class="eyebrow">
+        <span>[ Slide 01 / 05 ] &nbsp;&nbsp; Introduction &middot; Ideation &middot; Brief Description</span>
+        <span><b>[ Brahmadatta AI ]</b></span>
+      </div>
+
+      <h1 class="h-xl">Autonomous armor<br/>for software.</h1>
+
+      <div class="dek">
+        An <b>authorised, defensive Cyber-Reasoning System</b> for AI Kavach. Given a C/C++
+        repository you own, Brahmadatta finds a real memory-safety defect with its own fuzzing,
+        drafts a patch with a <b>self-hosted</b> model, and lets deterministic tools &mdash; not
+        the model &mdash; deliver the verdict.
+      </div>
+
+      <hr class="rule" style="margin:22px 0 20px;"/>
+
+      <div class="cols c2 sm" style="row-gap:14px;">
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Problem ]</div>
+          <p>Scanners and &ldquo;AI security&rdquo; tools stop at the report. They hand a human a
+          finding and a suggested patch &mdash; and a suggested patch, <b>accepted on model
+          confidence</b>, is exactly how a plausible-looking wrong fix ships to production.</p>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Idea &amp; Motivation ]</div>
+          <p>Close the loop, and make the machine check its own work. Discover &rarr; minimise to a
+          deterministic reproducer &rarr; patch with a local model &rarr; <b>let the reproducer, the
+          regression suite, static checks and renewed fuzzing decide.</b></p>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ The Differentiator ]</div>
+          <p>The same pipeline visibly <b class="c">rejects</b> a patch that eliminates the crash
+          but breaks the program's behaviour. Every competitor shows a patch that worked; we show
+          our system refusing one that only looked like it did.</p>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Defensive / Authorised-Use Boundary ]</div>
+          <p>Authorised repositories and isolated environments only; write-once authorization
+          record + server-verified snapshot hash. <b>No public-target scanning, no exploit
+          deployment, no automatic production merge.</b> Repository content never leaves for a
+          hosted inference API &mdash; structurally enforced.</p>
+        </div>
+      </div>
+
+      <div class="foot" style="padding-top:8px;">
+        <hr class="rule" style="margin-bottom:12px;"/>
+        <div class="strip">
+          <span>[ The mission, one line ]</span>
+          <span class="veil" style="letter-spacing:0.04em;text-transform:none;font-size:12px;">authorize
+            &rarr; ingest &rarr; baseline &rarr; analyze &rarr; correlate &rarr; stress&#8209;test
+            &rarr; patch &rarr; verify &rarr; export evidence</span>
+        </div>
+      </div>
+    </div>
+    <span class="pageno">01</span>
+  </section></div>
+
+  <!-- =================================================== SLIDE 2 -->
+  <div class="slide-wrap"><section class="slide">
+    <div class="frame"></div>
+    <span class="ck tl"></span><span class="ck tr"></span><span class="ck bl"></span><span class="ck br"></span>
+    <div class="pad">
+      <div class="eyebrow">
+        <span>[ Slide 02 / 05 ] &nbsp;&nbsp; Detailed Methodology</span>
+        <span><b>[ The Mission &mdash; Nine Steps ]</b></span>
+      </div>
+      <h1 class="h-md">One pipeline. <span class="t">Unattended after a single
+        <span style="font-family:var(--mono);font-size:16px;letter-spacing:0.08em;">[ START ]</span>.</span></h1>
+
+      <hr class="rule" style="margin:18px 0 16px;"/>
+
+      <div class="cols c3 xs" style="align-items:start;">
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Tier 1 &middot; Deterministic Triage ]</div>
+          <ul>
+            <li><b>01 Authorize + snapshot.</b> Immutable snapshot; sha256 recomputed server-side and matched.</li>
+            <li><b>02 Baseline.</b> configure &rarr; build &rarr; CTest on the pristine tree. Pass/fail counts recorded &mdash; the denominator every later verdict is checked against.</li>
+            <li><b>03 Analyze.</b> Semgrep (offline C/C++ ruleset) + compiler warnings parsed into structured findings; git-history summary.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Tier 2 &middot; Sandbox + Lightweight Patch ]</div>
+          <ul>
+            <li><b>04 Stress-test.</b> ASan/UBSan build + libFuzzer campaign in a locked-down container. Sanitizer-confirmed heap-buffer-overflow with a stack trace; crashes deduplicated.</li>
+            <li><b>05 Correlate + minimise.</b> Bind the crash to a source location; minimise the input to a reproducer that replays 5/5 from a clean build; persist it durably.</li>
+            <li><b>06 Patch.</b> A self-hosted <b>CodeLlama&nbsp;7B</b> model gets the crash report + localised source. Patch policy (single file, allowlist, changed-line cap) must pass <b>before</b> compile.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Verification &amp; Proof-of-Fix ]</div>
+          <ul>
+            <li><b>07 Verify &mdash; every policy-passing candidate, identical gate sequence.</b> The verifier is <b>provenance-blind</b>: it cannot see the model, its confidence, or its rationale.</li>
+            <li><b>08 Proof-of-fix.</b> The verdict is <b>derived from the gate matrix, never from confidence.</b></li>
+            <li><b>09 Export + teardown.</b> report.md / .json, gate matrix, content-addressed artifacts, sha256 manifest. Sandbox + model-host release confirmed, zero strays.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="foot">
+      <hr class="rule heavy" style="margin:0 0 14px;"/>
+
+      <div class="cols" style="grid-template-columns:1fr 1.12fr;gap:40px;">
+        <div>
+          <div class="lbl">[ Step 08 &middot; two candidates, one gate matrix, one run ]</div>
+          <div class="gate">
+            <div class="r"><span class="g">+</span><span>COMPILE</span><span class="m">cmake &middot; exit 0</span></div>
+            <div class="r"><span class="g">+</span><span>REPRODUCER_ELIMINATED</span><span class="m">replay clean</span></div>
+            <div class="r"><span class="g">+</span><span>REGRESSION_PRESERVED <span class="veil">&middot; patch A</span></span><span class="m">8/8 ctest</span></div>
+            <div class="r"><span class="c">&times;</span><span>REGRESSION_PRESERVED <span class="veil">&middot; patch B</span></span><span class="m c">1 of 8 failed</span></div>
+            <div class="r"><span class="w">&mdash;</span><span>STATIC_DELTA &middot; RENEWED_FUZZING</span><span class="m w">disclosed, with reason</span></div>
+          </div>
+        </div>
+        <div class="xs">
+          <div class="lbl">[ What the loop catches ]</div>
+          <p>Patch&nbsp;A &mdash; the correct fix &mdash; is marked <b class="g">VERIFIED</b>. Patch&nbsp;B
+          kills the crash by deleting the feature that was overflowing: it passes compile, eliminates
+          the reproducer, then <b class="c">fails a regression test</b> (six assertions in the
+          tab-expansion case) &rarr; <b class="c">REJECTED</b>, beside the accepted one. An
+          <span class="veil">overfit</span> patch that fools every static gate is caught by
+          <b>renewed fuzzing</b> of the patched build.</p>
+        </div>
+      </div>
+
+      <div class="strip" style="margin-top:16px;">
+        <span>[ Nothing escalates a tier on a guess ]</span>
+        <span>[ Work moves up only when the evidence in hand justifies the cost ]</span>
+      </div>
+      </div>
+    </div>
+    <span class="pageno">02</span>
+  </section></div>
+
+  <!-- =================================================== SLIDE 3 -->
+  <div class="slide-wrap"><section class="slide">
+    <div class="frame"></div>
+    <span class="ck tl"></span><span class="ck tr"></span><span class="ck bl"></span><span class="ck br"></span>
+    <div class="pad">
+      <div class="eyebrow">
+        <span>[ Slide 03 / 05 ] &nbsp;&nbsp; Technology Stack &middot; Architecture &middot; Flow</span>
+        <span><b>[ As Built ]</b></span>
+      </div>
+      <h1 class="h-md">Four processes. <span class="t">No broker. No hosted API.</span></h1>
+      <hr class="rule" style="margin:16px 0 12px;"/>
+
+      <div style="display:grid;grid-template-columns:1fr 322px;gap:30px;margin-top:6px;">
+        <figure style="margin:0;">
+          <svg class="diagram" style="width:100%;height:auto;" viewBox="0 0 852 470" role="img"
+               aria-label="Architecture: operator browser through nginx to the Django control API backed by PostgreSQL; an orchestrator owns the 18-state mission machine and a Postgres job queue; a worker runs stages inside an isolated sandbox and calls a loopback-only self-hosted model. The worker network has no route to the internet.">
+            <defs>
+              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="#7276B5"/>
+              </marker>
+            </defs>
+            <g fill="none" stroke="#7276B5" stroke-width="1">
+              <rect x="6"   y="10"  width="238" height="42"/>
+              <rect x="6"   y="78"  width="238" height="54"/>
+              <rect x="6"   y="160" width="356" height="74"/>
+              <rect x="6"   y="258" width="356" height="46"/>
+              <rect x="6"   y="330" width="430" height="82"/>
+              <rect x="6"   y="424" width="430" height="40"/>
+              <rect x="486" y="160" width="360" height="66"/>
+              <rect x="486" y="250" width="360" height="98"/>
+              <rect x="486" y="372" width="360" height="62"/>
+            </g>
+            <g fill="none" stroke="#7276B5" stroke-width="1">
+              <line x1="125" y1="52"  x2="125" y2="78"  marker-end="url(#ar)"/>
+              <line x1="125" y1="132" x2="125" y2="160" marker-end="url(#ar)"/>
+              <line x1="150" y1="234" x2="150" y2="258" marker-end="url(#ar)"/>
+              <line x1="110" y1="304" x2="110" y2="330" marker-end="url(#ar)"/>
+              <line x1="250" y1="330" x2="250" y2="304" marker-end="url(#ar)"/>
+              <path d="M436 368 L462 368 L462 226" marker-end="url(#ar)"/>
+              <line x1="666" y1="226" x2="666" y2="250" marker-end="url(#ar)"/>
+              <line x1="666" y1="348" x2="666" y2="372" marker-end="url(#ar)"/>
+              <line x1="150" y1="412" x2="150" y2="428" marker-end="url(#ar)"/>
+            </g>
+            <line x1="470" y1="150" x2="470" y2="446" stroke="#4A50A4" stroke-width="1"/>
+            <g fill="#F4F3EE" font-size="12">
+              <text x="16" y="30">operator browser</text>
+              <text x="16" y="98">nginx :443 / :8080</text>
+              <text x="16" y="180">control-api &mdash; Django 5.2 &middot; django-ninja</text>
+              <text x="16" y="277">PostgreSQL 16</text>
+              <text x="16" y="352">orchestrator &mdash; run_orchestrator</text>
+              <text x="496" y="182">worker &mdash; JobKind dispatch</text>
+              <text x="496" y="272">sandbox &mdash; packages/sandbox</text>
+              <text x="496" y="394">model-host &mdash; CodeLlama 7B (Ollama)</text>
+              <text x="16" y="446">content-addressed artifact store</text>
+            </g>
+            <g fill="#9FA1C9" font-size="10">
+              <text x="16" y="45">1440&times;900+ &middot; Command Center</text>
+              <text x="16" y="112">TLS &middot; serves Astro build &middot; proxy_buffering off on /events</text>
+              <text x="16" y="199">uvicorn ASGI &middot; generated OpenAPI contract in CI</text>
+              <text x="16" y="213">SSE fan-out &middot; validates operator commands</text>
+              <text x="16" y="227">READS everything &middot; RUNS nothing</text>
+              <text x="16" y="294">missions &middot; events &middot; jobs &middot; evidence</text>
+              <text x="16" y="369">sole writer of Mission.state &middot; 18-state machine</text>
+              <text x="16" y="383">tick loop: transition &middot; enqueue &middot; reap &middot; watchdog</text>
+              <text x="16" y="397">queue = Postgres SELECT &hellip; FOR UPDATE SKIP LOCKED</text>
+              <text x="496" y="200">10 JobKinds &middot; claims one job at a time</text>
+              <text x="496" y="214">emits STAGE_PROGRESS &middot; never writes Mission.state</text>
+              <text x="496" y="290">subprocess Jail &nbsp;+&nbsp; ContainerJail</text>
+              <text x="496" y="305">--network none &middot; --cap-drop ALL &middot; non-root</text>
+              <text x="496" y="320">read-only rootfs &middot; no docker socket</text>
+              <text x="496" y="337">CMake/CTest &middot; ASan/UBSan &middot; libFuzzer</text>
+              <text x="496" y="411">loopback / internal-only &middot; bearer-token sidecar</text>
+              <text x="496" y="425">gateway = the only inference client in the tree</text>
+              <text x="16" y="461">sha256 &middot; mode 0600 &middot; encrypted volume</text>
+              <text x="844" y="150" text-anchor="end">internal: true &mdash; no route to the internet</text>
+            </g>
+          </svg>
+          <figcaption>Fifteen deployable units in the original design collapse to four application
+          processes. The worker is the only thing that holds repository content, and the only
+          caller of the model.</figcaption>
+        </figure>
+
+        <div class="tight">
+          <div class="lbl">[ Stack &mdash; implemented ]</div>
+          <div class="gate" style="font-size:12px;line-height:1.62;">
+            <div class="r"><span class="g">+</span><span>Astro&nbsp;7 + React islands &middot; SVG Core</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>Django &middot; django-ninja &middot; Pydantic&nbsp;2</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>PostgreSQL&nbsp;16 &middot; ORM + migrations</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>18-state machine &middot; DB job queue</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>Semgrep &middot; compiler-warning parsing</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>libFuzzer &middot; ASan/UBSan &middot; crash dedup</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>rootless Docker &middot; Jail + ContainerJail</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>self-hosted CodeLlama&nbsp;7B &middot; loopback</span><span></span></div>
+            <div class="r"><span class="g">+</span><span>5-gate matrix &middot; no confidence arg</span><span></span></div>
+          </div>
+          <div class="lbl" style="margin-top:20px;">[ Finale / roadmap ]</div>
+          <div class="gate" style="font-size:12px;line-height:1.55;">
+            <div class="r"><span class="w">&rsaquo;</span><span>Live-model patch <span class="veil">inside</span> the full run</span><span></span></div>
+            <div class="r"><span class="w">&rsaquo;</span><span>Semgrep + renewed-fuzz in a live mission</span><span></span></div>
+            <div class="r"><span class="w">&rsaquo;</span><span>ContainerJail default everywhere</span><span></span></div>
+            <div class="r"><span class="w">&rsaquo;</span><span>Tier 3 &mdash; designed path only, unnamed</span><span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <span class="pageno">03</span>
+  </section></div>
+
+  <!-- =================================================== SLIDE 4 -->
+  <div class="slide-wrap"><section class="slide">
+    <div class="frame"></div>
+    <span class="ck tl"></span><span class="ck tr"></span><span class="ck bl"></span><span class="ck br"></span>
+    <div class="pad">
+      <div class="eyebrow">
+        <span>[ Slide 04 / 05 ] &nbsp;&nbsp; Salient Features &amp; Novelty</span>
+        <span><b>[ Resource Utilisation &middot; Novelty &middot; Lightweight ]</b></span>
+      </div>
+      <h1 class="h-sm">The system rejects its own patch &mdash;<br/><span class="t">the rejection is a
+        real regression-test failure, not a scripted demo beat.</span></h1>
+
+      <hr class="rule" style="margin:16px 0 14px;"/>
+
+      <div class="cols c3 xs" style="align-items:start;">
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Novelty &mdash; verification that overrules the model ]</div>
+          <ul>
+            <li><b>Evidence-gated escalation.</b> Nothing reaches the model until deterministic tiers produce a confirmed, minimised finding.</li>
+            <li><b>No confidence path.</b> <span class="veil">derive_verdict()</span> takes one argument &mdash; the gate matrix. A VERIFIED record over a failing gate cannot be constructed.</li>
+            <li><b>Provenance-blind verifier.</b> The operator-supplied &ldquo;bad&rdquo; candidate takes a genuinely identical path.</li>
+            <li><b>Overfit caught by renewed fuzzing</b> of the patched build &mdash; not by a human already knowing which input to try.</li>
+            <li><b>Disclosure as a feature.</b> A gate that did not run is as loud as a failure; the verdict carries its denominator.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Posture &mdash; self-hosted &middot; authorised &middot; isolated ]</div>
+          <ul>
+            <li><b>Repository content never reaches a hosted API.</b> Enforced three ways: internal-only compose network, a single-inference-client source test, a boot-time system check that refuses a hosted endpoint.</li>
+            <li><b>Rootless isolated execution</b> &mdash; <span class="veil">--network none</span>, all capabilities dropped, non-root, read-only rootfs. Egress denial proven by a live DNS+TCP test.</li>
+            <li><b>Authorised repositories only</b> &mdash; write-once record, server-verified snapshot hash. No public scanning, no exploit deployment, no auto-merge.</li>
+            <li><b>Operator-visible Command Center</b> &mdash; every panel reads the same stream that produces the evidence bundle.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ Resource utilisation &amp; lightweight design ]</div>
+          <ul>
+            <li><b>CPU-first.</b> Rented GPU cut entirely. A local 7B model with a process-level lease and confirmed teardown.</li>
+            <li><b>4 application processes</b> vs 15 in the original design. Postgres <span class="veil">SKIP LOCKED</span> instead of a message broker. No Redis, no S3, offline Semgrep ruleset.</li>
+            <li><b>Runs on one machine, offline.</b> Orchestrator / worker / gateway / evidence are modules in one Django project.</li>
+          </ul>
+          <div class="stat">
+            <div><span class="fig">~48s</span><span class="cap">full pipeline, unattended</span></div>
+            <div><span class="fig">0.3s</span><span class="cap">fuzz to seeded defect</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <hr class="rule heavy" style="margin-bottom:14px;"/>
+        <div class="strip">
+          <span>[ Not another &ldquo;LLM + scanner&rdquo; wrapper ]</span>
+          <span>[ A verification layer that is demonstrated overruling the model ]</span>
+        </div>
+      </div>
+    </div>
+    <span class="pageno">04</span>
+  </section></div>
+
+  <!-- =================================================== SLIDE 5 -->
+  <div class="slide-wrap"><section class="slide">
+    <div class="frame"></div>
+    <span class="ck tl"></span><span class="ck tr"></span><span class="ck bl"></span><span class="ck br"></span>
+    <div class="pad">
+      <div class="eyebrow">
+        <span>[ Slide 05 / 05 ] &nbsp;&nbsp; Final Deliverables</span>
+        <span><b>[ Evidence Run 6 &middot; 2026-08-20 ]</b></span>
+      </div>
+      <h1 class="h-md">Demonstrated today. <span class="t">Sharpened at the finale.</span></h1>
+      <hr class="rule" style="margin:16px 0 16px;"/>
+
+      <div class="cols" style="grid-template-columns:1.05fr 1fr;gap:30px;">
+        <div class="panel good sm">
+          <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+          <div class="lbl">[ What the prototype demonstrably does &mdash; live, unattended, real HTTP API ]</div>
+          <ul>
+            <li>Full nine-step pipeline end-to-end in <b>47.75&nbsp;s</b> wall-clock.</li>
+            <li>A <b>self-discovered</b>, ASan-confirmed heap-buffer-overflow in an authorised C target, with a durable, deterministic reproducer.</li>
+            <li><b>Two verdicts from one mission</b> &mdash; one patch &rarr; <b class="g">VERIFIED</b> (first end-to-end in project history); one plausible crash-only patch &rarr; <b class="c">REJECTED</b> on a real regression failure, same gate matrix.</li>
+            <li>An <b>exported evidence bundle</b> &mdash; snapshot hash, crash report, minimised input, both diffs, both gate matrices, both verdicts &mdash; sha256-manifested and <b>independently read back</b> by someone who did not build the system.</li>
+            <li>Confirmed teardown, zero stray containers. Self-hosted CodeLlama&nbsp;7B: <b>10 / 10</b> generation attempts returned schema- and policy-valid candidates.</li>
+            <li>Command Center rebuilt to the approved spec; <b>&#8776;900+</b> automated tests; CI gated on a real PostgreSQL; egress denial proven live.</li>
+          </ul>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="panel xs">
+            <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+            <div class="lbl">[ Expected competition output ]</div>
+            <p>A reproducible C/C++ pipeline that, on an authorised repository, produces a confirmed
+            finding, a minimal patch, a deterministic verdict, and a <b>portable evidence bundle a
+            judge can audit offline</b>. Shortlist-ready now: the loop, the rejection, the
+            disclosure discipline, the self-hosted / authorised posture, the footprint.</p>
+          </div>
+          <div class="panel warn xs">
+            <span class="ck2 a"></span><span class="ck2 b"></span><span class="ck2 c"></span><span class="ck2 d"></span>
+            <div class="lbl">[ Refined during the 36-hour Grand Finale ]</div>
+            <ul>
+              <li>Live-model patch generation inside the full unattended run (finale hardware clears the dev-VM memory ceiling).</li>
+              <li>Semgrep + renewed-fuzzing gates exercised inside a full live mission.</li>
+              <li>ContainerJail as the default isolation for every stage, every deployment.</li>
+              <li>Three timed rehearsals with failure injection: GPU-unavailable, target won't build, stage hangs.</li>
+              <li>A real open-source C target with a known historical CVE, alongside the purpose-built one. Human-recorded fallback demonstration.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+      <hr class="rule heavy" style="margin-bottom:12px;"/>
+      <div style="font-size:11.5px;line-height:1.55;color:var(--veil);letter-spacing:0.02em;">
+        <span class="g">PERFORMANCE</span> ~48&nbsp;s pipeline &nbsp;&middot;&nbsp;
+        <span class="g">SPEED</span> sub-second reproducer replay &nbsp;&middot;&nbsp;
+        <span class="g">PRECISION</span> deterministic gates + demonstrated rejection &nbsp;&middot;&nbsp;
+        <span class="g">FUNCTIONALITY</span> nine-step loop + live Command Center &nbsp;&middot;&nbsp;
+        <span class="g">SCALABILITY</span> stateless processes, SKIP&nbsp;LOCKED queue, adapter generalised beyond the demo target
+      </div>
+      </div>
+    </div>
+    <span class="pageno">05</span>
+  </section></div>
+</div>
+
+<script>
+  (function () {
+    var wraps = document.querySelectorAll(".slide-wrap");
+    function fit() {
+      var scale = Math.min(1, (window.innerWidth - 32) / 1280);
+      wraps.forEach(function (w) {
+        w.style.transform = "scale(" + scale + ")";
+        w.style.height = (720 * scale) + "px";
+      });
+    }
+    fit();
+    window.addEventListener("resize", fit);
+  })();
+</script>
