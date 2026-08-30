@@ -66,6 +66,7 @@ __all__ = [
     "FUZZ_ARTIFACT_DIR",
     "FUZZ_BUILD_DIR",
     "MAX_DURABLE_ARTIFACT_BYTES",
+    "ZERO_EXECUTION_INFRA_FAILURE_STEP",
     "DurableArtifact",
     "FuzzFailure",
     "FuzzToolchainRecord",
@@ -77,6 +78,13 @@ __all__ = [
 
 FUZZ_BUILD_DIR = "build-libfuzzer"
 FUZZ_ARTIFACT_DIR = "fuzz-artifacts"
+
+#: `FuzzFailure.step` value for #302 finding 2's distinct "the harness process itself
+#: never meaningfully ran" outcome -- see `run_libfuzzer_campaign`'s own inline comment
+#: for the exact three-part signal this is gated on. Exported so a caller (e.g.
+#: `workers/fuzzing/dispatch.py`) can branch on it by name rather than a literal string.
+ZERO_EXECUTION_INFRA_FAILURE_STEP = "FUZZ_ZERO_EXECUTION_INFRA_FAILURE"
+_STEP_ZERO_EXECUTION_INFRA_FAILURE = ZERO_EXECUTION_INFRA_FAILURE_STEP
 
 #: Conservative ceiling for one crash artifact copied out of a `ContainerJail`
 #: worktree before it tears down (D-106; see `_copy_crash_artifacts_durably`'s own
@@ -440,6 +448,35 @@ def run_libfuzzer_campaign(
             "-DCMAKE_BUILD_TYPE=Debug",
             *(f"-D{key}={value}" for key, value in resolved_cache_entries.items()),
             "-DCMAKE_C_COMPILER=clang",
+            # #300: without an explicit CXX compiler pin, CMake's own auto-detection
+            # happens to land on a compatible C++ compiler ONLY because this image ships
+            # exactly one (see fuzz-toolchain.Dockerfile) — fragile by coincidence, not by
+            # design. Pinned explicitly, matching CMAKE_C_COMPILER, so a future image with
+            # more than one C++ toolchain (or a differently named one) cannot silently
+            # drift the fuzz harness onto a compiler that was never actually verified to
+            # carry libFuzzer/ASan/UBSan support.
+            "-DCMAKE_CXX_COMPILER=clang++",
+            # #302 finding 1: force every target's runtime output into the flat
+            # `build_dir` CMake was told to configure into, regardless of which
+            # subdirectory of `src_dir` actually declares it. Without this,
+            # `run_argv`'s `f"{build_dir}/{harness_binary}"` below only resolves for a
+            # target declared in the project's top-level CMakeLists.txt (true for
+            # pktcfg's own `pktcfg_fuzz`) — a completely normal layout with the fuzz
+            # harness declared in a subdirectory (e.g. `fuzz/CMakeLists.txt`) builds
+            # successfully but then fails at run time with `exec: .../<binary>: not
+            # found`, because CMake's own per-target default `RUNTIME_OUTPUT_DIRECTORY`
+            # mirrors the *source* subdirectory structure under `build_dir`, not the flat
+            # build root. `CMAKE_RUNTIME_OUTPUT_DIRECTORY` is the documented CMake
+            # variable that seeds every target's own `RUNTIME_OUTPUT_DIRECTORY` property
+            # at the point the target is created (CMake reference docs, `RUNTIME_OUTPUT_
+            # DIRECTORY` property page) — a no-op for pktcfg (whose `pktcfg_fuzz` target
+            # is already declared at the top level and lands here regardless), and the
+            # fix for the subdirectory case. The one case this does NOT cover: a target
+            # whose own CMakeLists.txt calls `set_target_properties(... RUNTIME_OUTPUT_
+            # DIRECTORY ...)` on itself, which wins over this global default by CMake's
+            # own documented precedence — that is a deliberate choice by the target's own
+            # build, not something a caller-side flag can or should override.
+            f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={build_dir}",
         ]
         configure = sandbox.run(configure_argv)
         if not configure.ok:
@@ -495,6 +532,43 @@ def run_libfuzzer_campaign(
             corpus_size=len(seeds),
             artifact_paths=artifact_paths,
         )
+
+        # #302 finding 2: a genuine 0-execution infra failure (the binary was not found
+        # at the resolved path, the corpus directory was unreadable, the container's
+        # entrypoint could not exec at all, ...) must not read identically to "the
+        # fuzzer genuinely ran under budget and found nothing." Both used to produce
+        # `failure: None, crashes_found: 0, executions: 0` — indistinguishable.
+        #
+        # The signal used here is deliberately narrow so it cannot regress real-crash
+        # detection (which this module's own #291 fix depends on `run`'s exit code
+        # being allowed to be nonzero — see this function's own long-standing rule:
+        # "a real crash makes libFuzzer exit nonzero... treating any nonzero exit as
+        # failure would misclassify every real crash as an infra failure instead"):
+        #
+        #   * `metrics.executions == 0` -- libFuzzer's own progress/stats output never
+        #     recorded a single executed unit.
+        #   * `not artifact_paths` -- no crash/leak/timeout/oom/slow-unit artifact of
+        #     ANY kind was discovered either, so this is not the "crashed before the
+        #     first stats line" edge case a genuine early crash can produce.
+        #   * `not run.ok` -- the run itself did not exit cleanly (nonzero exit code,
+        #     or the container's own wall-clock/other limit). A real clean campaign
+        #     that legitimately found nothing within its budget exits 0.
+        #
+        # All three together is the "the harness process itself never meaningfully
+        # ran" signature; any one alone is not enough (e.g. a real target can
+        # legitimately execute 0 units and still exit 0 on an absurdly small budget --
+        # that is reported as an ordinary, if unusual, clean result, not this failure).
+        if metrics.executions == 0 and not artifact_paths and not run.ok:
+            return _failed_result(
+                started,
+                harness_binary,
+                toolchain,
+                run,
+                step=_STEP_ZERO_EXECUTION_INFRA_FAILURE,
+                configure=configure,
+                build=build,
+            )
+
         durable_artifacts: tuple[DurableArtifact, ...] = ()
         if workspace_root is not None and artifact_paths:
             # Copied here, still inside the `with ContainerJail.create(...)` block —

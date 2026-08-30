@@ -147,7 +147,16 @@ def _configure_argv(
         # `PKTCFG_SANITIZE`-style option of its own. This produces the identical flag set
         # pktcfg's own `-DPKTCFG_SANITIZE=ON` would (same `-fsanitize=...` string), so the
         # two are equivalent for this target and the generic path stays the only path.
+        #
+        # #300: CMAKE_CXX_FLAGS must be set alongside CMAKE_C_FLAGS. pktcfg is a pure-C
+        # target, so CMAKE_C_FLAGS alone was historically sufficient there, but for any
+        # C++ target (e.g. nlohmann/json) omitting CMAKE_CXX_FLAGS silently produces an
+        # *unsanitized* build that both `configure_ok` and `build_ok` still report as
+        # `True` -- a false negative in the verification gate. Setting both, always, is
+        # a no-op for a pure-C target (CMake ignores CXX flags with no C++ sources) and
+        # closes the gap for anything with C++ sources.
         argv.append(f"-DCMAKE_C_FLAGS={flags}")
+        argv.append(f"-DCMAKE_CXX_FLAGS={flags}")
         argv.append(f"-DCMAKE_EXE_LINKER_FLAGS={flags}")
     return argv
 

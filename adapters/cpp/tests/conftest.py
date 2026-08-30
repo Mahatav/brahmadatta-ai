@@ -137,6 +137,48 @@ def pre_cmake_policy_floor_source(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def cxx_target_source(tmp_path: Path) -> Path:
+    """A real, minimal C++ (not C) CMake target — #300's own regression fixture.
+
+    `demo/repositories/pktcfg` is pure C, so it could never surface #300 (`CMAKE_C_FLAGS`
+    is exactly correct for a C-only target). This fixture is deliberately small — two real
+    `.cpp` translation units, no third-party dependency, no network fetch — but it is a
+    genuine CMake C++ project compiled by a real compiler, which is all `#300`'s own
+    proof method (`CMAKE_VERBOSE_MAKEFILE=ON`, inspect the real compile lines) needs: it
+    does not require reproducing the full nlohmann/json checkout the original dogfooding
+    session used to prove this bug, only a real C++ compile step to assert
+    `-fsanitize=address,undefined` does or does not appear on.
+    """
+    dest = tmp_path / "cxx-target"
+    dest.mkdir()
+    (dest / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\n"
+        "project(cxxtarget CXX)\n"
+        "set(CMAKE_CXX_STANDARD 17)\n"
+        "add_library(cxxtarget_lib helper.cpp)\n"
+        "add_executable(cxxtarget main.cpp)\n"
+        "target_link_libraries(cxxtarget PRIVATE cxxtarget_lib)\n"
+        "enable_testing()\n"
+        "add_test(NAME smoke COMMAND cxxtarget)\n"
+    )
+    (dest / "helper.cpp").write_text(
+        "#include \"helper.h\"\n"
+        "int add(int a, int b) { return a + b; }\n"
+    )
+    (dest / "helper.h").write_text("int add(int a, int b);\n")
+    (dest / "main.cpp").write_text(
+        "#include \"helper.h\"\n"
+        "#include <cstdio>\n"
+        "int main() {\n"
+        "  int result = add(2, 3);\n"
+        "  std::printf(\"%d\\n\", result);\n"
+        "  return result == 5 ? 0 : 1;\n"
+        "}\n"
+    )
+    return dest
+
+
+@pytest.fixture
 def broken_compile_source(tmp_path: Path) -> Path:
     """A private copy of pktcfg with a source file that fails to compile.
 

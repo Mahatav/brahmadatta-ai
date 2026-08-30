@@ -19,6 +19,18 @@ from uuid import UUID
 
 from pydantic import Field
 
+#: Shape shared by `fuzz_harness_target`/`fuzz_harness_binary` below: a bare CMake
+#: target/binary name, never a path. `run_libfuzzer_campaign` (`adapters/cpp/fuzzing.
+#: py`) interpolates this directly into a `cmake --build ... --target <name>` argv
+#: entry and a `f"{build_dir}/{name}"` executable path (both real argv-list entries,
+#: never a shell string — see that module's own `_docker_run_args`/`ContainerJail.run`
+#: for why shell metacharacters are not the threat model here) — restricted to CMake's
+#: own legal target-name character set anyway, so a malformed value fails obviously at
+#: the schema boundary rather than producing a confusing "No rule to make target" or a
+#: `RUNTIME_OUTPUT_DIRECTORY`-relative path that does not mean what the operator
+#: intended.
+_HARNESS_NAME_PATTERN = r"^[A-Za-z0-9_.+-]{1,200}$"
+
 from contracts.authorization import AuthorizationRecord
 from contracts.enums import (
     LanguageAdapter,
@@ -125,6 +137,57 @@ class MissionPolicy(StrictSchema):
         "not present in the original architecture spec's MissionPolicy listing, so "
         "documented here as the addition it is (backend-developer's "
         "minor-contract-detail authority per its own role brief).",
+    )
+    fuzz_harness_target: str = Field(
+        default="pktcfg_fuzz",
+        pattern=_HARNESS_NAME_PATTERN,
+        description="The CMake target name FUZZ's libFuzzer campaign builds "
+        "(`cmake --build <build_dir> --target <this>`), threaded through to "
+        "`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `harness_target` "
+        "parameter by `workers/fuzzing/dispatch.py`. Default is pktcfg's own target "
+        "name, so a mission that does not set this gets exactly pktcfg's prior, "
+        "unaffected behaviour. #296 generalized the adapter function itself to accept "
+        "a non-pktcfg harness; #301 is this field, the wiring that actually lets a "
+        "real mission (not just a one-off script) reach that generalization. Added by "
+        "#301 — not present in the original architecture spec's MissionPolicy "
+        "listing, documented here as the addition it is (backend-developer's "
+        "minor-contract-detail authority per its own role brief).",
+    )
+    fuzz_harness_binary: str = Field(
+        default="pktcfg_fuzz",
+        pattern=_HARNESS_NAME_PATTERN,
+        description="The built executable's bare file name inside FUZZ's build "
+        "directory (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s "
+        "`harness_binary` parameter) — usually, but not required to be, identical to "
+        "`fuzz_harness_target`. Default is pktcfg's own binary name; unset, this "
+        "field changes nothing about pktcfg's existing behaviour. Added by #301, "
+        "same authority note as `fuzz_harness_target` above.",
+    )
+    fuzz_cache_entries: dict[str, str] | None = Field(
+        default=None,
+        max_length=20,
+        description="CMake `-D<key>=<value>` cache entries FUZZ's configure step "
+        "applies (`adapters/cpp/fuzzing.py::run_libfuzzer_campaign`'s `cache_entries` "
+        "parameter) — the target's own naturally-named sanitizer/fuzz-enable options "
+        "(e.g. `{\"STB_SANITIZE\": \"ON\", \"STB_FUZZ\": \"ON\"}` for a target that "
+        "does not use pktcfg's `PKTCFG_*` names). `None` (the default, and the only "
+        "value that reproduces pktcfg's exact prior behaviour) defers to "
+        "`run_libfuzzer_campaign`'s own `DEFAULT_CACHE_ENTRIES` — pktcfg's two "
+        "options — so a mission that does not set this field is byte-for-byte "
+        "unaffected by #301. An explicit `{}` is a distinct, deliberate choice (no "
+        "cache entries at all), not a synonym for `None`. Added by #301, same "
+        "authority note as `fuzz_harness_target` above.",
+    )
+    fuzz_sanitizer_env: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=20,
+        description="Sanitizer runtime environment (e.g. "
+        "`{\"ASAN_OPTIONS\": \"detect_leaks=0\"}`) merged into FUZZ's container "
+        "environment for the live campaign (`adapters/cpp/fuzzing.py::"
+        "run_libfuzzer_campaign`'s `sanitizer_env` parameter, #289). Empty (the "
+        "default) adds nothing — pktcfg's own prior behaviour, unaffected unless an "
+        "operator sets this. Added by #301, same authority note as "
+        "`fuzz_harness_target` above.",
     )
 
 

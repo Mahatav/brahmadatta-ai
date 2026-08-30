@@ -572,3 +572,70 @@ def test_minimize_transition_policy_never_transitions_the_mission():
     policy = transition_policy_for(JobKind.MINIMIZE)
     job = Job(kind=JobKind.MINIMIZE, state=JobState.FAILED, result={})
     assert policy(job, Mission()) is None
+
+
+# ---------------------------------------------------------------------------------
+# 5. #301: MissionPolicy's fuzz_harness_target/fuzz_harness_binary/fuzz_cache_entries/
+# fuzz_sanitizer_env fields must reach run_fuzzing_stage through the REAL dispatch
+# path (_fuzz_executor), not just be accepted by the schema or by a raw function call.
+# ---------------------------------------------------------------------------------
+
+
+def test_default_mission_policy_reproduces_pktcfgs_own_fuzz_stage_call(
+    mission: Mission, monkeypatch
+):
+    """A mission whose policy never sets the #301 fields must call `run_fuzzing_stage`
+    with exactly pktcfg's own harness identity and no extra cache entries/sanitizer
+    env — the "byte for byte unaffected" requirement the issue itself names."""
+    captured_kwargs: dict[str, object] = {}
+
+    def _spy(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _clean_outcome(executions=100_000, crashes=0)
+
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", _spy)
+
+    job = _job(mission)
+    result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+
+    assert result.outcome == JobOutcome.SUCCEEDED
+    assert captured_kwargs["harness_target"] == "pktcfg_fuzz"
+    assert captured_kwargs["harness_binary"] == "pktcfg_fuzz"
+    assert captured_kwargs["cache_entries"] is None
+    assert captured_kwargs["sanitizer_env"] is None
+
+
+def test_a_non_pktcfg_targets_mission_policy_drives_the_real_dispatch_path_end_to_end(
+    mission: Mission, monkeypatch
+):
+    """#301's actual regression proof: a synthetic non-pktcfg target's own harness
+    identity, CMake options, and sanitizer env — set on the mission's own persisted
+    policy, exactly how a real mission would configure it — reaches `run_fuzzing_
+    stage` through the REAL `_fuzz_executor` dispatch path, not a raw function call.
+    Before #301, nothing upstream of `run_fuzzing_stage` itself ever read these
+    fields; `MissionPolicy` did not even have them."""
+    mission.policy = {
+        **mission.policy,
+        "fuzz_harness_target": "njson_fuzz",
+        "fuzz_harness_binary": "njson_fuzz",
+        "fuzz_cache_entries": {"NJSON_SANITIZE": "ON", "NJSON_FUZZ": "ON"},
+        "fuzz_sanitizer_env": {"ASAN_OPTIONS": "detect_leaks=0"},
+    }
+    mission.save(update_fields=["policy"])
+
+    captured_kwargs: dict[str, object] = {}
+
+    def _spy(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _clean_outcome(executions=50_000, crashes=0)
+
+    monkeypatch.setattr(dispatch, "run_fuzzing_stage", _spy)
+
+    job = _job(mission)
+    result = executor_for(JobKind.FUZZ)(_ctx(mission, job))
+
+    assert result.outcome == JobOutcome.SUCCEEDED
+    assert captured_kwargs["harness_target"] == "njson_fuzz"
+    assert captured_kwargs["harness_binary"] == "njson_fuzz"
+    assert captured_kwargs["cache_entries"] == {"NJSON_SANITIZE": "ON", "NJSON_FUZZ": "ON"}
+    assert captured_kwargs["sanitizer_env"] == {"ASAN_OPTIONS": "detect_leaks=0"}

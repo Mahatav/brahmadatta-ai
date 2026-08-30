@@ -11,7 +11,15 @@ this module owns the `FUZZ` *executor* only, plus everything `MINIMIZE` gets.
   `packages.sandbox.container.ContainerJailPolicy` a campaign runs under, calls
   `run_fuzzing_stage` with `ctx.workspace_root` so real crash-artifact bytes survive
   the `ContainerJail`'s own teardown (D-106; `run_fuzzing_stage`'s own `workspace_root`
-  parameter), persists a `FuzzingReport` plus one `Finding` per sanitizer-confirmed
+  parameter). #301: also threads `mission_policy.fuzz_harness_target`/
+  `fuzz_harness_binary`/`fuzz_cache_entries`/`fuzz_sanitizer_env` (`contracts.schemas.
+  missions.MissionPolicy`) straight through to `run_fuzzing_stage`'s own same-named
+  parameters — #296/#288/#289 generalized `run_libfuzzer_campaign`/`run_fuzzing_stage`
+  at the function level, but nothing upstream of them ever exposed that generality to
+  a real mission before this; every field defaults to pktcfg's own values (`"pktcfg_
+  fuzz"`, `None`, `{}`), so an existing mission whose policy does not set them is
+  byte-for-byte unaffected. Persists a `FuzzingReport` plus one `Finding` per
+  sanitizer-confirmed
   crash (`orchestrator.findings.record_finding`, #168) and — when a durable artifact
   survived to pair with it — one real, unminimized `Reproducer` row
   (`orchestrator.findings.record_reproducer`, D-106; see `_record_reproducers`'s own
@@ -316,8 +324,12 @@ def _fuzz_executor(ctx: ExecutorContext) -> ExecutorResult:
             ctx.mission.id,
             ctx.source_dir,
             policy=policy,
+            harness_target=mission_policy.fuzz_harness_target,
+            harness_binary=mission_policy.fuzz_harness_binary,
+            cache_entries=mission_policy.fuzz_cache_entries,
             budget_seconds=budget_seconds,
             workspace_root=ctx.workspace_root,
+            sanitizer_env=mission_policy.fuzz_sanitizer_env or None,
         )
     except JailError as exc:
         return ExecutorResult(
@@ -361,11 +373,20 @@ def _result_from_outcome(ctx: ExecutorContext, outcome: FuzzingOutcome) -> Execu
         )
 
     if outcome.executions == 0:
-        # No progress at all recorded — the closest signal available to architecture
-        # spec §6.3(b)'s "genuinely stalled" without a `stall_seconds`-aware
-        # heartbeat hook into a running campaign (that hook does not exist in
-        # `run_libfuzzer_campaign` today — see this module's docstring on
-        # cooperative cancellation for the same class of gap). Retried once, per
+        # #302: a genuine 0-execution INFRA failure (binary not found at the resolved
+        # path, missing corpus directory, the container's own exec failing outright)
+        # is caught earlier — `adapters.cpp.fuzzing.run_libfuzzer_campaign` now sets
+        # `outcome.failure.step == ZERO_EXECUTION_INFRA_FAILURE_STEP` for exactly that
+        # case (three-part signal: 0 executions, no artifacts of any kind, a non-clean
+        # exit), which the `outcome.failure is not None` branch above already returns
+        # from with `infra_failure: True` before this branch is ever reached (that step
+        # is deliberately absent from `_HARNESS_BUILD_STEPS`). Reaching this branch
+        # therefore means the campaign completed with no adapter-level failure at all
+        # and *still* recorded 0 executions — the closest signal available to
+        # architecture spec §6.3(b)'s "genuinely stalled" without a `stall_seconds`-
+        # aware heartbeat hook into a running campaign (that hook does not exist in
+        # `run_libfuzzer_campaign` today — see this module's docstring on cooperative
+        # cancellation for the same class of gap). Retried once, per
         # `MAX_ATTEMPTS_BY_KIND[JobKind.FUZZ] == 2` and the "only when the first
         # attempt stalled" rule (architecture spec §3.4).
         return ExecutorResult(

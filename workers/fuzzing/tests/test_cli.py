@@ -106,6 +106,109 @@ def test_cli_reports_gate_runner_blockers(monkeypatch) -> None:
     assert "container runtime is unavailable" in stderr.getvalue()
 
 
+# ---------------------------------------------------------------------------------
+# #301: --harness-target/--harness-binary/--cache-entry/--sanitizer-env expose
+# run_fuzzing_stage's own (already real, #296/#288/#289) generalization to this CLI.
+# ---------------------------------------------------------------------------------
+
+
+def test_cli_defaults_reproduce_pktcfgs_own_behaviour_unchanged(monkeypatch) -> None:
+    """No new flag passed at all: `run_fuzzing_stage` must be called with exactly
+    pktcfg's own harness identity and no extra cache entries/sanitizer env — the "byte
+    for byte unaffected" requirement #301's fix direction names explicitly."""
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run_fuzzing_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return _outcome(crashes=0)
+
+    monkeypatch.setattr(cli, "run_fuzzing_stage", fake_run_fuzzing_stage)
+
+    cli.main(["--image", PINNED_IMAGE], stdout=io.StringIO(), stderr=io.StringIO())
+
+    assert captured_kwargs["harness_target"] == "pktcfg_fuzz"
+    assert captured_kwargs["harness_binary"] == "pktcfg_fuzz"
+    assert captured_kwargs["cache_entries"] is None
+    assert captured_kwargs["sanitizer_env"] is None
+
+
+def test_cli_drives_a_synthetic_non_pktcfg_target_end_to_end_through_the_real_cli(
+    monkeypatch,
+) -> None:
+    """#301's actual regression proof: a synthetic target that names its own harness,
+    CMake options, and sanitizer env completely differently from pktcfg is driven
+    correctly through the REAL CLI entry point (`cli.main`, not a raw function call to
+    `run_fuzzing_stage`) — proving the product surface this issue names as missing now
+    actually exists."""
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run_fuzzing_stage(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.update(kwargs)
+        return _outcome(crashes=1)
+
+    monkeypatch.setattr(cli, "run_fuzzing_stage", fake_run_fuzzing_stage)
+
+    code = cli.main(
+        [
+            "--image",
+            PINNED_IMAGE,
+            "--harness-target",
+            "njson_fuzz",
+            "--harness-binary",
+            "njson_fuzz",
+            "--cache-entry",
+            "NJSON_SANITIZE=ON",
+            "--cache-entry",
+            "NJSON_FUZZ=ON",
+            "--sanitizer-env",
+            "ASAN_OPTIONS=detect_leaks=0",
+        ],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert code == 0
+    assert captured_kwargs["harness_target"] == "njson_fuzz"
+    assert captured_kwargs["harness_binary"] == "njson_fuzz"
+    assert captured_kwargs["cache_entries"] == {"NJSON_SANITIZE": "ON", "NJSON_FUZZ": "ON"}
+    assert captured_kwargs["sanitizer_env"] == {"ASAN_OPTIONS": "detect_leaks=0"}
+
+
+def test_cli_cache_entry_value_may_itself_contain_an_equals_sign(monkeypatch) -> None:
+    """`--sanitizer-env ASAN_OPTIONS=detect_leaks=0` must split on the FIRST `=` only,
+    since a real sanitizer option string routinely contains one itself."""
+    captured_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli,
+        "run_fuzzing_stage",
+        lambda *a, **kw: (captured_kwargs.update(kw), _outcome(crashes=0))[1],
+    )
+
+    cli.main(
+        ["--image", PINNED_IMAGE, "--sanitizer-env", "ASAN_OPTIONS=detect_leaks=0:halt_on_error=1"],
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert captured_kwargs["sanitizer_env"] == {"ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1"}
+
+
+def test_cli_rejects_a_malformed_cache_entry(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "run_fuzzing_stage", lambda *a, **kw: _outcome(crashes=0))
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = cli.main(
+        ["--image", PINNED_IMAGE, "--cache-entry", "not-a-key-value-pair"],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert code == 2
+    assert stdout.getvalue() == ""
+    assert "--cache-entry expects KEY=VALUE" in stderr.getvalue()
+
+
 def _outcome(*, crashes: int) -> FuzzingOutcome:
     now = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
     return FuzzingOutcome(

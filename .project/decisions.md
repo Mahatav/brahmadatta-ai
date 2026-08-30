@@ -19186,3 +19186,328 @@ before the competition machine is finalized.
 compose/script documentation — standing self-merge authority per CLAUDE.md). Mahatav
 (the actual memory-capacity/model-choice/hardware decision this fix deliberately does
 not make).
+
+---
+
+## D-172 — #300/#301/#302 fixed together in one PR: `CMAKE_CXX_FLAGS`/
+`CMAKE_CXX_COMPILER` added to close a real verification-gate false negative, `MissionPolicy`
+gained four fuzz-harness-identity fields threaded through the real dispatch/CLI surface,
+and `run_libfuzzer_campaign` now resolves subdirectory-declared binaries and reports a
+genuine 0-execution infra failure as its own distinct outcome · 2026-08-30 ·
+`backend-developer` seat
+
+**Decision.** All three issues were found in the same 2026-08-29 dogfooding session
+against nlohmann/json (the first real C++ target run through this pipeline) and all touch
+the same small file set (`adapters/cpp/pipeline.py`, `adapters/cpp/fuzzing.py`,
+`workers/fuzzing/cli.py`, `workers/fuzzing/dispatch.py`, `apps/control-api/contracts/
+schemas/missions.py`) — fixed together in one PR/branch to avoid merge collisions between
+separately-dispatched agents, per this task's own dispatch instructions.
+
+**#300 (security-relevant, verification-gate false negative).** `adapters/cpp/pipeline.py::
+_configure_argv`'s sanitizer-variant path emitted `-DCMAKE_C_FLAGS=`/`-DCMAKE_EXE_LINKER_
+FLAGS=` but never `-DCMAKE_CXX_FLAGS=` — proven this session with a real C++ target under
+`Variant.ASAN_UBSAN`, `CMAKE_VERBOSE_MAKEFILE=ON`, and direct inspection of the real
+compile lines in the captured build log: with the bug present, 0 of 2 real `.cpp` compile
+lines carried `-fsanitize=address,undefined` while `configure_ok`/`build_ok` both reported
+`True` (the fixture mirrors this session's own original nlohmann/json proof method, on a
+smaller two-file synthetic C++ CMake target rather than a vendored third-party checkout).
+Fixed by adding `-DCMAKE_CXX_FLAGS=<same flags>` alongside the existing `-DCMAKE_C_FLAGS=`
+line — verified, with the fix reverted and reapplied in this same session, that the
+regression test (`adapters/cpp/tests/test_pipeline.py::
+test_asan_ubsan_variant_real_cxx_compile_lines_carry_the_sanitizer_flag`) fails without the
+fix and passes with it. `adapters/cpp/fuzzing.py`'s separate, smaller finding (`-DCMAKE_C_
+COMPILER=clang` with no `-DCMAKE_CXX_COMPILER=` counterpart, "fragile by coincidence" per
+the issue) got the same treatment: `-DCMAKE_CXX_COMPILER=clang++` added explicitly.
+
+**#301 (product-surface gap).** #296 generalized `run_libfuzzer_campaign`/
+`run_fuzzing_stage` to accept `cache_entries`/`harness_target`/`harness_binary`/
+`sanitizer_env`, but nothing upstream ever exposed that to a real mission or operator:
+`MissionPolicy` had no field for a target's harness identity, `workers/fuzzing/dispatch.py`
+(the real Django mission dispatcher) never read one, and `workers/fuzzing/cli.py`'s
+argparse never exposed one. Fixed by adding four new `MissionPolicy` fields
+(`fuzz_harness_target`, `fuzz_harness_binary`, `fuzz_cache_entries`, `fuzz_sanitizer_env`),
+mirroring the established optional/defaults-to-pktcfg's-own-values pattern
+`renewed_fuzz_seconds` (#40/D-144) and `baseline_extra_cmake_args` (#290) already set —
+threaded through `_fuzz_executor` in `workers/fuzzing/dispatch.py`, and matching
+`--harness-target`/`--harness-binary`/`--cache-entry`/`--sanitizer-env` CLI flags added to
+`workers/fuzzing/cli.py` for manual/operator use. `packages/schemas/openapi.json`
+regenerated to match (`contracts/tests/test_openapi_dump.py` enforces the freeze).
+
+**#302 (two adapter-correctness gaps).** (a) `run_libfuzzer_campaign` invoked the harness
+at a hardcoded flat `f"{build_dir}/{harness_binary}"`, which only resolves when the fuzz
+target is declared in the project's top-level `CMakeLists.txt` (true for pktcfg) — a
+subdirectory-declared target (a completely normal CMake layout, e.g. `fuzz/CMakeLists.txt`)
+builds successfully and then fails at run time with `exec: .../<binary>: not found`.
+Fixed by adding `-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=<build_dir>` to the configure step —
+CMake's own documented mechanism for seeding every target's `RUNTIME_OUTPUT_DIRECTORY`
+property at creation time, a no-op for pktcfg (whose target is already top-level) and the
+actual fix for the subdirectory case, with one stated limit: a target that calls `set_
+target_properties(... RUNTIME_OUTPUT_DIRECTORY ...)` on itself still wins over this global
+default, by CMake's own precedence rules — a deliberate project-side choice, not something
+a caller-side flag should override. (b) A genuine 0-execution infra failure (binary not
+found, missing corpus dir) reported `failure: None, crashes_found: 0, executions: 0` —
+indistinguishable from a real clean campaign that found nothing in budget. Fixed by
+flagging this outcome distinctly (`FuzzFailure.step == ZERO_EXECUTION_INFRA_FAILURE_STEP`)
+whenever `executions == 0` AND no artifact of any kind was discovered AND the run's own
+exit was not clean — deliberately three-part so a real crash (which also exits nonzero) is
+never misclassified: a real crash always has `crashes_found > 0`, which alone rules out
+this branch. Both #302 fixes verified against the real `brahmadatta-fuzz-toolchain` image
+this session: a synthetic subdirectory-declared target now builds AND executes
+(`test_real_campaign_resolves_a_subdirectory_placed_harness_binary`), and reverting the
+`CMAKE_RUNTIME_OUTPUT_DIRECTORY` fix reproduces the exact real failure (`exec: /workspace/
+build-libfuzzer/subdirsynth_fuzz: not found`, exit 127) now correctly classified as
+`FUZZ_ZERO_EXECUTION_INFRA_FAILURE` rather than a clean result.
+
+**Options considered.**
+1. **Resolve the fuzz binary path by searching the build tree at run time** (`find`,
+   per the issue's own alternative suggestion), instead of `CMAKE_RUNTIME_OUTPUT_
+   DIRECTORY`. Rejected: the fuzz-toolchain image (`infrastructure/compose/images/
+   fuzz-toolchain.Dockerfile`) installs no `findutils`-equivalent search tool beyond what
+   the minimal Ubuntu base ships, and a shell-based search adds a second real subprocess
+   (and a second place a malformed/attacker-influenced binary name could matter) for a
+   problem CMake's own configure-time variable already solves deterministically with a
+   one-line addition.
+2. **Leave #300's C++ gap as a documented caveat rather than a code fix**, since pktcfg
+   (the only target this pipeline ships a committed demo for) is pure C and never
+   triggers it. Rejected outright: CLAUDE.md's own non-negotiable rule — "a patch is never
+   accepted on model confidence alone... any code path that lets confidence substitute for
+   verification is a bug" — makes an unfixed, silently-unsanitized C++ build a standing
+   violation of this project's own stated safety invariant, not a cosmetic gap.
+3. **Add `fuzz_cache_entries`/`fuzz_sanitizer_env` as required (non-optional) `Mission
+   Policy` fields** with pktcfg's values hardcoded as literal schema defaults, instead of
+   `None`-means-"defer to `run_libfuzzer_campaign`'s own default". Rejected: this would
+   duplicate pktcfg's own default cache-entry names in two places (the schema and
+   `adapters/cpp/fuzzing.py::DEFAULT_CACHE_ENTRIES`) that could drift independently; `None`
+   keeps `DEFAULT_CACHE_ENTRIES` the single source of truth, matching how `baseline_extra_
+   cmake_args` already treats "no override" as an empty/absent value rather than a copy.
+4. **Chosen**: the fixes described above — `CMAKE_CXX_FLAGS`/`CMAKE_CXX_COMPILER` added
+   unconditionally (a no-op for a pure-C target), four new optional `MissionPolicy` fields
+   defaulting to pktcfg's exact prior values, `CMAKE_RUNTIME_OUTPUT_DIRECTORY` forcing a
+   flat build layout, and a three-part signal distinguishing a genuine 0-execution infra
+   failure from a real crash or a real clean campaign.
+
+**Pros and cons** — Pro: closes a real, proven verification-gate false negative; makes
+#296's already-real adapter generalization actually reachable from a mission or an
+operator, not just a one-off script; fixes two adapter-correctness gaps with real,
+Docker-verified regression proof; every change defaults to pktcfg's exact existing
+behaviour, confirmed by the full existing adapter/fuzzing/orchestrator test suites passing
+unchanged. Con: `CMAKE_RUNTIME_OUTPUT_DIRECTORY` does not cover a target that explicitly
+overrides its own `RUNTIME_OUTPUT_DIRECTORY` property — documented as a stated, deliberate
+limit rather than silently unhandled.
+
+**Cost implications** — none; no new infrastructure, no new dependency. The fuzz-toolchain
+image already ships everything both fixes need.
+
+**Security implications** — #300 changes verification-gate semantics (a build that used to
+silently report "sanitized" for C++ sources now genuinely is), which is exactly the kind of
+change CLAUDE.md requires cybersecurity review for before merge; requested explicitly on
+the PR, self-merge withheld pending that review. #301's new `MissionPolicy` fields are
+authorizing-operator-supplied mission configuration (same trust boundary `PatchPolicy.
+allowed_paths`/`baseline_extra_cmake_args` already documented), interpolated only into
+real argv-list entries (`ContainerJail.run`/`sandbox.run`, never a shell string) —
+`fuzz_harness_target`/`fuzz_harness_binary` are pattern-restricted to CMake's own legal
+target-name character set (`^[A-Za-z0-9_.+-]{1,200}$`) as defense in depth, matching how
+`baseline_extra_cmake_args` treats operator-supplied CMake cache entries as trusted-operator
+input, not attacker-controlled target content. #302's fixes touch only the adapter's own
+configure/run argv construction and outcome classification — no new external input surface.
+
+**Scalability implications** — none.
+
+**Recommendation** — Merge once cybersecurity has reviewed #300's verification-gate
+semantics change specifically (does `CMAKE_CXX_FLAGS` genuinely close the false negative,
+does pktcfg's own behaviour remain byte-for-byte unchanged, does the new `MissionPolicy`/
+dispatch wiring introduce any new untrusted-input surface) — not self-merged per CLAUDE.md's
+standing rule for security-sensitive changes (isolation, sandboxing, verification gates).
+
+**Final approval authority** — CTO for the technical fixes; cybersecurity sign-off required
+before merge specifically for #300's verification-gate semantics change, per CLAUDE.md.
+
+---
+
+## D-173 — Cybersecurity review of PR #312 (#300/#301/#302): CLEARED, from-scratch
+independent verification, not just the builder's own revert-and-reproduce claim ·
+2026-08-30 · `cybersecurity` seat
+
+**Decision.** PR #312 is CLEARED to merge. Every claim in D-172 and the PR description was
+independently re-verified in this session, not taken on trust — including running the
+builder's own revert-and-reproduce test from scratch, a second time, myself.
+
+**#300 (the real security-relevant fix) — independently reproduced end to end.** Reverted
+only the `argv.append(f"-DCMAKE_CXX_FLAGS={flags}")` line in `adapters/cpp/pipeline.py::
+_configure_argv` (kept the fix's own comment) and reran the real, non-mocked compile-log
+test (`adapters/cpp/tests/test_pipeline.py::
+test_asan_ubsan_variant_real_cxx_compile_lines_carry_the_sanitizer_flag`, which compiles an
+actual two-file C++ CMake target with `CMAKE_VERBOSE_MAKEFILE=ON` and inspects the real
+captured build log): confirmed, myself, 0 of 2 real `.cpp` compile lines carried
+`-fsanitize=address,undefined` while `configure_ok`/`build_ok` both still reported `True` —
+the exact false negative the issue describes. Restored the line (`git diff --stat` showed
+zero drift from the PR's own content afterward) and reran: all real compile lines now carry
+the sanitizer flag, both new unit tests and the real-compile test pass. This is not the
+builder's claim taken at face value — it is a second, independent revert-and-reproduce run
+with the same result.
+
+**pktcfg's own behaviour — confirmed unaffected, not just asserted.** Ran the full
+`adapters/cpp/tests` suite myself: 94 passed, 1 skipped (pre-existing Darwin-only skip) —
+including `test_pktcfg_baseline_is_really_eight_of-eight`, a real `ctest` run against
+pktcfg's actual 8 tests, still 8/8. `CMAKE_CXX_FLAGS`/`CMAKE_RUNTIME_OUTPUT_DIRECTORY` are
+both no-ops for a target with zero C++ sources / an already-top-level target, and this run
+proves it rather than assuming CMake's documented behaviour holds.
+
+**#301 (new `MissionPolicy` fields) — scrutinized directly against the schema, not just the
+PR's own description of it.** Loaded `contracts.schemas.missions.MissionPolicy` directly and
+fed it adversarial values:
+- `fuzz_harness_target`/`fuzz_harness_binary` (pattern `^[A-Za-z0-9_.+-]{1,200}$`) correctly
+  **rejected** `"a; rm -rf /"`, `"a$(whoami)"`, `` "`id`" ``, `"a b"`, and anything containing
+  `/` (so no multi-segment path traversal). One residual gap found and recorded, not blocking:
+  a bare `".."` (no slash) passes the pattern, since `.` is an allowed character. Given
+  `run_libfuzzer_campaign` only ever uses this value as one argv element
+  (`f"{build_dir}/{harness_binary}"`, `cmake --build ... --target <name>`, never a shell
+  string — confirmed by reading `packages/sandbox/container.py::_docker_run_args`, which
+  builds `docker run ... sh -c 'umask 000; exec "$@"' brahmadatta-command <argv...>`, argv
+  passed as positional `"$@"` parameters, never string-interpolated into the `-c` script) and
+  the container is `--network none --cap-drop ALL --user 10001:10001 --read-only` with only
+  `/workspace` and `/tmp` writable, the worst case (`harness_binary=".."` resolving to
+  `/workspace`) is an exec failure inside an already-fully-isolated sandbox, not an escape —
+  low severity, recorded as a follow-up (tighten the pattern to also reject a bare `.`/`..`
+  segment), not a blocker.
+- `fuzz_cache_entries`/`fuzz_sanitizer_env` (`dict[str, str]`, only `max_length=20` on entry
+  *count*) accept **any** key/value content — confirmed live: `{"FOO; rm -rf /": "bar"}`,
+  `{"$(whoami)": "x"}`, embedded newlines, and `{"CMAKE_TOOLCHAIN_FILE": "/etc/passwd"}` for
+  cache entries, and `{"LD_PRELOAD": "..."}`/arbitrary `PATH` overrides for sanitizer env, all
+  validate successfully. This is a genuinely new configurable surface (#296 already made the
+  adapter function accept it; #301 is what makes it reachable from a real mission/operator).
+  Assessed as **not a new trust-boundary violation and not blocking**, for three independent
+  reasons, each verified rather than assumed: (1) every one of these values is consumed as a
+  single argv-list element passed to `subprocess.Popen`/`docker` with `shell` never used
+  (confirmed by reading `packages/sandbox/jail.py` and `container.py`, both carry an explicit
+  `# noqa: S603 - argv is a list, shell is never used` comment on the exact call sites) — no
+  string ever gets shell-interpreted, so classic command injection via `;`, `$()`, backticks,
+  or newlines is not reachable regardless of what a key/value contains; (2) the shape
+  (unrestricted `dict[str, str]`, "operator's own choice about their own authorized target,
+  same trust boundary as `PatchPolicy.allowed_paths`") is not new — it is byte-for-byte the
+  same shape and the same documented trust boundary `baseline_extra_cmake_args` (#290,
+  already-merged, already-accepted) already established; #301 extends an existing precedent
+  to a second pipeline stage, it does not invent a new one; (3) even a maximally hostile
+  `CMAKE_TOOLCHAIN_FILE`/`LD_PRELOAD` value only achieves arbitrary code execution *inside*
+  the same no-network, `--cap-drop ALL`, non-root, read-only `ContainerJail` that an
+  authorized target's own untrusted build scripts can already exercise by design — it is not
+  a capability the sandbox was not already built to contain. **Recorded as a defense-in-depth
+  follow-up** (a real, if lower-priority, hardening opportunity): consider a narrower
+  allowlist or character-class restriction on `fuzz_cache_entries`/`fuzz_sanitizer_env` keys
+  specifically, mirroring `fuzz_harness_target`'s own pattern, so a malformed or careless
+  operator value fails at the schema boundary with a clear error instead of silently reaching
+  CMake/Docker. Not required before merge: `baseline_extra_cmake_args` already carries this
+  exact shape today, unblocked, so #301 introduces no new category of risk, only an
+  opportunity to raise the bar CLAUDE.md's own security posture does not currently require.
+
+**#302 (three-part zero-execution signal) — adversarially tested against a real crash, not
+just read.** Read `run_libfuzzer_campaign`'s exact gating (`metrics.executions == 0 and not
+artifact_paths and not run.ok`) and confirmed `artifact_paths` is a REAL on-disk directory
+listing of the artifact directory (`sorted((sandbox.root / FUZZ_ARTIFACT_DIR).glob("*"))`),
+not a parse of stdout — meaning any crash/leak/timeout/oom/slow-unit artifact libFuzzer ever
+writes to disk unconditionally defeats this branch's `not artifact_paths` condition,
+regardless of whether a stats line was ever printed. Then built a standalone script
+(bypassing `test_real_campaign.py`'s own `fuzz_image` fixture, which hit a transient
+GPG-signature failure against `ports.ubuntu.com` rebuilding the toolchain image fresh in this
+sandboxed session — an environment/mirror issue, unrelated to this PR, confirmed by `git diff
+origin/main...HEAD -- infrastructure/compose/images/fuzz-toolchain.Dockerfile` being empty,
+i.e. the already-built, pre-existing local image is the same image this PR's code would
+produce) and ran three real, non-mocked campaigns against a real, digest-pinned
+`brahmadatta-fuzz-toolchain` container:
+1. pktcfg's own real seeded heap-buffer-overflow: found on execution **6** — proving a fast
+   real crash still gets `executions > 0` recorded (so condition 1 of the three-part signal
+   is false), `unique_crashes == 1`, `failure is None`. This is the direct adversarial case
+   the review brief asked for — "a real crash happening fast enough that `executions` reads
+   0" — and it does not happen: libFuzzer's own execution counter increments before the
+   crashing input runs, so even a first-input crash reports `executions >= 1`.
+2. A genuine 0-execution infra failure (a real target that builds successfully, pointed at a
+   `harness_binary` name that was never actually produced): correctly reported
+   `mode=NOT_RUN`, `executions=0`, `failure.step == ZERO_EXECUTION_INFRA_FAILURE_STEP`.
+3. A subdirectory-declared fuzz target (mirroring nlohmann/json's own `fuzz/CMakeLists.txt`
+   layout): resolved and executed for real (16.7M executions in a 10s budget), proving
+   `CMAKE_RUNTIME_OUTPUT_DIRECTORY` genuinely fixes #302 finding 1, not just in a mock.
+No scenario constructed — including the specific "crash before any stats line" adversarial
+case — produced a misclassification in either direction.
+
+**Test suites run, real output, matching the builder's claims exactly:**
+- `adapters/cpp/tests` (`-m ""`): **94 passed, 1 skipped** — matches PR description.
+- `workers/fuzzing/tests` (mocked): **17 passed, 7 skipped, 1 xfailed** — matches.
+- `workers/fuzzing/tests/test_real_campaign.py` (`BRAHMADATTA_RUN_REAL_FUZZ_CAMPAIGN=1`):
+  the pytest file itself could not complete via its own `fuzz_image` fixture in this sandbox
+  (transient `ports.ubuntu.com` GPG failure on a fresh image build, and separately, a hung
+  `docker push` caused by Docker Desktop's `credsStore: "desktop"` credential helper blocking
+  on macOS Keychain access with no GUI available in this session — both environment
+  artifacts of this sandboxed session, not the PR). Verified the equivalent real assertions
+  directly instead (see above), against the same unchanged, already-built toolchain image,
+  achieving the same results the file's own tests assert.
+- `workers/baseline/tests`: **11 passed, 1 skipped** — matches.
+- `apps/control-api` full suite: **800 passed, 23 skipped, 1 failed** (824 total); orchestrator
+  subdirectory alone: **382 passed**, matching the PR description's specific number.
+  `contracts/tests/test_openapi_dump.py`: 18 passed — the regenerated `openapi.json` is
+  consistent with the schema changes.
+- The one failure, `orchestrator/tests/test_patch_generate_executor.py::
+  test_live_backend_built_by_this_module_gets_401_from_the_sidecar_without_the_fix`,
+  independently reproduced on a byte-for-byte unmodified `origin/main` checkout (confirmed via
+  `git diff origin/main -- .` returning empty on that checkout before running it) — same
+  failure, same traceback, confirming this is genuinely pre-existing and unrelated to this
+  PR (this PR never touches `services/model-gateway/gateway/ollama.py` or `client.py`).
+
+**Rebase note.** This PR was rebased onto `origin/main` (D-172's own single `.project/
+decisions.md` conflict resolved by keeping both sides' content in order, renumbering nothing
+since D-171 was already the correct highest number on `origin/main` and this PR's own new
+entry was already D-172) before this review — see the PR's own commit history for the
+resulting single, clean commit.
+
+**Options considered.**
+1. **Trust the builder's own revert-and-reproduce claim and D-172's stated reasoning
+   without independently re-running it.** Rejected outright — this is exactly the "model
+   confidence substituting for verification" CLAUDE.md's own non-negotiable rule prohibits,
+   and #300 is specifically a change to verification-gate semantics, the category CLAUDE.md
+   names explicitly as needing this review.
+2. **Block the PR pending a clean real-Docker `pytest` run**, given `test_real_campaign.py`
+   itself could not be made to pass in this sandboxed session. Rejected: the blocker was
+   independently root-caused to two environment artifacts of this specific sandboxed
+   session (a transient upstream mirror GPG failure, and a credential-helper hang with no
+   GUI available) that have nothing to do with this PR's code, confirmed by (a) the
+   Dockerfile being byte-for-byte unchanged by this PR and (b) running the exact same
+   assertions `test_real_campaign.py` makes, directly, against the same already-built image,
+   and getting the same passing results. Blocking a real, verified fix on an unrelated local
+   sandbox networking/credential issue would be a false negative of its own.
+3. **Require a schema-level allowlist on `fuzz_cache_entries`/`fuzz_sanitizer_env` keys
+   before merge**, treating the lack of one as a blocking gap. Rejected: this shape already
+   exists, unblocked, in `baseline_extra_cmake_args` (#290) under the identical documented
+   trust boundary, the execution path is argv-list-only end to end (no shell), and the
+   sandbox's own isolation already assumes and contains arbitrary code execution from build
+   tooling. Treating #301 as introducing a NEW risk here would be inconsistent with this
+   repository's own prior, already-accepted precedent for the exact same shape.
+4. **Chosen**: CLEARED, with two recorded non-blocking follow-ups (tighten
+   `fuzz_harness_target`/`fuzz_harness_binary`'s pattern to reject a bare `.`/`..` segment;
+   consider a narrower allowlist for `fuzz_cache_entries`/`fuzz_sanitizer_env` keys as
+   defense in depth, matching `fuzz_harness_target`'s existing precedent-setting pattern).
+
+**Pros and cons** — Pro: every claim in the PR was independently re-derived, including the
+one the review brief explicitly said not to take on faith (#300's revert-and-reproduce), and
+the two most concerning theoretical risks (#301's new config surface, #302's classification
+logic) were each tested adversarially rather than only read. Con: the real-Docker pytest
+file itself does not have a clean recorded run from this specific session, due to sandbox
+environment issues outside this PR's control — mitigated by an equivalent from-scratch
+manual reproduction against the same unchanged image, but a future CI run of the actual file
+is still the more complete record and should be checked once, outside this sandbox.
+
+**Cost implications** — none.
+
+**Security implications** — this entry's own subject. #300 closes a real verification-gate
+false negative. #301's new configuration surface is consistent with existing, already-
+accepted precedent and cannot reach a shell; two low-priority hardening follow-ups recorded,
+neither blocking. #302's classification logic was adversarially tested against the specific
+scenario (a fast real crash) that would have made a misclassification dangerous, and did not
+misfire.
+
+**Scalability implications** — none.
+
+**Recommendation** — Merge. Follow-up issues for the two recorded hardening notes
+(harness-name pattern tightening; cache-entry/sanitizer-env key allowlisting) are suggested,
+not required, for a future PR.
+
+**Final approval authority** — cybersecurity (this review, severity/verdict, per this role's
+standing authority); CTO retains authority to arbitrate if this verdict is disputed.
