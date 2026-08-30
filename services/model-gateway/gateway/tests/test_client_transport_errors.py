@@ -21,10 +21,13 @@ bytes than it delivers, then closes the connection, so `http.client` raises
 
 from __future__ import annotations
 
+import io
+import json
 import socket
 import threading
 from contextlib import contextmanager
-from urllib.error import URLError
+from typing import Any
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -37,6 +40,14 @@ def _raise(exc: Exception):
         raise exc
 
     return fake_urlopen
+
+
+def _http_error(status: int, body: dict[str, Any] | str, *, reason: str = "Internal Server Error") -> HTTPError:
+    """A real `HTTPError`, `.read()`-able exactly like the one `urlopen` raises for a
+    real non-2xx response — not a bare mock, so `_http_error()`/`.read()` in
+    `gateway.client` exercises the real `HTTPError` object shape (#298)."""
+    payload = json.dumps(body).encode("utf-8") if isinstance(body, dict) else body.encode("utf-8")
+    return HTTPError("http://127.0.0.1:11434/api/chat", status, reason, None, io.BytesIO(payload))
 
 
 def test_post_json_wraps_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,6 +119,60 @@ def test_json_decode_error_is_unaffected_by_the_transport_wrapper(
     )
 
     with pytest.raises(LiveGenerationError, match="non-JSON response"):
+        post_json("http://127.0.0.1:11434/api/chat", {"model": "x"}, 5.0)
+
+
+def test_post_json_surfaces_the_ollama_error_body_on_http_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#298: the real, live-observed shape — Ollama answers with a real HTTP 500 and a
+    JSON body naming the actual reason (a memory-capacity refusal, here). Before this
+    fix `urlopen`'s `HTTPError` was already being caught (it is a `URLError`
+    subclass), but the body was never read, so this collapsed to the generic
+    "did not respond: HTTP Error 500: Internal Server Error" wording and the
+    specific, actionable reason was discarded."""
+    monkeypatch.setattr(
+        "gateway.client.urlopen",
+        _raise(
+            _http_error(
+                500,
+                {"error": "model requires more system memory (8.4 GiB) than is available (7.7 GiB)"},
+            )
+        ),
+    )
+
+    with pytest.raises(LiveGenerationError, match="requires more system memory") as excinfo:
+        post_json("http://127.0.0.1:11434/api/chat", {"model": "x"}, 5.0)
+
+    assert excinfo.value.details["http_status"] == 500
+    assert excinfo.value.details["cause"] == "HTTPError"
+    assert "8.4 GiB" in excinfo.value.details["response_body"]
+
+
+def test_post_json_http_error_with_non_json_body_falls_back_to_raw_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not every backend behind this chokepoint is Ollama, and not every non-2xx body
+    is JSON. A plain-text error body must still reach the caller rather than being
+    reduced to the bare status line."""
+    monkeypatch.setattr(
+        "gateway.client.urlopen",
+        _raise(_http_error(502, "upstream connect error", reason="Bad Gateway")),
+    )
+
+    with pytest.raises(LiveGenerationError, match="upstream connect error"):
+        post_json("http://127.0.0.1:11434/api/chat", {"model": "x"}, 5.0)
+
+
+def test_post_json_http_error_with_empty_body_falls_back_to_http_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No body at all must not blow up the error-formatting path itself — the HTTP
+    reason phrase is the fallback."""
+    monkeypatch.setattr(
+        "gateway.client.urlopen",
+        _raise(_http_error(500, "", reason="Internal Server Error")),
+    )
+
+    with pytest.raises(LiveGenerationError, match="Internal Server Error"):
         post_json("http://127.0.0.1:11434/api/chat", {"model": "x"}, 5.0)
 
 

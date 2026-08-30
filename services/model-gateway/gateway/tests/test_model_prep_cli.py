@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 from gateway.tools import model_prep
 
@@ -216,6 +218,150 @@ def test_doctor_falls_back_to_bearer_token_env_var(
         == model_prep.EXIT_OK
     )
     assert seen["bearer_token"] == "from-the-environment"
+
+
+class _FakeChatResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> _FakeChatResponse:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _fake_ollama_chat_success(request: Any, timeout: float) -> _FakeChatResponse:
+    body = json.dumps(
+        {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "diff": "--- a/x.c\n+++ b/x.c\n",
+                        "rationale": "ok",
+                        "touched_files": [],
+                        "confidence": 0.5,
+                    }
+                )
+            },
+            "eval_count": 1,
+        }
+    ).encode("utf-8")
+    return _FakeChatResponse(body)
+
+
+def _fake_ollama_insufficient_memory(request: Any, timeout: float) -> None:
+    body = json.dumps(
+        {"error": "model requires more system memory (8.4 GiB) than is available (7.7 GiB)"}
+    ).encode("utf-8")
+    raise HTTPError(request.full_url, 500, "Internal Server Error", None, io.BytesIO(body))
+
+
+def test_doctor_check_memory_passes_when_generation_succeeds(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """#298: `--check-memory` is opt-in real proof the model actually loads and
+    generates inside the memory this container was given, not just that Ollama's
+    HTTP endpoint answers and the model name is present."""
+    output = tmp_path / "doctor.json"
+    monkeypatch.setattr(
+        model_prep,
+        "get_json",
+        lambda url, timeout, **kwargs: {"models": [{"model": "codellama:7b-instruct"}]},
+    )
+    monkeypatch.setattr("gateway.client.urlopen", _fake_ollama_chat_success)
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--check-memory",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+
+    payload = _load(output)
+    assert payload["status"] == "ready"
+    assert payload["checks"]["model_fits_memory"] is True
+
+
+def test_doctor_check_memory_reports_insufficient_memory_clearly(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """#298's actual regression guard at the CLI/operator layer: the exact live
+    failure (a real HTTP 500, Ollama's own "requires more system memory" wording)
+    must come out of `doctor --check-memory` as a clear, actionable
+    'insufficient-memory' status — caught here, before a mission ever runs — not
+    surface for the first time as an opaque failure mid-PATCH_GENERATE."""
+    output = tmp_path / "doctor.json"
+    monkeypatch.setattr(
+        model_prep,
+        "get_json",
+        lambda url, timeout, **kwargs: {"models": [{"model": "codellama:7b-instruct"}]},
+    )
+    monkeypatch.setattr("gateway.client.urlopen", _fake_ollama_insufficient_memory)
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--check-memory",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_BLOCKED
+    )
+
+    payload = _load(output)
+    assert payload["status"] == "insufficient-memory"
+    assert payload["checks"]["model_fits_memory"] is False
+    assert "8.4 GiB" in payload["message"]
+    assert "7.7 GiB" in payload["message"]
+    assert "MODEL_HOST_MEM_LIMIT" in payload["message"]
+    assert payload["degraded_state"]["active"] is True
+    assert "MODEL_HOST_MEM_LIMIT" in payload["degraded_state"]["reason"]
+
+
+def test_doctor_without_check_memory_flag_leaves_model_fits_memory_unchecked(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The default, fast doctor run (no `--check-memory`) must not make any
+    generation call at all -- `model_fits_memory` stays explicitly `None`
+    ("not checked"), not `True` (which would be a false all-clear) or `False`."""
+    output = tmp_path / "doctor.json"
+    monkeypatch.setattr(
+        model_prep,
+        "get_json",
+        lambda url, timeout, **kwargs: {"models": [{"model": "codellama:7b-instruct"}]},
+    )
+
+    assert (
+        model_prep.main(
+            [
+                "doctor",
+                "--endpoint",
+                "http://127.0.0.1:11434/api",
+                "--output",
+                str(output),
+            ]
+        )
+        == model_prep.EXIT_OK
+    )
+
+    payload = _load(output)
+    assert payload["status"] == "ready"
+    assert payload["checks"]["model_fits_memory"] is None
 
 
 def test_fake_measure_goes_through_gateway_and_emits_evidence(tmp_path: Path) -> None:

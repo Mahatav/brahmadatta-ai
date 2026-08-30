@@ -446,6 +446,15 @@ services:
     networks:
       - backend
     healthcheck:
+      # #298: liveness only, not a memory-capacity proof — see docker-compose.yml's
+      # matching, longer comment for why the real memory pre-flight
+      # (`python -m gateway.tools.model_prep doctor --check-memory`) is a separate,
+      # explicit, one-time operator step run once this container is healthy, before a
+      # mission (a competition run, above all) depends on this model host, not a
+      # `healthcheck:` polled every 10s. This matters MORE here than in dev: this is
+      # the finale/competition stack, and finding out live that the model does not fit
+      # in `MODEL_HOST_MEM_LIMIT` is exactly the #298 failure mode this preflight
+      # exists to catch on rehearsal day instead of demo day.
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s

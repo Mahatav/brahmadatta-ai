@@ -9,9 +9,10 @@ does that explicitly with `ollama pull codellama:7b-instruct`.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urljoin
 
 from pydantic import ValidationError
@@ -54,6 +55,56 @@ DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300.0
 #: in memory forever, which would work against — not sidestep — D-123's separate,
 #: not-yet-resolved memory-pressure finding.
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
+#: #298: Ollama's own wording, observed live, for "the model does not fit in the
+#: memory this container was actually given" — a real HTTP 500 from
+#: `/api/chat`/`/api/generate` (confirmed: not a 4xx, not a client-side timeout), e.g.
+#: `"model requires more system memory (8.4 GiB) than is available (7.7 GiB)"`. Before
+#: this fix `gateway.client._transport_error` did not read the response body at all
+#: (see that module's own #298 comment), so this text never reached here or anywhere
+#: else — a mission's PATCH_GENERATE attempt failed with an opaque "did not respond"
+#: instead of the specific, actionable reason Ollama already gave it. This module
+#: re-recognises that one specific, high-value shape and turns it into an explicit,
+#: named capacity error rather than leaving it as one more generic `LiveGenerationError`
+#: string a caller has to read to understand. Matched case-insensitively and tolerant
+#: of "system memory" vs a future "memory" wording, since this project does not control
+#: Ollama's exact phrasing and a wording tweak upstream should not silently stop this
+#: match; unmatched text still raises `LiveGenerationError` with the (now-surfaced,
+#: thanks to the `gateway.client` fix) original detail either way, so nothing regresses
+#: if the phrasing does change.
+_INSUFFICIENT_MEMORY_PATTERN = re.compile(
+    r"requires more (?:system )?memory\s*\(([^)]+)\)\s*than is available\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+
+
+def _reraise_as_capacity_error(exc: LiveGenerationError, *, model_name: str, endpoint: str) -> NoReturn:
+    """Re-raise a clear, actionable `LiveGenerationError` if `exc` is Ollama's
+    "model does not fit in the memory this container has" refusal; otherwise re-raise
+    `exc` unchanged. Always raises. See `_INSUFFICIENT_MEMORY_PATTERN`'s comment for
+    why this fix lives here rather than in `gateway.client`.
+    """
+    body = str(exc.details.get("response_body") or "")
+    match = _INSUFFICIENT_MEMORY_PATTERN.search(body) or _INSUFFICIENT_MEMORY_PATTERN.search(str(exc))
+    if match is None:
+        raise exc
+    required, available = match.group(1), match.group(2)
+    raise LiveGenerationError(
+        f"Ollama refused to load {model_name!r} at {endpoint!r}: it needs {required} "
+        f"resident but only {available} is available in the model-host container. "
+        "This is a capacity problem, not a transient one — retrying will not help. "
+        "Check MODEL_HOST_MEM_LIMIT (infrastructure/compose/docker-compose*.yml's "
+        "model-host service) against this model's real memory requirement, and "
+        "consider a smaller/quantized model if the host cannot be given more memory. "
+        f"Original Ollama error: {exc}",
+        details={
+            **exc.details,
+            "capacity_error": True,
+            "model_required": required,
+            "model_available": available,
+            "model_name": model_name,
+        },
+    ) from exc
 
 
 @dataclass(frozen=True)
@@ -119,12 +170,15 @@ class OllamaCodeLlamaBackend:
         if self.keep_alive:
             payload["keep_alive"] = self.keep_alive
 
-        response = post_json(
-            _endpoint_url(self.endpoint, "chat"),
-            payload,
-            self.timeout_sec,
-            bearer_token=self.bearer_token,
-        )
+        try:
+            response = post_json(
+                _endpoint_url(self.endpoint, "chat"),
+                payload,
+                self.timeout_sec,
+                bearer_token=self.bearer_token,
+            )
+        except LiveGenerationError as exc:
+            _reraise_as_capacity_error(exc, model_name=self.model_name, endpoint=self.endpoint)
         wall_time_ms = int((time.perf_counter_ns() - started) / 1_000_000)
         content = _ollama_message_content(response)
         output_tokens = response.get("eval_count")

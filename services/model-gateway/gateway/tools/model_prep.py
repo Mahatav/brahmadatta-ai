@@ -27,6 +27,7 @@ from gateway.ollama import (
     CODELLAMA_REVISION,
     DEFAULT_CODELLAMA_MODEL,
     DEFAULT_OLLAMA_ENDPOINT,
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     OllamaCodeLlamaBackend,
     patch_candidate_from_model_text,
 )
@@ -554,6 +555,53 @@ def _cmd_attempts(args: argparse.Namespace) -> int:
     return EXIT_OK if passed else EXIT_BLOCKED
 
 
+#: #298: a real capacity refusal from Ollama ("model requires more system memory
+#: (8.4 GiB) than is available (7.7 GiB)") surfaced live as an opaque HTTP 500 deep
+#: inside a mission's PATCH_GENERATE call — the worst possible place to learn about a
+#: resource-sizing problem that has nothing to do with the target repository. `doctor`
+#: is this repo's one existing "run this explicitly before you trust the model host"
+#: command (see `_cmd_plan`'s own printed operator sequence, which already runs
+#: `doctor` as step 2, before any mission), so this is the earliest point an operator
+#: already has a habit of checking. `--check-memory` (opt-in, see its own help text)
+#: adds a real minimal generation call here — the only way to trigger Ollama's own
+#: memory check ahead of time, since Ollama does not expose "would this fit" as a
+#: separate, side-effect-free query. Opt-in, not automatic, for the same reason this
+#: module's own docstring gives for never pulling a model automatically: it is a real,
+#: possibly slow (a cold model load costs ~60-190s, D-123) action with a real resource
+#: cost, and an operator who only wants the fast reachability/presence checks above
+#: should not pay for it by default.
+_INSUFFICIENT_MEMORY_PROMPT = "Return the single word OK."
+
+
+def _run_memory_check(args: argparse.Namespace) -> tuple[bool, str, dict[str, object]]:
+    """Trigger Ollama's own memory-fit check for real, via the smallest live
+    generation call this backend can make (`max_output_tokens=1`). Returns
+    `(fits, message, details)`. `fits=False` covers both a confirmed capacity refusal
+    and any other failure of this specific call — either way, the operator should not
+    proceed to trust `--check-memory`'s absence of a problem when it never actually
+    ran the check to completion.
+    """
+    backend = OllamaCodeLlamaBackend(
+        endpoint=args.endpoint,
+        model_name=args.model,
+        model_revision=args.revision,
+        model_artifact_sha256=args.artifact_sha256,
+        timeout_sec=args.memory_check_timeout_sec,
+        bearer_token=_bearer_token(args),
+    )
+    request = GenerationRequest(
+        mission_id="model-prep-doctor-memory-check",
+        prompt=_INSUFFICIENT_MEMORY_PROMPT,
+        prompt_version="patch-prompt/3",
+        max_output_tokens=1,
+    )
+    try:
+        backend.generate(request)
+    except GatewayError as exc:
+        return False, str(exc), dict(exc.details)
+    return True, f"{args.model} loaded and generated inside the configured memory limit", {}
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     service_names = _service_names(args)
     payload: dict[str, object] = {
@@ -571,6 +619,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "endpoint_reachable": False,
             "model_present": False,
             "schema_probe_passed": False,
+            # `None` = not checked (the default; see `--check-memory`'s help text),
+            # distinct from `True`/`False` = checked and passed/failed.
+            "model_fits_memory": None,
         },
         "status": "unreachable",
         "message": "",
@@ -598,6 +649,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "endpoint_reachable": True,
         "model_present": present,
         "schema_probe_passed": False,
+        "model_fits_memory": None,
     }
     payload["ollama_models"] = models
     if not present:
@@ -606,8 +658,28 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         _write_json(payload, args.output)
         return EXIT_BLOCKED
 
+    if args.check_memory:
+        fits, message, details = _run_memory_check(args)
+        payload["checks"]["model_fits_memory"] = fits
+        if not fits:
+            payload["status"] = "insufficient-memory"
+            payload["message"] = message
+            payload["memory_check_detail"] = details
+            payload["degraded_state"] = {
+                "active": True,
+                "tier": "deterministic",
+                "reason": f"{args.model} does not fit in the model-host container's "
+                "actual memory — see 'message' and 'memory_check_detail' for the "
+                "specific amounts and what to check (MODEL_HOST_MEM_LIMIT vs. the "
+                "model's real requirement).",
+            }
+            _write_json(payload, args.output)
+            return EXIT_BLOCKED
+
     payload["status"] = "ready"
     payload["message"] = f"{args.model} is present on the local Ollama endpoint"
+    if args.check_memory:
+        payload["message"] += " and fits in the model-host container's actual memory"
     payload["degraded_state"] = {
         "active": False,
         "tier": "local-codellama",
@@ -635,6 +707,21 @@ def _cmd_plan(args: argparse.Namespace) -> int:
                 f"--endpoint {DEFAULT_OLLAMA_ENDPOINT} --output {root}/model-doctor.json",
                 "   python -m gateway.tools.model_prep check-serving --endpoint "
                 f"{DEFAULT_OLLAMA_ENDPOINT} --output {root}/model-serving.json",
+                "",
+                "2b. #298: before trusting this model host for a real mission (a demo,",
+                "    a competition run — anything where a mid-mission model failure is",
+                "    expensive to discover), also run doctor's real memory pre-flight.",
+                "    This is the ONLY way to trigger Ollama's own memory check ahead of",
+                "    time: it makes one real, minimal generation call, so it costs a cold",
+                "    model load (~60-190s observed) and is not part of step 2's fast",
+                "    reachability check by default.",
+                "   python -m gateway.tools.model_prep doctor --check-memory "
+                f"--endpoint {DEFAULT_OLLAMA_ENDPOINT} --output {root}/model-doctor.json",
+                "    A clear, actionable 'insufficient-memory' status here (not a bare",
+                "    HTTP 500 mid-mission) means the model needs more memory than",
+                "    MODEL_HOST_MEM_LIMIT actually gives it on THIS machine — a capacity",
+                "    decision for whoever owns the hardware this runs on, not something",
+                "    this command can fix by itself.",
                 "",
                 "3. Measure first-token latency and schema-fit through local Ollama:",
                 "   python -m gateway.tools.model_prep measure --backend ollama "
@@ -684,6 +771,33 @@ def build_parser() -> argparse.ArgumentParser:
     # D-075 / SEC-50: required to reach the compose model-host-auth sidecar; not
     # required for a bare loopback `ollama serve`. Defaults from MODEL_HOST_BEARER_TOKEN.
     doctor.add_argument("--bearer-token", default=None)
+    # #298: opt-in (see `_run_memory_check`'s comment for why this is not the
+    # default) real generation call that forces Ollama to attempt loading the model
+    # into memory, so a real capacity refusal ("model requires more system memory ...
+    # than is available") is caught here — before a competition mission ever depends
+    # on this model host — instead of mid-PATCH_GENERATE.
+    doctor.add_argument(
+        "--check-memory",
+        action="store_true",
+        help=(
+            "Also make one real, minimal generation call to force Ollama's own "
+            "memory check to run now. Off by default: unlike the checks above, this "
+            "has a real cost (a cold model load, ~60-190s observed) and a real "
+            "side effect (loads the model into memory). Run this explicitly before "
+            "a competition mission depends on this model host, not on every routine "
+            "reachability check."
+        ),
+    )
+    doctor.add_argument(
+        "--memory-check-timeout-sec",
+        type=float,
+        default=DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+        help="Timeout for --check-memory's generation call, separate from "
+        "--timeout-sec's fast reachability-check timeout above (default: "
+        f"{DEFAULT_OLLAMA_TIMEOUT_SECONDS:.0f}s, matching the real PATCH_GENERATE "
+        "call's own default so this check does not time out before a real cold "
+        "model load would).",
+    )
     measure = sub.add_parser("measure", help="measure local backend latency evidence")
     measure.add_argument("--backend", choices=["fake", "openai-compatible", "ollama"], required=True)
     measure.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
