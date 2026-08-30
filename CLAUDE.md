@@ -56,7 +56,7 @@ places — this table wins, and that document gets reconciled in issue #9.
 | Live updates | Server-sent events over ASGI; WebSocket only for true bidirectional needs |
 | Persistence | Django ORM + migrations against PostgreSQL |
 | Orchestration | Explicit persistent state machine |
-| Queue | Redis (RQ/Celery) or DB-backed |
+| Queue | Postgres-backed, no broker — one `Job` table, `SELECT ... FOR UPDATE SKIP LOCKED` (Redis runs in the compose stack but is currently unused by the orchestrator) |
 | Isolation | Rootless Docker/Podman |
 | Static analysis | Semgrep, compiler warnings |
 | Dynamic analysis | libFuzzer, ASan/UBSan |
