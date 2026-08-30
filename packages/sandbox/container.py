@@ -393,7 +393,23 @@ class ContainerJail:
         parent: Path | None = None,
         mission_ref: str = "unlabelled",
     ) -> ContainerJail:
-        root = Path(tempfile.mkdtemp(prefix="brahmadatta-sandbox-", dir=parent))
+        # #303: `.resolve()` unconditionally, not just when a caller happens to pass
+        # an already-resolved `parent=`. `tempfile.mkdtemp()` with no `parent=` uses
+        # `tempfile.gettempdir()`, which on macOS returns an UNRESOLVED
+        # `/var/folders/...` path that is actually a symlink to
+        # `/private/var/folders/...`. `ContainerJailRunner._translate()`
+        # (`packages/sandbox/container_runner.py`) later compares `self._jail.root`
+        # against argv values built by callers (e.g. `adapters/cpp/detect.py::detect()`)
+        # that DO call `.resolve()` on their own paths — an unresolved `self._root`
+        # stored here makes that prefix match silently fail, so a host path never gets
+        # rewritten to `/workspace` and the container sees a path that does not exist
+        # inside it (`CMake Error: source directory does not exist`). Resolving here,
+        # once, means every caller gets a canonical path back regardless of whether it
+        # passed its own pre-resolved `parent=` — `workers/baseline/run.py` happened to
+        # dodge this bug already by resolving `workspace_root` before passing it as
+        # `parent=`, but that was incidental, not a contract this method previously
+        # upheld for every caller.
+        root = Path(tempfile.mkdtemp(prefix="brahmadatta-sandbox-", dir=parent)).resolve()
         # 0o700 (jail.py's choice) is wrong here: that jail runs its command as the
         # SAME uid as the orchestrator, so only the owner ever needs access. This
         # container runs as `policy.uid`, a *different*, fixed uid — bind-mounting a

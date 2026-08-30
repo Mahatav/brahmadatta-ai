@@ -18883,3 +18883,71 @@ new `F811` in `workers/fuzzing/tests/test_cli_real.py`.
 **Final approval authority** — cybersecurity (security verdict, this role's own
 standing authority per CLAUDE.md).
 
+---
+
+## D-169 · `ContainerJail.create()` resolves its own tempdir (#303) · 2026-08-30 · Backend developer
+
+**Decision** — `ContainerJail.create()` (`packages/sandbox/container.py`) now calls
+`.resolve()` on the directory `tempfile.mkdtemp()` returns, unconditionally, instead of
+storing whatever string `mkdtemp()` handed back.
+
+**Options considered**
+1. Resolve inside `ContainerJail.create()` itself (chosen).
+2. Require every caller of `ContainerJail.create()`/`ContainerJailRunner.create()` to
+   pass an already-resolved `parent=`, and document the requirement.
+3. Resolve later, inside `ContainerJailRunner._translate()`, on both sides of the
+   comparison at call time instead of once at creation time.
+
+**Pros and cons**
+1. Fixes the bug exactly once, at the one place a mismatched path can originate; every
+   current and future caller (`workers/baseline/run.py`, any direct `run_variant`/
+   `ContainerJailRunner` caller, tests) gets a canonical `root` for free, with no
+   caller-side discipline to remember or audit. Con: none identified — `.resolve()` on
+   a directory this method just created is cheap and cannot fail in a way `mkdtemp`
+   itself wouldn't already have raised on.
+2. Keeps the bug's blast radius open to every future caller that forgets the
+   convention — `workers/baseline/run.py` only avoided it by an incidental resolve of
+   `workspace_root`, not a documented contract; the issue itself flags this as the
+   actual failure mode (a direct caller "without an already-resolved `parent=`").
+   Rejected: relies on caller discipline for a correctness property the callee can
+   guarantee unconditionally.
+3. Would fix `_translate()`'s one call site but leaves `ContainerJail.root` itself
+   inconsistent with what `sandbox.root` is documented to return, and would need the
+   same `.resolve()` call repeated at every comparison site rather than once. Rejected:
+   more surface area for the same one-line omission to recur.
+
+**Cost implications** — none; `.resolve()` on a just-created local directory is a cheap
+syscall (`realpath`), not a network or model call.
+
+**Security implications** — none. This is a path-handling correctness fix inside the
+sandbox module's non-hardening surface — D-024's isolation flags (`--network none`,
+`--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`, fixed non-root
+`--user`, no Docker-socket mount) are untouched by this diff, confirmed by direct code
+review of `_docker_run_args`. Before the fix, the practical failure mode was a
+functional break (`CMake Error: source directory does not exist`), not a boundary
+weakening — the untranslated host path was still bind-mounted read-write at
+`/workspace` exactly as before, just under the wrong container-relative name in argv.
+
+**Scalability implications** — none.
+
+**Recommendation** — merged as implemented. Regression test added at
+`packages/sandbox/tests/test_container_runner.py`, covering `ContainerJail.create()`
+resolving its own tempdir with no `parent=` passed, and
+`ContainerJailRunner._translate()` correctly matching a caller-resolved path against
+that root — both confirmed to fail against pre-fix code (via `git stash`) and pass
+against the fix, so the tests are a real regression check rather than a tautology.
+Full `packages/sandbox/tests` (76 passed, 3 skipped — the skips are pre-existing,
+platform-specific `jail.py` cases unrelated to this change), `adapters/cpp/tests` (91
+passed, 1 skipped — pre-existing, needs a live ASan-capable jail policy), and
+`workers/baseline/tests` (11 passed, 1 skipped) all green after the change.
+
+**Final approval authority** — backend developer, self-merge authority per this task's
+explicit dispatch instructions (path-handling correctness inside the sandbox module,
+not a change to the isolation boundary's hardening). Note for the record: CLAUDE.md's
+general rule requires a `cybersecurity` review on any change touching "isolation,
+sandboxing" before merge, with no explicit carve-out for non-hardening changes inside
+those modules; the dispatching instructions for this specific fix explicitly granted
+self-merge authority on the stated grounds that the isolation flags themselves
+(network/cap-drop/user/read-only) are untouched. Recorded here rather than silently
+reconciled, so `cybersecurity`/`cto` can flag it if that scoping call was wrong.
+
