@@ -439,6 +439,47 @@ jobs:
           docker compose -f infrastructure/compose/docker-compose.finale.yml config --quiet
           echo "finale profile: config OK"
 
+      # #299 regression check. The step above proves the compose FILES are well-formed;
+      # it says nothing about whether .env.example — the actual thing a human (or
+      # finale-up.sh's own preflight) reads to write a real `.env` — documents values
+      # that are sufficient to pass `docker compose config` at all. It does not
+      # supply its own values the way the step above does; it feeds `.env.example`
+      # straight to `--env-file`, unmodified, the same way finale-up.sh's real
+      # `--env-file "${REPO_ROOT}/.env"` would if `.env` were an unedited copy of the
+      # example. #299 was exactly this: REDIS_PASSWORD shipped blank in .env.example
+      # (bash/Compose's `:?` treats an empty value as unset, same as missing entirely),
+      # so `docker compose config` failed before finale-up.sh's own image-preflight step
+      # was ever reached — and the step above never caught it, because it supplies
+      # REDIS_PASSWORD/REDIS_URL itself rather than reading them from .env.example.
+      #
+      # `--profile worker`, not bare `config`: matches finale-up.sh's actual invocation
+      # (`finale_profiles=(--profile worker)` by default) rather than testing a
+      # combination finale-up.sh itself never runs.
+      #
+      # MODEL_HOST_BEARER_TOKEN is the one deliberate override below, not a value read
+      # from .env.example: `docker compose config` interpolates every service's
+      # environment regardless of which `--profile` is active (see the step above's own
+      # comment on this), so model-host-auth's `:?`-guarded token is evaluated here even
+      # though `--profile model` is never requested. .env.example leaves it blank on
+      # purpose — SEC-50/D-075's documented fail-closed default for the dev profile's
+      # otherwise-unauthenticated `--profile model` path — and flipping that default to
+      # a placeholder the way REDIS_PASSWORD's fix below does would trade that fail-closed
+      # guarantee for fail-OPEN-with-a-known-value in dev, since dev-up.sh only warns
+      # about a placeholder left in place rather than refusing to start the way
+      # finale-up.sh does. That is a security-relevant default, not a devops one, so it
+      # is a CI-only override here (matching the step above's own pattern for it),
+      # tracked separately rather than folded into #299's own fix. See #299's PR
+      # discussion / the follow-up issue it links for that still-open item.
+      - name: docker compose config passes using ONLY what .env.example documents (finale, #299)
+        env:
+          MODEL_HOST_BEARER_TOKEN: "ci-only-not-a-real-token-see-this-step's-own-comment"
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example -f infrastructure/compose/docker-compose.yml config --quiet
+          echo "dev profile: .env.example alone is sufficient"
+          docker compose --env-file .env.example -f infrastructure/compose/docker-compose.finale.yml --profile worker config --quiet
+          echo "finale profile (--profile worker, finale-up.sh's real invocation): .env.example alone is sufficient"
+
       # #114. Four cases, two of them an injected violation that must fail — see the
       # comment block at the top of infrastructure/scripts/smoke-sse.sh.
       - name: SSE survives the proxy

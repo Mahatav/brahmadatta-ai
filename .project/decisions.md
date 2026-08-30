@@ -18951,3 +18951,108 @@ self-merge authority on the stated grounds that the isolation flags themselves
 (network/cap-drop/user/read-only) are untouched. Recorded here rather than silently
 reconciled, so `cybersecurity`/`cto` can flag it if that scoping call was wrong.
 
+---
+
+## D-170
+
+**Decision** — Fix #299 (`docker compose config` against `docker-compose.finale.yml`
+fails outright because `REDIS_PASSWORD` is unset) by giving `REDIS_PASSWORD` a real
+placeholder in `.env.example`, matching the same convention every other finale-required
+secret in that file already uses (`DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`,
+`CONTROL_API_OPERATOR_TOKEN`), rather than auto-generating it inside `finale-up.sh`.
+
+**Root cause** — `.env.example` DID document `REDIS_PASSWORD` (the finding's own "check
+whether `.env.example` documents this at all" question) — but with `REDIS_PASSWORD=`
+(blank), commented "Finale only; the dev redis has no password." That comment is true for
+dev (`docker-compose.yml`'s redis never runs `--requirepass`, so the variable is simply
+unused there) but `docker-compose.finale.yml`'s redis service requires it (`:?`) and
+starts with `--requirepass "$REDIS_PASSWORD"`. Bash/Compose's `:?` operator treats an
+empty string identically to unset, so a blank default is not "documented but reasonably
+deferred," it is exactly as broken as an absent key — `docker compose config` failed
+before `finale-up.sh`'s own image-preflight step was ever reached, so the finale profile
+had never actually been verified to start end-to-end (as distinct from the dev profile,
+verified working this session).
+
+A second, distinct instance of the same failure mode was found and fixed alongside it:
+`REDIS_URL`'s own `.env.example` default (`redis://redis:6379/0`, correct for dev) is
+non-empty, so it silently satisfies finale's own `:?` guard on `REDIS_URL` too, while
+carrying no auth — control-api/worker would have passed `docker compose config` and then
+failed to authenticate against a finale redis that demands a password. Confirmed live:
+after generating a real `REDIS_PASSWORD` but leaving `REDIS_URL` in its unauthenticated
+dev form, `docker compose config` still passes and the stack still starts, but this is
+the wrong verification to stop at — running the actual stack end-to-end is what caught
+it. Fixed by documenting, in `.env.example`, that `REDIS_URL` must be updated to embed
+the same value (`redis://:<value>@redis:6379/0`) alongside `REDIS_PASSWORD`, the same
+two-variables-must-agree pattern `DATABASE_URL`/`POSTGRES_PASSWORD` already use.
+
+**A third, related-but-distinct gap was found and deliberately NOT fixed in this PR**:
+`docker-compose.finale.yml`'s `model-host-auth` service also requires
+`MODEL_HOST_BEARER_TOKEN` (`:?`) at `docker compose config` resolution time, and Compose
+evaluates every service's environment regardless of which `--profile` is active — so this
+blocks `docker compose config` (and therefore `finale-up.sh`) exactly like #299 did,
+independently of whether `--profile model` is ever requested. Confirmed empirically:
+`docker compose --env-file .env.example -f docker-compose.finale.yml config --quiet`
+fails on `MODEL_HOST_BEARER_TOKEN`, even with `--profile worker` (finale-up.sh's real
+default). Unlike `REDIS_PASSWORD`, `.env.example` leaving this blank is a **documented,
+deliberate security default** (SEC-50/D-075: "unset = fails closed" for the dev profile's
+`--profile model` path — there is no bypass in `model-host-auth`'s nginx conf for a blank
+token, so a blank value means that path is up but unusable rather than reachable with a
+guessable default). Giving it the same `REPLACE_ME`-style placeholder `REDIS_PASSWORD`
+got would flip that guarantee to fail-*open*-with-a-known-value in dev for anyone who
+runs `--profile model` there without customizing it first, since `dev-up.sh` only warns
+about a leftover placeholder rather than refusing to start the way `finale-up.sh` does.
+That is a security-relevant default change, not a deployment-config one — flagged for
+cybersecurity review and a separate follow-up issue rather than folded into this fix.
+Verification of the actual fix (below) used a CI/test-only override for this one variable
+instead of a `.env.example` change, so this gap did not block confirming #299 itself end
+to end.
+
+**Options considered**
+1. Fix `REDIS_PASSWORD` only, leave `REDIS_URL` alone. — Rejected: passes `docker compose
+   config` but fails to actually connect once the stack is up; #299 explicitly asked for
+   the stack to be verified running, not just configuration-valid.
+2. Auto-generate `REDIS_PASSWORD` inside `finale-up.sh` (the `gen-dev-certs.sh` /
+   `gen-postgres-cert.sh` precedent for TLS material). — Rejected: `.env.example`'s own
+   header states the finale injection mechanism is "`.env` written on the box by hand
+   from a password manager ... not generated" — TLS material is non-secret and freely
+   regenerable; `REDIS_PASSWORD` is a real credential this repo's own documented
+   convention says must come from a password manager, same as every other finale secret.
+   Auto-generating one secret via a different mechanism than its neighbors is a
+   consistency and audit-trail regression, not a simplification.
+3. **Chosen**: give `REDIS_PASSWORD` (and `REDIS_URL`'s guidance) the same
+   `REPLACE_ME`-placeholder convention every other finale-required secret in
+   `.env.example` already uses, so `finale-up.sh`'s own placeholder-scan preflight
+   actually catches an unedited copy, the way it already does for
+   `DJANGO_SECRET_KEY`/`POSTGRES_PASSWORD`/`CONTROL_API_OPERATOR_TOKEN`.
+
+**Pros and cons** — Pro: zero behavior change for dev (the dev redis never reads
+`REDIS_PASSWORD` at all, and `dev-up.sh` only warns, never blocks, on a leftover
+placeholder); `finale-up.sh`'s existing hard-fail-on-placeholder preflight now does what
+its own error message already claimed. Con: does not close the `MODEL_HOST_BEARER_TOKEN`
+gap found alongside it — deliberate, per the security reasoning above, not an oversight.
+
+**Cost implications** — none.
+
+**Security implications** — none for `REDIS_PASSWORD`/`REDIS_URL`: no default credential
+is introduced (finale-up.sh hard-fails on the placeholder text remaining, so the
+placeholder can never reach a running container), and redis's own `--requirepass`
+enforcement is unchanged and independently confirmed still active (`redis-cli ping`
+without auth → `NOAUTH`; with the real password → `PONG`, verified live in the running
+finale stack this session). The `MODEL_HOST_BEARER_TOKEN` finding is flagged, not fixed,
+specifically because it has a real security dimension (see above) — routed to
+cybersecurity rather than decided unilaterally here.
+
+**Scalability implications** — none.
+
+**Recommendation** — Merge the `REDIS_PASSWORD`/`REDIS_URL` fix and the new CI regression
+check now (self-merge authority, deployment-configuration fix per this role's scope).
+Open a separate, scoped follow-up issue for `MODEL_HOST_BEARER_TOKEN`'s `docker compose
+config`-time requirement regardless of active profile, for cybersecurity + devops to
+decide whether the right fix is a placeholder (accepting the fail-closed-to-fail-open
+tradeoff with a hardened `dev-up.sh` check to compensate) or a compose-structural change
+(e.g. splitting `model-host-auth` out of the profile-independent config-resolution path).
+
+**Final approval authority** — devops (this fix, standing self-merge authority for
+deployment-configuration changes per CLAUDE.md); CTO/cybersecurity for the
+`MODEL_HOST_BEARER_TOKEN` follow-up specifically, since that one has a real security
+dimension this fix does not resolve.
